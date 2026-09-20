@@ -17,8 +17,9 @@ Three bind-mounted files inside vLLM's KV machinery:
 > **`MNT-5`**. The grep documented for surfacing the cap is unchanged:
 > `docker logs <container> | grep "protected prompt block cap"`.
 
-Retention numbers and the `PROTECTED_FRACTION` tuning table live in `PREFIX-CACHE.md`, next to the
-rest of the cache evidence.
+Retention numbers and the `PROTECTED_FRACTION` tuning table live in
+[`PREFIX-CACHE.md`](PREFIX-CACHE.md), next to the rest of the cache evidence. One-line summaries,
+kill switches and rollbacks: [`PATCH-REGISTRY.md`](PATCH-REGISTRY.md).
 
 > Moved verbatim from `CLAUDE.md` and `STATUS.md` during the 2026-09-20 doc split. Where a line was found stale
 > on the way across it was corrected in place and the correction is marked **CORRECTED**.
@@ -58,17 +59,24 @@ sandbox dir and run the patch with `VLLM_PYTHON_DIR=<sandbox>` (zero cluster ris
 | --- | --- | --- |
 | `01-reffix` | `tokenizers/deepseek_v4_encoding.py` | **Skip.** Despite the name it is reasoning-effort prompt tiers, nothing to do with caching. |
 | `02-schedfix` | `v1/core/sched/scheduler.py` | **Deferred; the bug is real.** `max_num_partial_prefills` appears ONLY in `engine/arg_utils.py` and `config/scheduler.py` — never read by any scheduler code, so `--max-num-partial-prefills` is a **no-op** on our build. Porting needs new scheduler state (`_inflight_prefills`) with a correct add/remove lifecycle; issue-#43 A3 additionally needs `next_decode_eligible_step`, `current_step`, `defer_prefills` which we lack (0 occurrences each). Likely inert anyway: KV capacity gates admission to 1-3 concurrent long-context requests, below their `min(cap, 3)` ceiling. |
-| `03-dedupe` | `v1/core/block_pool.py` | **PORTED as Patch 7.** Our `CachedBlockHashToBlock.insert()` explicitly merges a duplicate `(hash, group)` into a dict while lookups return only one, so stale copies hold LRU slots forever. 14-line guard; **3.9x retention** (72,109 → 280,690 tokens), needle 5/5, no throughput cost. |
-| `04-boundfix` | `single_type_kv_cache_manager.py` + `kv_cache_coordinator.py` | **Not applicable.** It fixes *sparse retention*, which our fork does not have: `reachable_block_mask`, `retention_interval`, `scheduler_block_size`, `_swa_anchor_slack`, `eagle_slack` are **0 occurrences** in our tree. Nothing to port onto. (It does *not* conflict with Patch 6 as first feared — Patch 6 touches `__init__`, `allocate_new_blocks`, `take_new_block_ids`, `free`, `remove_skipped_blocks`; boundfix targets `cache_blocks`.) |
+| `03-dedupe` | `v1/core/block_pool.py` | **PORTED as `MNT-7`.** Our `CachedBlockHashToBlock.insert()` explicitly merges a duplicate `(hash, group)` into a dict while lookups return only one, so stale copies hold LRU slots forever. 14-line guard; **3.9x retention** (72,109 → 280,690 tokens), needle 5/5, no throughput cost. |
+| `04-boundfix` | `single_type_kv_cache_manager.py` + `kv_cache_coordinator.py` | **Not applicable.** It fixes *sparse retention*, which our fork does not have: `reachable_block_mask`, `retention_interval`, `scheduler_block_size`, `_swa_anchor_slack`, `eagle_slack` are **0 occurrences** in our tree. Nothing to port onto. (It does *not* conflict with `MNT-6b` as first feared — `MNT-6b` touches `__init__`, `allocate_new_blocks`, `take_new_block_ids`, `free`, `remove_skipped_blocks`; boundfix targets `cache_blocks`.) |
 
-**Patch 6 was investigated and exonerated.** Its `_maybe_evict_cached_block()` call on recycled
+**`MNT-6b` was investigated and exonerated.** Its `_maybe_evict_cached_block()` call on recycled
 pages looked like a retention leak, but it is correct hygiene: only `ref_cnt == 1` pages (held
 solely by that request) are recycled, and their stale hash mapping must be dropped because the page
 is about to be overwritten. The recycling exists to *protect* other requests' prefixes from global
 LRU churn. Do not disable `VLLM_SWA_RECYCLE_SKIPPED_BLOCKS` expecting better retention.
 
-**Rollback baseline:** `local-ops/baseline-20260914/` holds `MANIFEST.txt` (image id
-`sha256:4035bb5a…`, config, file hashes, mounts, boot metrics) and `pristine-vllm-files.tgz`
-(unpatched copies of all five candidate files, pulled from the image with
-`docker run --rm --entrypoint cat <image> <path>` — note that reading through a bind-mount gives
-you the *patched* file, not the original).
+**Unpatched sources** are tracked at `patches/pristine/`, and `patches/generated/*.patch` is our
+delta against them — that is what to read when assessing an upstream patch, and it needs no cluster
+access. Regenerate with `bash scripts/regen-local-patches.sh`.
+
+**Rollback baseline:** `local-ops/baseline-20260914/` is a separate, older snapshot kept as a
+rollback point — `MANIFEST.txt` (image id `sha256:4035bb5a…`, config, file hashes, mounts, boot
+metrics) plus `pristine-vllm-files.tgz`.
+
+> **Always re-pull a pristine file with `docker run --rm --entrypoint cat <image> <path>`.**
+> Reading through a bind-mount gives you the *patched* file, not the original — that is how
+> `local-ops/baseline-20260914/MISLABELLED-was-patched-single_type_kv_cache_manager.py` came to be
+> filed as pristine for five days.
