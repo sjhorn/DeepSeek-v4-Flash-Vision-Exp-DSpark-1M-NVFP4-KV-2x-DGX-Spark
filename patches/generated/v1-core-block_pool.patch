@@ -1,6 +1,6 @@
 --- a/vllm/v1/core/block_pool.py
 +++ b/vllm/v1/core/block_pool.py
-@@ -278,6 +278,20 @@
+@@ -278,6 +278,20 @@ class BlockPool:
                  block_hash, kv_cache_group_id
              )
              blk.block_hash = block_hash_with_group_id

@@ -13,12 +13,12 @@
  from vllm.utils.math_utils import cdiv
  from vllm.v1.core.block_pool import BlockPool
  from vllm.v1.core.kv_cache_utils import (
-@@ -27,8 +29,31 @@
+@@ -27,8 +29,31 @@ from vllm.v1.kv_cache_interface import (
  )
  from vllm.v1.request import Request
  
 +logger = init_logger(__name__)
- 
++
 +# MNT-6a (2026-09-06, logged as "Patch 5" before 2026-09-20): bound the prompt-block
 +# protection set.  NOT the detokenizer patch -- that is MNT-5.  See
 +# docs/local/PATCH-REGISTRY.md.
@@ -39,13 +39,13 @@
 +_RECYCLE_ENV = "VLLM_SWA_RECYCLE_SKIPPED_BLOCKS"
 +_RECYCLE_ENABLED = os.environ.get(_RECYCLE_ENV, "1").strip() not in ("0", "false", "False", "")
 +
-+
+ 
  class SingleTypeKVCacheManager(ABC):
 +    _num_managers: int = 0  # MNT-6a: managers share one block pool
      """
      An abstract base class for a manager that handle the kv cache management
      logic of one specific type of attention layer.
-@@ -86,6 +111,12 @@
+@@ -86,6 +111,12 @@ class SingleTypeKVCacheManager(ABC):
          self._null_block = block_pool.null_block
          self._protected_prompt_block_ids: set[int] = set()
          self._protected_prompt_block_queue: deque[int] = deque()
@@ -58,7 +58,7 @@
  
      @classmethod
      def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
-@@ -268,7 +299,19 @@
+@@ -268,7 +299,19 @@ class SingleTypeKVCacheManager(ABC):
          if num_new_blocks <= 0:
              return []
          else:
@@ -79,7 +79,7 @@
              req_blocks.extend(new_blocks)
              if type(self.kv_cache_spec) in (FullAttentionSpec, TQFullAttentionSpec):
                  self.new_block_ids.extend(b.block_id for b in new_blocks)
-@@ -281,9 +324,27 @@
+@@ -281,9 +324,27 @@ class SingleTypeKVCacheManager(ABC):
          return ids
  
      def _max_protected_prompt_blocks(self) -> int | None:
@@ -110,7 +110,7 @@
  
      def _protect_prompt_blocks(self, blocks: Sequence[KVCacheBlock]) -> None:
          if not self.enable_caching:
-@@ -429,6 +490,9 @@
+@@ -429,6 +490,9 @@ class SingleTypeKVCacheManager(ABC):
  
          self.block_pool.free_blocks(ordered_blocks)
          self.num_cached_block.pop(request_id, None)
@@ -120,7 +120,7 @@
  
      @abstractmethod
      def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-@@ -536,7 +600,28 @@
+@@ -536,7 +600,28 @@ class SingleTypeKVCacheManager(ABC):
                  break
              removed_blocks.append(blocks[i])
              blocks[i] = self._null_block

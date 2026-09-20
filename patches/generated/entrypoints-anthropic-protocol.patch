@@ -34,7 +34,7 @@
  import time
  from typing import Any, Literal
  
-@@ -29,6 +56,15 @@
+@@ -29,6 +56,15 @@ class AnthropicUsage(BaseModel):
      output_tokens: int
      cache_creation_input_tokens: int | None = None
      cache_read_input_tokens: int | None = None
@@ -50,7 +50,7 @@
  
  
  class AnthropicContentBlock(BaseModel):
-@@ -42,6 +78,10 @@
+@@ -42,6 +78,10 @@ class AnthropicContentBlock(BaseModel):
          "tool_reference",
          "thinking",
          "redacted_thinking",
@@ -61,7 +61,7 @@
      ]
      text: str | None = None
      # For image content
-@@ -65,21 +105,25 @@
+@@ -65,21 +105,25 @@ class AnthropicContentBlock(BaseModel):
  class AnthropicMessage(BaseModel):
      """Message structure"""
  
@@ -89,7 +89,7 @@
          if not isinstance(v, dict):
              raise ValueError("input_schema must be a dictionary")
          if "type" not in v:
-@@ -129,6 +173,17 @@
+@@ -129,6 +173,17 @@ class AnthropicMessagesRequest(BaseModel):
          ),
      )
  

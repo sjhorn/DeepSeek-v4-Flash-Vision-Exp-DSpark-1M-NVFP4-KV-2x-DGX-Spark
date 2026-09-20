@@ -54,12 +54,12 @@
  
  from fastapi import Request
  
-@@ -48,11 +89,906 @@
+@@ -48,11 +89,906 @@ if TYPE_CHECKING:
  
  logger = logging.getLogger(__name__)
  
 +_SERVER_SIDE_TOOL_NAMES = {"web_search", "web_fetch"}
- 
++
 +# Identify server-side search/fetch tools WITHOUT hijacking the client's
 +# capitalised harness tools (WebSearch, WebFetch).  Claude Code sends
 +# tools in several shapes:
@@ -708,11 +708,11 @@
 +    except (URLError, OSError) as e:
 +        return f"Error fetching URL: {e}"
 +
-+
+ 
  def wrap_data_with_event(data: str, event: str):
      return f"event: {event}\ndata: {data}\n\n"
-+
-+
+ 
+ 
 +# ===== API-14: surface the engine's own num_cached_tokens on the response ===
 +# why: every external instrument we had could see that a turn re-prefilled but
 +#      not by how much.  /metrics is engine-wide, so nothing attributes a stall
@@ -785,11 +785,11 @@
 +_STICKY_TOOLS = os.environ.get("STICKY_TOOLS", "1") != "0"
 +_STICKY_TTL_S = float(os.environ.get("STICKY_TOOLS_TTL", "3600"))
 +_STICKY_MAX_CONVS = 512
- 
++
 +# conv_key -> {"ts": float, "tools": {name: ChatCompletionToolsParam}}
 +_STICKY_STORE: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 +_STICKY_LOCK = threading.Lock()
- 
++
 +
 +def sticky_conversation_key(anthropic_request) -> str | None:
 +    """Identify the conversation from content the client does not vary.
@@ -961,7 +961,7 @@
  class AnthropicServingMessages(OpenAIServingChat):
      """Handler for Anthropic Messages API requests"""
  
-@@ -90,6 +1026,23 @@
+@@ -90,6 +1026,23 @@ class AnthropicServingMessages(OpenAIServingChat):
              enable_force_include_usage=enable_force_include_usage,
              default_chat_template_kwargs=default_chat_template_kwargs,
          )
@@ -985,7 +985,7 @@
          self.stop_reason_map = {
              "stop": "end_turn",
              "length": "max_tokens",
-@@ -130,6 +1083,10 @@
+@@ -130,6 +1083,10 @@ class AnthropicServingMessages(OpenAIServingChat):
          cls._handle_streaming_options(req, anthropic_request)
          cls._convert_tool_choice(anthropic_request, req)
          cls._convert_tools(anthropic_request, req)
@@ -996,7 +996,7 @@
          return req
  
      @classmethod
-@@ -139,40 +1096,92 @@
+@@ -139,40 +1096,92 @@ class AnthropicServingMessages(OpenAIServingChat):
          openai_messages: list[dict[str, Any]],
      ) -> None:
          """Convert Anthropic system message to OpenAI format"""
@@ -1030,7 +1030,7 @@
 +                        if block.text.startswith("x-anthropic-billing-header"):
 +                            continue
 +                        system_parts.append(block.text)
- 
++
 +        # PATCH 11b: only the LEADING run of system messages is hoisted here.
 +        # Later ones are per-turn reminders; _convert_messages folds them into
 +        # the following user turn so they land at the END of the prompt instead
@@ -1047,7 +1047,7 @@
 +                "role": "system",
 +                "content": normalize_system_prompt(raw_system),
 +            })
-+
+ 
      @classmethod
      def _convert_messages(
          cls, messages: list, openai_messages: list[dict[str, Any]]
@@ -1107,7 +1107,7 @@
      @classmethod
      def _convert_message_content(
          cls,
-@@ -221,7 +1230,12 @@
+@@ -221,7 +1230,12 @@ class AnthropicServingMessages(OpenAIServingChat):
      ) -> None:
          """Convert individual content block"""
          if block.type == "text" and block.text:
@@ -1121,7 +1121,7 @@
          elif block.type == "image" and block.source:
              image_url = cls._convert_image_source_to_url(block.source)
              content_parts.append({"type": "image_url", "image_url": {"url": image_url}})
-@@ -241,6 +1255,12 @@
+@@ -241,6 +1255,12 @@ class AnthropicServingMessages(OpenAIServingChat):
              # Tool references are expanded during tool_result processing
              # when they appear inside tool_result content.
              pass
@@ -1134,7 +1134,7 @@
  
      @classmethod
      def _convert_tool_use_block(cls, block, tool_calls: list[dict[str, Any]]) -> None:
-@@ -339,11 +1359,28 @@
+@@ -339,11 +1359,28 @@ class AnthropicServingMessages(OpenAIServingChat):
          openai_messages: list[dict[str, Any]],
      ) -> ChatCompletionRequest:
          """Build base ChatCompletionRequest"""
@@ -1164,7 +1164,7 @@
              )
  
          return ChatCompletionRequest(
-@@ -356,7 +1393,7 @@
+@@ -356,7 +1393,7 @@ class AnthropicServingMessages(OpenAIServingChat):
              top_p=anthropic_request.top_p,
              top_k=anthropic_request.top_k,
              kv_transfer_params=anthropic_request.kv_transfer_params,
@@ -1173,7 +1173,7 @@
          )
  
      @classmethod
-@@ -393,10 +1430,17 @@
+@@ -393,10 +1430,17 @@ class AnthropicServingMessages(OpenAIServingChat):
          elif tool_choice_type == "none":
              req.tool_choice = "none"
          elif tool_choice_type == "tool":
@@ -1192,7 +1192,7 @@
                  }
              )
  
-@@ -412,6 +1456,42 @@
+@@ -412,6 +1456,42 @@ class AnthropicServingMessages(OpenAIServingChat):
  
          tools = []
          for tool in anthropic_request.tools:
@@ -1235,7 +1235,7 @@
              tools.append(
                  ChatCompletionToolsParam.model_validate(
                      {
-@@ -428,8 +1508,158 @@
+@@ -428,8 +1508,158 @@ class AnthropicServingMessages(OpenAIServingChat):
  
          if req.tool_choice is None:
              req.tool_choice = "auto"
@@ -1394,14 +1394,17 @@
      async def create_messages(
          self,
          request: AnthropicMessagesRequest,
-@@ -446,27 +1676,207 @@
+@@ -446,27 +1676,207 @@ class AnthropicServingMessages(OpenAIServingChat):
          chat_req = self._convert_anthropic_to_openai_request(request)
          if logger.isEnabledFor(logging.DEBUG):
              logger.debug("Convert to OpenAI request %s", chat_req.model_dump_json())
 -        generator = await self.create_chat_completion(chat_req, raw_request)
- 
+-
 -        if isinstance(generator, ErrorResponse):
 -            return generator
+ 
+-        elif isinstance(generator, ChatCompletionResponse):
+-            return self.messages_full_converter(generator)
 +        # Detect server-side tools in this request.
 +        has_server_tools = False
 +        if request.tools:
@@ -1409,9 +1412,7 @@
 +                if _is_any_server_tool(tool.name, tool.type):
 +                    has_server_tools = True
 +                    break
- 
--        elif isinstance(generator, ChatCompletionResponse):
--            return self.messages_full_converter(generator)
++
 +        if not has_server_tools:
 +            # No server-side tools — pass through unchanged.
 +            generator = await self.create_chat_completion(chat_req, raw_request)
@@ -1420,8 +1421,7 @@
 +            elif isinstance(generator, ChatCompletionResponse):
 +                return self.messages_full_converter(generator, request.model)
 +            return self.message_stream_converter(generator, request.model)
- 
--        return self.message_stream_converter(generator)
++
 +        # Server-side tools present. Run tool execution rounds as
 +        # non-streaming (to inspect the full response for tool calls),
 +        # then generate the final answer with the original stream setting.
@@ -1433,7 +1433,7 @@
 +        executed_tools: list[dict] = []
 +        for round_num in range(max_tool_rounds):
 +            generator = await self.create_chat_completion(chat_req, raw_request)
- 
++
 +            if isinstance(generator, ErrorResponse):
 +                return generator
 +
@@ -1517,7 +1517,8 @@
 +            ))
 +        result.content = tool_blocks + result.content
 +        return result
-+
+ 
+-        return self.message_stream_converter(generator)
 +    async def _stream_with_tool_blocks(
 +        self,
 +        generator: AsyncGenerator[str, None],
@@ -1583,7 +1584,7 @@
 +                    return f'"index":{old + block_index}'
 +                item = re.sub(r'"index":(\d+)', _shift_index, item)
 +            yield item
-+
+ 
      def messages_full_converter(
          self,
          generator: ChatCompletionResponse,
@@ -1609,7 +1610,7 @@
              ),
              kv_transfer_params=generator.kv_transfer_params,
          )
-@@ -511,6 +1921,7 @@
+@@ -511,6 +1921,7 @@ class AnthropicServingMessages(OpenAIServingChat):
      async def message_stream_converter(
          self,
          generator: AsyncGenerator[str, None],
@@ -1617,7 +1618,7 @@
      ) -> AsyncGenerator[str, None]:
          try:
  
-@@ -615,7 +2026,8 @@
+@@ -615,7 +2026,8 @@ class AnthropicServingMessages(OpenAIServingChat):
                                  message=AnthropicMessagesResponse(
                                      id=origin_chunk.id,
                                      content=[],
@@ -1627,7 +1628,7 @@
                                      stop_reason=None,
                                      stop_sequence=None,
                                      usage=AnthropicUsage(
-@@ -648,6 +2060,16 @@
+@@ -648,6 +2060,16 @@ class AnthropicServingMessages(OpenAIServingChat):
                                      output_tokens=origin_chunk.usage.completion_tokens
                                      if origin_chunk.usage
                                      else 0,

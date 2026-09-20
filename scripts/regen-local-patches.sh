@@ -55,11 +55,21 @@ for entry in $MAP; do
     rc=1; continue
   fi
 
-  # diff -u exits 1 when files differ, which is the normal case here.
-  new="$(diff -u \
-        --label "a/vllm/$target" \
-        --label "b/vllm/$target" \
-        "$src" "$dst")"
+  # GIT diff, not diff(1). `diff -u` is NOT portable output: Apple/FreeBSD diff
+  # and GNU diffutils produce different — both valid — unified diffs for the
+  # SAME inputs, so a patch generated on the Mac read STALE on the head and vice
+  # versa, and --check was useless on whichever machine did not generate it.
+  # Measured 2026-09-20 on detokenizer.py: GNU 160 lines, BSD 159, same 4 hunks.
+  # git's diff is one implementation everywhere git runs, so the output is
+  # stable across both nodes and the Mac.
+  #
+  # --no-index compares two paths outside the index; it exits 1 when they
+  # differ, which is the normal case here. The header git emits carries machine
+  # paths and a blob `index` line, so it is dropped and replaced with a stable
+  # a/ b/ header naming the vLLM file the patch applies to.
+  new="$(printf 'a/vllm/%s\nb/vllm/%s\n' "$target" "$target" | sed '1s|^|--- |; 2s|^|+++ |'
+         git --no-pager diff --no-index --no-color --no-ext-diff -- "$src" "$dst" \
+           | sed -n '/^@@/,$p')"
 
   if [ -z "$new" ]; then
     echo "  WARNING patches/$mounted is IDENTICAL to pristine — is it still a patch?" >&2

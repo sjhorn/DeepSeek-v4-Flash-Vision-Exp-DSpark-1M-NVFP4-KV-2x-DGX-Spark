@@ -7,7 +7,7 @@
  from abc import ABC, abstractmethod
  
  import tokenizers
-@@ -59,10 +60,75 @@
+@@ -59,10 +60,75 @@ class IncrementalDetokenizer:
  
          if USE_FAST_DETOKENIZER and isinstance(tokenizer, PreTrainedTokenizerFast):
              # Fast tokenizer => use tokenizers library DecodeStream.
@@ -20,9 +20,7 @@
 +            detok, tokenizer, request
 +        )
 +        return detok
- 
--        # Fall back to slow python-based incremental detokenization.
--        return SlowIncrementalDetokenizer(tokenizer, request)
++
 +    @staticmethod
 +    def _reasoning_markers() -> tuple[str, str]:
 +        # PATCH(stop-in-reasoning): prefer the deployment's own
@@ -31,7 +29,9 @@
 +        start, end = "<think>", "</think>"
 +        try:
 +            from vllm.config import get_current_vllm_config_or_none
-+
+ 
+-        # Fall back to slow python-based incremental detokenization.
+-        return SlowIncrementalDetokenizer(tokenizer, request)
 +            cfg = get_current_vllm_config_or_none()
 +            rc = getattr(cfg, "reasoning_config", None) if cfg else None
 +            if rc is not None:
@@ -86,7 +86,7 @@
  
  
  class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
-@@ -89,6 +155,25 @@
+@@ -89,6 +155,25 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
              self.stop_buffer_length = 0
          self._last_output_text_offset: int = 0
  
@@ -112,7 +112,7 @@
          # Generation data
          self.output_text = ""
  
-@@ -126,8 +211,43 @@
+@@ -126,8 +211,43 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
              self.token_ids.append(skipped_stop_token_id)
  
          # 2) Evaluate stop strings.
