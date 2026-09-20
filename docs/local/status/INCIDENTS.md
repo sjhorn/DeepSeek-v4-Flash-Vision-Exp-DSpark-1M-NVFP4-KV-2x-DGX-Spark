@@ -1,0 +1,432 @@
+# INCIDENTS.md — what went wrong, why, and how to recognise it next time
+
+Each entry carries the symptom, the root cause, the fix, and the **signature** — the thing to grep
+for or look at when it happens again. Known issues (live constraints rather than past events) are
+at the bottom.
+
+The boot-metrics section for the recovery boot after the watchdog incident lives in
+`BOOT-METRICS.md`, with the other boots.
+
+> Moved verbatim from `STATUS.md` during the 2026-09-20 doc split.
+
+## Incidents
+### Four concurrent watchdogs boot-looped the cluster for two hours (2026-09-19)
+
+**Symptom.** After an engine death at 14:01 the cluster never came back. `/v1/models` refused
+connections for over two hours; the container was `Up 2 minutes` every time it was checked, always
+dying around the safetensors weight-load stage.
+
+**Root cause — not the engine, and not the watchdog's logic: there were FOUR watchdogs.** Started
+15:04:18, 15:04:45, 16:04:10 and 16:04:36 (the 15:04 pair came from background jobs of an earlier
+session; none were started by the investigation running at the time). A **single** watchdog is
+safe — its restart is blocking (`stop`, then `start` to completion, then a 900s cooldown), so it
+cannot interrupt its own boot. With several, instance B's 3-failure timer (~180s) expires *inside*
+instance A's boot (250–600s) and issues `stop` mid-weight-load. The boot can never finish.
+
+Four concurrent `start-deepseek-v4-flash-dspark.sh` processes were also running, fighting over the
+same compose project.
+
+**Fix.** `pkill -fx "bash ./watchdog-dspark.sh"` plus the surplus start scripts — **no stop/start
+was issued**. The in-flight boot then completed by itself in ~6 minutes: API 200 at **16:10:42**.
+
+**Signature to recognise it next time.** Container `Up <a few> minutes` with `RestartCount=0` but
+a `StartedAt` that keeps moving, the log stuck in weight load, and `watchdog.log` showing
+`start: curl: (7) Failed to connect` lines at *two different cadences* — that is two start scripts
+running at once. Count the watchdogs first: `pgrep -afx "bash ./watchdog-dspark.sh"`.
+
+> **`pgrep -f watchdog-dspark.sh` matches the shell you typed it in.** So does the `[w]` bracket
+> trick if the pattern text is on the same command line. Use `pgrep -fx "bash ./watchdog-dspark.sh"`,
+> and put any such check in a **script file**, not on an `ssh` command line. A guard written inline
+> reported "REFUSING: 2 watchdogs already running" when there were none.
+
+**Hardened the same day** (script-only, no container restart — `watchdog-dspark.sh` on the head,
+backup at `/tmp/watchdog-dspark.sh.pre-singleton`):
+
+1. **`flock` singleton** on `/tmp/dspark-watchdog.lock` (`LOCK_FILE` overrides). A second instance
+   exits immediately. **Verified live:** the second start printed
+   `another watchdog already holds /tmp/dspark-watchdog.lock -- exiting` and the count stayed 1.
+2. **`FAIL_THRESHOLD` 3 → 8** (~480s vs a 250–600s cold boot), so it no longer stops a boot it did
+   not start. **Verified:** `watchdog.log` now logs `restart after 8 consecutive failures`.
+   Still stop the watchdog before a manual restart — the checklist in
+   [`../CLUSTER.md`](../CLUSTER.md) stands.
+3. **The start pipeline is guarded** (`set +e` … `PIPESTATUS[0]`). Previously `set -euo pipefail`
+   meant a failing start script killed the watchdog outright, making the
+   "will retry after cooldown" branch unreachable dead code and leaving the cluster unsupervised
+   exactly when it needed a supervisor. **Not yet exercised** — it needs a genuinely failing start.
+
+**Rollback:** `cp /tmp/watchdog-dspark.sh.pre-singleton <repo>/watchdog-dspark.sh`, then restart the
+watchdog.
+
+### Engine death: NCCL collective timeout (2026-09-19 14:01)
+
+```
+[rank0] ProcessGroupNCCL.cpp:1653  Terminating the process after attempting to dump
+        debug info, due to collective timeout or exception.            14:00:49
+EngineCore  Worker proc VllmWorker-0 died unexpectedly, shutting down executor.  14:01:14
+```
+
+Preceded twice by `shm_broadcast: No available shared memory broadcast block found in 60 seconds`.
+All subsequent requests returned `EngineDeadError` 500s.
+
+From the input dump at the moment of death: **2 running requests at 131,023 and 112,943 computed
+tokens**, a 12-token decode step, and **`kv_cache_usage = 0.335`** — so **not** KV exhaustion, and
+not the long-prefill traffic the prefix-cache investigation was generating (36.7K prompts,
+`max_tokens=4`). This is the anatomy `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800` was adopted for:
+the worker hangs, the collective times out, rank 0 terminates itself.
+
+**Not established:** whether concurrent load contributed. The box was contended at the time
+(probe deltas blended x4.3, one probe took 65s). Recorded as an open question, not a cause.
+
+### The watchdog will sabotage a manual restart (2026-09-18)
+
+`watchdog-dspark.sh` restarts the cluster after 3 consecutive failures at a 60s poll — **~180
+seconds** — while a cold boot takes 250–600s. So a watchdog left running during a manual
+stop/start tears the cluster down mid-boot and starts it again underneath you. This did not bite
+on 2026-09-16 only because the watchdog was dead at the time.
+
+**Always stop the watchdog before a manual restart, and start it again once `/v1/models`
+answers:**
+
+```bash
+kill $(pgrep -f "bash ./watchdog-dspark.sh")
+./stop-deepseek-v4-flash-dspark.sh && ./start-deepseek-v4-flash-dspark.sh
+setsid ./watchdog-dspark.sh >> watchdog.log 2>&1 < /dev/null &
+```
+
+**The pattern self-matches — and with `pkill` that is destructive.** An SSH command line
+containing `watchdog-dspark.sh` is itself a process matching `-f watchdog-dspark.sh`:
+
+- `pgrep -f watchdog-dspark.sh` reports a **false positive** — it finds your own check. Cost: you
+  believe the watchdog is up when it is not. Bit us three times on 2026-09-18.
+- `pkill -f watchdog-dspark.sh` **kills your own SSH session** (exit 255), mid-sequence, possibly
+  between "stop cluster" and "start cluster". Cost: a half-finished restart.
+
+Always use a bracket class so the pattern cannot match itself:
+
+```bash
+pgrep -f "[w]atchdog-dspark.sh"      # honest check
+pkill -f "[w]atchdog-dspark.sh"      # safe kill
+ps -eo pid,cmd | grep "[w]atchdog"   # equivalent
+```
+
+The same trap applies to any `pgrep`/`pkill` over a script name you also typed in the command —
+`hmmt_eval.py`, `bootmon.sh`, `mirror.sh` all hit it during this work.
+
+### Watchdog was dead for three weeks (found 2026-09-16)
+
+`watchdog-dspark.sh` was not running, and `watchdog.log`'s last entry was **2026-08-23 14:32**.
+So from 2026-08-23 to 2026-09-16 nothing polled `/v1/models` and no automatic restart was
+possible; any hang in that window needed manual intervention. Restarted 2026-09-16 (PID 2194182).
+It dies silently — nothing alerts on its absence. `start-cluster.sh` is the only thing that starts
+it, and we had been starting with `start-deepseek-v4-flash-dspark.sh`. **Check
+`pgrep -af watchdog-dspark.sh` after every start.** Launch it detached or it dies with the SSH
+session: `setsid ./watchdog-dspark.sh >> watchdog.log 2>&1 < /dev/null &`.
+
+### Head unreachable from the Mac (2026-09-16, not a fault)
+
+A firewall blocks the Mac → head path; the worker's port 22 is open. Work around it with
+`ssh -o ProxyJump=shorn@spark-da08 shorn@192.168.0.120` (also works for `scp`). Ping succeeding
+while port 22 times out is the signature — do not read it as a head hang. Verified the head was
+healthy throughout (`models:200`) via the jump host.
+
+### Cross-session prefix reuse: real sessions pay a full cold prefill (2026-09-19)
+
+**Symptom.** Every new Claude Code session starts cold — ~26s of prefill discarded — even though
+two sessions in this repo share 99.4-99.6% of their rendered turn-0 prompt. Measured on real
+headless sessions, n=3 independent cold heads, **0.0% every time** (26.1s / 25.9s / 31.6s). Within
+each pair the `system` hash and conversation key are identical.
+
+**Core observation.** A head written by a real multi-turn session is unretrievable **2 seconds**
+after that session ends (0.0%, 22.77s cold prefill, clean delta). A head written by a single
+synthetic request survives **5+ minutes**, including through a 777K-token burst of co-tenant
+traffic. During the session the head *is* retrievable — turns 1-6 hit 67-99%.
+
+**Two corrections to earlier entries in this file and CLAUDE.md:**
+
+1. An earlier entry claimed cross-session reuse "works at 99.7%" and that there was no defect.
+   **Wrong.** Every 99.7% came from synthetic probes; real sessions never reuse.
+2. An earlier claim of an "extent rule" (match the whole cached extent or get zero) was also wrong
+   and **is still wrong** — lookup is genuinely monotone, `floor(shared/256)*256`, 0 of 26
+   exact-token points returned zero. That part of the original correction stands.
+
+**Root cause of both wrong conclusions — one measurement error, worth internalising:**
+
+> **Read the SECONDS, not the hit%.** Two probes that appeared to prove "the head is alive" were
+> actually **cold prefills that re-created it** (22.31s, 22.48s, both blended). Every 99.7%
+> reading after them was measuring the probe's own work, not the session's. A warm ~42K head
+> answers in ~0.7s; ~20s+ is a miss whatever the ratio says.
+>
+> Corollary: **a probe that misses rebuilds what it was measuring.** You get exactly one
+> cold/warm datum per session — hence one run per time-point.
+
+**Eliminated, each with a clean control** (do not re-test without new evidence): prompt bytes
+(raw diff 99.64% shared; Patch 12 fingerprints identical across both sessions), session B's real
+body (99.7%, 3/3), `max_tokens` 4 vs 32000 and `stream` (2x2, all 99.7%), transport direct vs
+tap→mTLS→proxy (99.7% both), session growth to 97K (99.7% before and after), generation/decode
+(99.4% after a 388-token generating request), time/pressure eviction (5 min survival), Patch 6 /
+`SWA_RECYCLE` / `PROTECTED_FRACTION` (offline A/B identical in four cells; a grow-then-free
+session sim reproduces nothing in any arm), and vllm#42948 (does not reproduce — **no upstream
+report filed**).
+
+**NOT established: the mechanism.** It is something in a real multi-turn session's lifecycle the
+offline harness does not model — chunked prefill across turns, async scheduling, spec-decode
+rollback, or preemption under the co-tenant's 285-315K-char requests. Cheapest next probe: a
+**single-turn** real session plus a 2s probe, which isolates "multi-turn" from "real session".
+
+**Cost of the defect:** ~26s and ~41,700 tokens of prefill per session start, plus the same on
+every subagent and post-compaction turn. **No restart was taken and nothing was deployed.**
+Artefacts: `local-ops/xsess/` (see `FINDINGS.md`), `local-ops/kvsim/`.
+
+### Moving the effort prefix to the tail: cache win confirmed, termination risk found (2026-09-19)
+
+**Cache side, settled, no GPU** (`/tokenize` on a real 114K-char captured turn-0): the `high` text
+is 79 tokens; at position 0 it shares a **1-token** prefix with `low`, at the tail it shares
+**24,854 of 24,857**. A mid-conversation tier switch recomputes 24,856 tokens today, 3 if moved.
+
+**Behaviour side, piloted (n=3), and it is not a free win.** Harness
+`local-ops/hmmt-effort-20260916/hmmt_tail.py` — no patch, no restart: `reasoning_effort:"low"`
+suppresses the encoder's injection, and the byte-identical `high` text (verified against the image
+via `--verify-text`) is appended to the end of the user message instead. Grader imported from
+`hmmt_eval24.py`, so results are comparable to the 2026-09-16 run.
+
+| arm | correct | truncated | out tokens | think chars |
+| --- | --- | ---: | ---: | ---: |
+| `off` | 1/3 | 1 | 26,520 | 0 |
+| `high-front` | **3/3** | 0 | 12,917 | 32,420 |
+| `high-tail` | 2/3 | **1** | 30,473 | 71,878 |
+
+Problems 1 and 2: tail matches front within ±5% on reasoning volume with **identical answers** —
+the instruction is plainly not ignored from the tail. Problem 3: front answered correctly at 14,142
+think chars; tail produced **54,318** (3.8x) and ran to the 24,000-token cap with no answer.
+
+**Reading:** recency *strengthens* the instruction, so `high` at the tail behaves like `max` at the
+front — and `max`'s documented failure is exactly runaway-to-cap (8/12, 33% truncation vs `high`
+11/12). The cache win is real; the cost may be termination.
+
+**Weak on its own, deliberately stated as such:** n=1 on the failure; `temperature=0` is documented
+as non-deterministic here (the `off` arm gave 0 truncations at a 12k cap and 3 at 24k on identical
+prompts); and problem 3 is the hard one — `off` ran away on it too. The pilot also **lacked a `low`
+control arm** (thinking on, empty prefix, no tail text), which is what `high-tail` would degrade to
+if ignored; it has been added to the harness for the full run.
+
+**Not adopted. No patch written, no restart taken.** Next step if pursued: full 12-problem run with
+`--arms off,low,high-front,high-tail`, ~55-100 min of decode contention.
+
+### Tier switches are invisible to Patch 12 — and cost a 100% re-prefill (2026-09-19)
+
+Prompted by the user switching a live session from auto to manual (opus only, no sonnet) and
+asking whether the model name in the prompt was the cause. **The mechanism is real, and it is
+ours, not Anthropic's.**
+
+Patch 9 maps the served model name to `chat_template_kwargs`; `deepseek_v4_encoding.py` then injects
+a reasoning-effort prefix at render time. Patch 12 hashes **before** that injection
+(`anthropic_serving_inline_system.py:908`), so it is blind to it. Measured via `/tokenize`
+(CPU-only, no GPU/KV impact), one body, five tiers: default/haiku/**sonnet = 21 tokens, identical
+token ids**; **opus = 100**; fable = 113. The divergence is at **token index 1**, so a tier switch
+invalidates the entire prompt, not a suffix.
+
+**Correction to the entry below.** That entry concluded the live session's two full-prefill misses
+were "eviction, not invalidation" because head/tools/sys were constant across all 69 requests.
+**Constant hashes do not establish that** — a sonnet↔opus switch leaves all three identical while
+changing the prompt from token 1. The eviction reading is now one of two live hypotheses, not a
+finding.
+
+**It cannot be settled from the existing logs**: the model name appears in no log line — not Patch
+12, not the access log, not the throughput or spec-decode metrics. Options, cheapest first:
+
+1. **The running live tail is already a natural before/after** — auto (mixed tiers) until ~18:30
+   local, manual/opus-only after. If MISS turns stop, the tier hypothesis is supported at no cost.
+2. **Tap the next session** (`prompt-tap.py` records `body["model"]`); only works for a session
+   launched through it.
+3. **Add `model=` to the PREFIX_WATCH line** — closes the blind spot permanently, but it is a
+   bind-mounted `.py` change and so **needs a restart**. Bundle with any Phase B restart.
+
+**First before/after datum, same session, same boot:**
+
+| mode | span | turns | MISS | partial | HIT |
+| --- | --- | ---: | ---: | ---: | ---: |
+| **auto** (classifier at sonnet, session at opus) | 15:05-16:14 UTC | 69 | **2** | **8** | 59 |
+| **manual** (opus only) | 16:17-16:33 UTC | 29 | **0** | **0** | **29** |
+
+Suggestive, not yet conclusive: the auto-mode misses ran at roughly one per 35 minutes, so 16
+clean minutes is under one expected interval. The partials vanishing too (8 -> 0) is the stronger
+half of the signal. The live tail keeps accumulating.
+
+**The classifier was found in the log, and it is NOT the invalidation path.** Conversation
+`c32c3255d746`: 9 requests, **no tools**, **73,519 rendered chars every time** (≈20,422 tokens),
+14:48-15:14 UTC — stateless and repeated, i.e. the auto-mode permission classifier. (CLAUDE.md's
+114,476 figure is the RAW body; 73,519 is what survives the billing-header strip and
+`normalize_system_prompt`.) It is its **own conversation**, so it can never move the main
+conversation's head, and Patch 9d already forces `thinking:false` on it (Claude Code sends
+`{"type":"disabled"}` on classifier calls), so it pays no effort prefix either. **Its only cost is
+KV footprint** — ~20.4K tokens per call, competing with a 104K-token session. That makes eviction,
+not invalidation, the more likely reading of the auto-mode misses after all.
+
+**Do NOT strip the served aliases to "fix" caching (assessed 2026-09-19).** They are labels on one
+engine — `--served-model-name` takes a list, same weights, same KV pool — so they cost the cache
+nothing. The cost is the **effort prefix differing between tiers**, and only when a tier switch
+happens **inside one conversation**. Removing `claude-sonnet-5` specifically is strictly worse: the
+classifier 404s, Claude Code retries on the session model, and every permission check becomes a
+full opus-effort reasoning pass — the documented "auto mode is slow / stalls" symptom.
+
+**Operational rule that falls out of this:** haiku and sonnet are mutually free (byte-identical
+rendering), but **never mix haiku/sonnet with opus/fable, or opus with fable, inside one
+conversation** — each switch is a full re-prefill.
+
+### Phase A: the client gap closed — beta path acquitted, and MULTI-TURN is required (2026-09-19)
+
+Follow-up to the entry above, run against the **same boot** (`StartedAt 2026-09-19T14:04:41Z`,
+`RestartCount=0`). **No restart; the cluster was not touched.** `cache-probe.py --selftest` 3/3
+PASS before any measurement.
+
+**A1 — the tap now records request headers, and the blind spot is closed.** `prompt-tap.py` logged
+only `{ts, path, body}`, so in every analysis to date we had *never seen* what Claude Code actually
+sends in its headers. It now records `headers` too, with `authorization` / `x-api-key` /
+`proxy-authorization` / `cookie` redacted (`REDACT_HEADERS` + `_safe_headers()`). Forwarding is
+unchanged. What a real session sends:
+
+```
+POST /v1/messages?beta=true
+anthropic-version: 2023-06-01
+anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,
+                context-management-2025-06-27,prompt-caching-scope-2026-01-05
+X-Claude-Code-Session-Id: <uuid, unique per session>
+User-Agent: claude-cli/2.1.104 (external, cli)   x-app: cli   X-Stainless-*: ...
+```
+
+Body-side, for the record: 4 `cache_control: ephemeral` blocks (system[1], system[2],
+messages[0].content[2]), `context_management: {"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`,
+`thinking: {"type":"enabled","budget_tokens":31999}`, and **`metadata.user_id` carries a per-session
+`session_id`**. No `cache_salt` anywhere.
+
+> `prompt-caching-scope-2026-01-05` and a per-session `X-Claude-Code-Session-Id` looked like exactly
+> the mechanism we were hunting — a per-session cache scope. **They are not** (A2). Note also that
+> `prompt-tap.py` forwards only `content-type`, `anthropic-version`, `anthropic-beta` and `accept`,
+> so `X-Claude-Code-Session-Id` never even reaches the engine in a tapped session — yet tapped
+> sessions fail. It could not have been the cause.
+
+**A2 — the beta path and headers are ACQUITTED.** `transport-probe.py` rebuilt with four arms, all
+sent **direct to the engine** so transport is held constant and only the path and headers vary.
+Prime the head, then one fresh-tail request per arm:
+
+| arm | path | headers | hit | secs | delta |
+| --- | --- | --- | ---: | ---: | --- |
+| control | `/v1/messages` | minimal | 99.6% | 0.77s | clean |
+| beta-path | `/v1/messages?beta=true` | minimal | 99.6% | 0.76s | clean |
+| beta-header | `/v1/messages` | + captured `anthropic-beta` | 99.6% | 0.77s | clean |
+| full-live | `/v1/messages?beta=true` | full captured header set | 99.6% | 0.76s | clean |
+
+41,984 hit tokens on 42,166 input, identical in all four; `queries == input_tokens` on every row.
+So the `?beta=true` query param, the `anthropic-beta` header (`prompt-caching-scope-*` included)
+and the complete live header set **do not** move the head or scope the cache. The `cache_salt`
+hypothesis (`kv_cache_utils.py:524-532` — the salt chains through every later block hash) is
+**disproven from the outside**: no salt is being set on any client-reachable path.
+Artefact: `local-ops/xsess/beta-arms.json`.
+
+**A3 — a SINGLE-TURN real session's head SURVIVES. Multi-turn is required to trigger the death.**
+`death-probe.sh` now takes `[delay] [workload] [tag]`; run with `workload-trivial.txt` (one prompt,
+"reply with exactly the word: ok", no tools, no file reads), each run forced onto a head nobody has
+seen via the unique repo-root scratch file:
+
+| run | session | turn-0 | probe at +2s | verdict |
+| --- | --- | --- | --- | --- |
+| `a3single` | 1 agent turn, 0 tools | 0.0% hit, 42,157 q (cold) | **99.6%, 0.57s, clean** | **ALIVE** |
+| `a3single2` | 1 agent turn, 0 tools | cold | **99.6%, 0.57s, clean** | **ALIVE** |
+| *(prior, multi-turn)* | 6 tool-using turns | cold | 0.0%, **22.77s**, clean | dead |
+
+Read the seconds: 0.57s is a warm head, not a probe rebuilding one. n=2, both clean.
+
+**What this buys.** The suspect list collapses from "something about a real session" to
+"something a real session does across **turns**". Single-turn real sessions behave exactly like
+synthetic probes. Everything that a one-turn session already exercises is therefore out: the real
+client, the beta path, the full header set, `cache_control` blocks, `context_management`,
+`thinking: enabled`, the per-session `metadata.session_id`, streaming at `max_tokens=32000`, and a
+cold turn-0 prefill followed by a re-reference of the same head. What is left is genuinely
+multi-turn: **chunked prefill across turns, spec-decode rollback accumulated over turns, or the
+free/allocate churn of repeatedly extending one conversation's block chain.**
+
+**Caveat, stated plainly.** The paired multi-turn positive control **on this boot** was started and
+then stopped at the user's request (our probes were evicting a co-tenant session's cache). So the
+"dead" row above is from earlier today on the same boot, not run back-to-back with the two "alive"
+rows. Until that control runs, the A3 conclusion rests on a same-boot but not same-sitting
+comparison. Everything else here is self-contained.
+
+**Phase B (server-side `enable_kv_cache_events`) was NOT executed and is NOT authorised.** It needs
+a 250-600s cold boot and a compose change; it remains the specified follow-up if the multi-turn
+control confirms A3.
+
+### Live session: head stable, misses are EVICTION (2026-09-19)
+
+A running interactive session reported the classic symptom — a few cache hits, then a full reset
+with a long prefill. A session already in flight **cannot be tapped** (`ANTHROPIC_BASE_URL` is
+fixed at launch), so it was measured from the server log alone: Patch 12's per-request line plus
+the engine's 10s prompt-throughput gauge. New tool: `local-ops/prefill-attribute.py`.
+
+Result over 70 minutes, conversation `fe9a3621a5e6`, 69 requests, 323,411 → 360,718 chars
+(~90K → ~100K tokens): **head/tools/sys hashes identical on all 69 requests**, and
+**59 cached HIT / 8 partial / 2 full-prefill MISS**.
+
+**So the resets are eviction, not head movement.** The prompt was a strict prefix every turn and
+two turns still re-prefilled from cold. Context: 11 conversations in the window (two above 150K
+tokens, one at 580K chars), KV usage 34-55% of the 2,510,942-token pool, `num_preemptions_total`
+still 0. Not exhaustion — prefix-cache block turnover.
+
+**Also: our own Phase A probes were part of that pressure**, which is what prompted the user to
+flag it. All probe processes were stopped and confirmed gone (`ps` clean) before this analysis,
+which adds no load at all.
+
+**A live tail is running** (`local-ops/prefill-watch/live-20260919-1823.log`), started 2026-09-19
+18:23 local, so the next eviction is captured with the concurrency that caused it rather than
+reconstructed afterwards. `prefill-attribute.py --follow` reads `docker logs -f -t` and judges each
+turn ~30-40s after it lands. Verified cost on the head: **0.21s wall, 35% of one core of 20, 25 MB
+RSS** per 90-minute read, journald driver, read-only; the parser is stdlib-only with no network and
+no engine calls, so it cannot itself evict anything. `--follow` was self-tested by replaying the
+captured hour through it and reproducing file-mode's verdicts.
+
+**Correction made in-session.** The first read of this log blamed head movement, citing four
+`prefix-watch.py` "HEAD MOVED" alerts. Those were all in bucket `1bf734cbb2a0` — the documented
+`user0` collision — which had absorbed `cache-probe --selftest`, the A2 beta arms and both A3
+sessions. They were our probes, not the live session. Two lessons, now in
+[`../PREFIX-CACHE.md`](../PREFIX-CACHE.md):
+`prefix-watch.py` ignores `docker -t` timestamps (it uses its own clock, so backfilled logs read
+as one instant), and a bucket is only one conversation if its `len` grows monotonically.
+
+### `local-ops/baseline-20260914/pristine-single_type_kv_cache_manager.py` was NOT pristine (fixed 2026-09-19)
+
+It was a byte-for-byte copy of `patches/patch6-single_type_kv_cache_manager.py` (1,504 lines,
+65,425 bytes, contains `_RECYCLE_ENABLED`) — captured by reading the path *through* the
+bind-mount, which returns the patched file. Replaced with the genuine 1,421-line image file; the
+old one kept as `MISLABELLED-was-patched-...py`. `pristine-block_pool.py` and
+`pristine-kv_cache_coordinator.py` were re-checked and are genuine. See
+`local-ops/baseline-20260914/PRISTINE-README.md`. Always re-pull with
+`docker run --rm --entrypoint cat <image> <path>`.
+
+## Known issues
+
+### KV pool exhaustion under long-context sessions
+
+With 2+ Claude Code sessions building up long conversation context (500K+ tokens each), the KV pool + prefix cache can fill to 99%+, causing decode throughput to collapse to 0.1-0.2 tok/s and draft acceptance to drop to 0%. Symptoms: extremely slow turns, repeated text in output.
+
+Mitigations applied: enabled CUDA graph profiling, and (2026-08) reduced `MAX_NUM_SEQS` 12 to 4 via 6 — **since reverted to 12 on 2026-09-13**, once the sweep showed slots cost KV almost entirely through CUDA-graph capture and capture was capped at 72. The 3.2M-token pool quoted below was the 2026-08 config; the **2026-09-14 boot measured 2,506,193 tokens** (`Maximum concurrency for 1,048,576 tokens per request: 2.39x`), so two sessions at 1M each now use ~80% of the pool rather than 62%. Per-boot variance is ~11-13%, so read the current boot's own figure before drawing conclusions. Practical limits:
+
+| Context per session | Concurrent sessions | Status |
+|---|---|---|
+| Under 500K | 3-4 | Comfortable |
+| 500K-700K | 2-3 | Workable |
+| 800K-1M | 2 | At the limit, expect slow prefills |
+
+The 2 GB display reserved memory (BIOS carveout) cannot be reduced below 2 GB on current firmware.
+
+### KV disk-offload is not viable on this model/version (parked 2026-09-14)
+
+`OffloadingConnector` probe failed before model load: incompatible with
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` unless the cumem allocator is on (this
+requirement is **not** in the vLLM docs). Beyond that, upstream has three open unfixed issues:
+vllm#43093 (two AssertionErrors, DeepSeek-V4-Flash + OffloadingConnector, **v0.21.0 = our
+version**), vllm#45663 (OOM in `sparse_attn_indexer` past **~120K tokens** — fatal for our 1M use
+case), vllm#56772 (MLA+DSA canonical transfers use TP-dependent row sizes). Re-evaluate if
+vllm#43093 and vllm#45663 both close. Runbook and staged mounts: `local-ops/kv-offload-probe.md`.
+
+### GPU thermal management
+
+GPU clock pinned to 300-2200 MHz (`nvidia-smi -lgc 300,2200`) on both nodes to prevent thermal shutdown. This does not survive reboots — `start-cluster.sh` reapplies it automatically, but `start-deepseek-v4-flash-dspark.sh` does not.
