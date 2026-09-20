@@ -51,7 +51,6 @@ _PROTECTED_FRACTION_ENV = "VLLM_PROTECTED_PROMPT_BLOCKS_FRACTION"
 # evicts every other request's cached prefix (0% hit on the next turn of a long
 # conversation). VLLM_SWA_RECYCLE_SKIPPED_BLOCKS=0 disables it.
 _RECYCLE_ENV = "VLLM_SWA_RECYCLE_SKIPPED_BLOCKS"
-_RECYCLE_ENABLED = os.environ.get(_RECYCLE_ENV, "1").strip() not in ("0", "false", "False", "")
 
 # ---------------------------------------------------------------------------
 # MNT-8 / MNT-9 runtime flags — readable WITHOUT a restart.
@@ -104,6 +103,36 @@ def _flag(name: str, default):
         return type(default)(raw)
     except (TypeError, ValueError):
         return default
+
+
+def _recycle_enabled() -> bool:
+    """MNT-6b master switch. Was a module-level constant read from the container
+    env, which cannot change on a running engine -- so A/B-ing it cost a cold
+    boot per arm. Now the flags file decides, and the env var still overrides.
+    """
+    raw = os.environ.get(_RECYCLE_ENV)
+    if raw is not None:
+        return raw.strip() not in ("0", "false", "False", "")
+    return bool(_flag("swa_recycle", True))
+
+
+def _recycle_cached_pages() -> bool:
+    """MNT-6b, finer grain -- and the arm most likely to be right.
+
+    Recycling a page calls ``_maybe_evict_cached_block()`` on it, which destroys
+    its (hash -> block) mapping.  Measured 2026-09-20 (CACHE_TEST.md 8): decode
+    across several turns is what makes a conversation's prefix unreusable, and
+    this eviction is the leading mechanism -- the coordinator takes the MINIMUM
+    across KV groups, so losing the sliding-window checkpoints reads as 0% even
+    while full attention still holds the whole head.
+
+    With this set to 0, only pages that carry NO prefix-cache value
+    (``block_hash is None``) are recycled; cached pages are freed normally and
+    stay reusable in the LRU. That keeps what MNT-6b is for -- keeping one long
+    prefill from churning the shared queue -- without discarding checkpoints.
+    Same cached/uncached discrimination vllm#43447 makes for the free queue.
+    """
+    return bool(_flag("swa_recycle_cached", True))
 
 
 # MNT-8 (vllm#43447, ported 2026-09-20): free a request's blocks in two groups —
@@ -205,6 +234,7 @@ class SingleTypeKVCacheManager(ABC):
         self._pinned_head_block_ids: set[int] = set()
         self._head_boundary: dict[str, int] = {}
         self._head_pin_logged = False
+        self._head_pin_incomplete_logged = False
 
     @classmethod
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
@@ -494,13 +524,30 @@ class SingleTypeKVCacheManager(ABC):
         blocks = self.req_to_blocks.get(request.request_id)
         if not blocks:
             return
+        intended = self._head_pin_candidates(blocks, boundary_blocks)
         candidates = [
-            blk
-            for blk in self._head_pin_candidates(blocks, boundary_blocks)
-            if not blk.is_null and blk.block_hash is not None
+            blk for blk in intended if not blk.is_null and blk.block_hash is not None
         ]
         if not candidates:
             return
+        if len(candidates) < len(intended):
+            # A hit at B needs the WHOLE run in THIS group, and the coordinator
+            # takes the minimum across groups -- so a partial pin cannot serve a
+            # hit anywhere, it just spends budget and reports success. This is
+            # exactly how the 2026-09-20 arm C produced a confident null: group 3
+            # pinned 3 of the 33 blocks it needed (CACHE_TEST.md 7.3).
+            if not self._head_pin_incomplete_logged:
+                self._head_pin_incomplete_logged = True
+                logger.warning(
+                    "MNT-9: KV group %d CANNOT pin the head at B=%d tokens — only "
+                    "%d of the %d blocks in the required run are cached. Not "
+                    "pinning (set head_pin_partial=1 to pin anyway, but a partial "
+                    "run cannot serve a hit). Request %s",
+                    self.kv_cache_group_id, boundary, len(candidates),
+                    len(intended), request.request_id,
+                )
+            if not _flag("head_pin_partial", False):
+                return
 
         key = candidates[0].block_hash
         entry = self._head_pins.get(key)
@@ -840,15 +887,21 @@ class SingleTypeKVCacheManager(ABC):
                 break
             removed_blocks.append(blocks[i])
             blocks[i] = self._null_block
-        if not _RECYCLE_ENABLED:
+        if not _recycle_enabled():
             self._free_split(removed_blocks)
             return
+        keep_cached = not _recycle_cached_pages()
         to_free: list[KVCacheBlock] = []
         recycled = self._recycled_blocks[request_id]
         for blk in removed_blocks:
             # Only pages held solely by this request can be reused in place;
             # shared or protected pages keep their other references.
             if blk.ref_cnt == 1 and not blk.is_null:
+                if keep_cached and blk.block_hash is not None:
+                    # Carries a prefix-cache entry: freeing it leaves the entry
+                    # intact in the LRU, recycling it would destroy the mapping.
+                    to_free.append(blk)
+                    continue
                 self.block_pool._maybe_evict_cached_block(blk)
                 recycled.append(blk)
             else:

@@ -253,7 +253,13 @@ services:
 
       # Patch 6 knobs (see volumes: above). Defaults match upstream PR #54.
       VLLM_PROTECTED_PROMPT_BLOCKS_FRACTION: "${PROTECTED_FRACTION:-0.30}"
-      VLLM_SWA_RECYCLE_SKIPPED_BLOCKS: "${SWA_RECYCLE:-1}"
+      # MNT-6b's switch moved to the FLAGS FILE on 2026-09-20 (`swa_recycle`), so
+      # it can be A/B'd without a cold boot per arm. The env var still overrides
+      # the file when it is set -- which is exactly why it must NOT be set here:
+      # with this line present, `kv-flags.sh swa_recycle 0` would be silently
+      # ignored, which is how an arm becomes a confident null. Default with
+      # neither set is unchanged (recycling ON).
+      #   VLLM_SWA_RECYCLE_SKIPPED_BLOCKS: "${SWA_RECYCLE:-1}"   # removed, see above
 
     command:
       - bash

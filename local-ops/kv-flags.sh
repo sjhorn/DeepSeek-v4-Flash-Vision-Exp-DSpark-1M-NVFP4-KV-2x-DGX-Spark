@@ -8,13 +8,24 @@
 #
 #   bash local-ops/kv-flags.sh                     # show both nodes
 #   bash local-ops/kv-flags.sh free_queue_prepend_uncached 1
-#   bash local-ops/kv-flags.sh pin_static_head 1
+#   bash local-ops/kv-flags.sh swa_recycle_cached 0   # arm E -- the likely fix
+  bash local-ops/kv-flags.sh swa_recycle 0          # arm D -- MNT-6b off entirely
+  bash local-ops/kv-flags.sh pin_static_head 1
 #   bash local-ops/kv-flags.sh reset               # everything OFF (arm A)
 #
 # Flags (defaults OFF, which is stock behaviour):
 #   free_queue_prepend_uncached   MNT-8, vllm#43447 free-queue ordering
 #   pin_static_head               MNT-9, pin the tools+system head at B
 #   head_pin_fraction             MNT-9 budget, share of the pool per manager (0.05)
+#   head_pin_partial              MNT-9, pin even an incomplete run (default 0 -- a
+#                                 partial run cannot serve a hit; this is for
+#                                 diagnosis only)
+#   swa_recycle                   MNT-6b master switch (default 1 = recycle).
+#                                 VLLM_SWA_RECYCLE_SKIPPED_BLOCKS still overrides.
+#   swa_recycle_cached            MNT-6c (default 1 = today's behaviour). Set 0 to
+#                                 recycle only pages with NO cache entry, so the
+#                                 prefix-cache mappings survive decode. This is the
+#                                 arm for the 2026-09-20 root cause, CACHE_TEST.md 8.
 #
 # A flip takes effect on the NEXT request. It does not re-order blocks already
 # freed, so give an arm a fresh session, not a running one. An env var of the

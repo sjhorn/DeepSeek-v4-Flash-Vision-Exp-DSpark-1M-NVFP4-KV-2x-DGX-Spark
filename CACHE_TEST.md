@@ -598,21 +598,34 @@ the same FIFO protection) and why decode matters (it is what advances the window
   **offline** four-cell A/B. The offline harness does not model multi-turn decode, which is exactly
   the condition that matters.
 
-### 8.4 The next test, and it needs one restart
+### 8.4 The next test — BUILT 2026-09-20, awaiting one restart
 
-`MNT-6b`'s kill switch is `SWA_RECYCLE=0`, a **container env var**, so it cannot be flipped on a
-running engine — the very problem the flags file was built to solve. The proposal is therefore:
+All three pieces are implemented, tested offline (16/16) and pushed. They are inert until a restart
+imports them; after that every arm is a flag flip.
 
-1. Move `MNT-6b`'s switch onto the flags file (`swa_recycle`), keeping the env var as an override.
-2. Fix `MNT-9` to verify the full `need`-wide run is present and **log loudly when it is not**
-   (§7.3), so arm C can be judged for the first time.
-3. One restart to load both. After that, this A/B needs no further restarts:
+1. **`MNT-6b`'s switch moved onto the flags file** (`swa_recycle`), env var still overriding.
+   **The compose line that set `VLLM_SWA_RECYCLE_SKIPPED_BLOCKS` was removed** — with it present the
+   env would have overridden the file and `kv-flags.sh swa_recycle 0` would have been silently
+   ignored, i.e. another confident null. Default with neither set is unchanged.
+2. **`MNT-6c`, new and the likely fix** (`swa_recycle_cached: 0`): recycle only pages with **no**
+   cache entry. Keeps what `MNT-6b` is for — one long prefill not churning the shared queue — while
+   never calling `_maybe_evict_cached_block()` on a page that carries a prefix-cache mapping. Same
+   cached/uncached discrimination vllm#43447 makes for the free queue.
+3. **`MNT-9` now refuses an incomplete run and logs a WARNING** naming the group, B, and how many of
+   the required blocks were cached (`head_pin_partial: 1` restores the old behaviour for
+   diagnosis). This is what makes arm C judgeable for the first time.
+
+After the restart, no further restarts:
 
 | arm | flags | question |
 |---|---|---|
-| D | `swa_recycle: 0` | does the prefix survive multi-turn decode without the evict-on-recycle? |
-| C' | `pin_static_head: 1` (fixed) | does a complete pin hold the head through decode? |
-| D+C' | both | belt and braces, if either half works |
+| **E** | `swa_recycle_cached: 0` | **run this first.** Does the prefix survive multi-turn decode once recycling stops destroying cache mappings? Targets the mechanism directly and keeps `MNT-6b`'s benefit. |
+| D | `swa_recycle: 0` | `MNT-6b` off entirely — the blunt control. If E works and D works, prefer E; if only D works, the recycling itself is implicated, not just the eviction. |
+| C' | `pin_static_head: 1` | does a **complete** pin hold the head through decode? Watch for the new `MNT-9 … CANNOT pin` warning: if it fires, the SWA checkpoints are already gone before B is reached, which is itself the answer. |
+| E+C' | both | belt and braces, if either half works |
+
+Each arm is `python3 local-ops/xsess/decode-dose.py 7 50` — 45 seconds, alive→dead is the signal —
+followed by the same with `1 400` as the negative control.
 
 **Reproducer for whoever runs it** (no session, no client, ~45s):
 `python3 <decode-dose> 7 50` — seven captured bodies, 50 decode tokens each, probe before and

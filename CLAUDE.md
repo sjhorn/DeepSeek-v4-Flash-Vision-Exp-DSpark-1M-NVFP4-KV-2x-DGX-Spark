@@ -59,7 +59,7 @@ git push head local/main && git push worker local/main
 # then: both nodes must report the new commit and 0 dirty.
 # scripts/check-local-patches.sh reports what the RUNNING container has, which a
 # push does NOT change — git replaces files, and a single-file bind mount keeps
-# the old inode. Expect 20/20 only after the next restart; before it, new rows
+# the old inode. Expect 21/21 only after the next restart; before it, new rows
 # FAIL and that is correct. See docs/local/status/INCIDENTS.md.
 ```
 

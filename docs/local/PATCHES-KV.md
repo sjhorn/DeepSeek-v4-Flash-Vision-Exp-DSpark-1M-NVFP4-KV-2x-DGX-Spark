@@ -10,6 +10,7 @@ Four bind-mounted files inside vLLM's KV machinery:
 | `MNT-7` | `patches/patch7-block_pool-dedupe.py` | `v1/core/block_pool.py` | commit-time same-content dedupe |
 | `MNT-8` | `patches/patch8-kv_cache_utils.py` (+ patch6, patch7) | `v1/core/kv_cache_utils.py` ″ | uncached pages to the FRONT of the free queue |
 | `MNT-9` | `patches/patch6-single_type_kv_cache_manager.py` | `v1/core/single_type_kv_cache_manager.py` | pin the static head, in a budget reserved from `MNT-6a` |
+| `MNT-6c` | ″ | ″ | recycle only pages with no cache entry, so decode stops destroying prefix-cache mappings |
 
 > **`MNT-8` and `MNT-9` are mounted but OFF, and neither is measured yet.** They are the two
 > mechanisms `CACHE_TEST.md` argues for; the write-up, the arms and the per-group numbers live

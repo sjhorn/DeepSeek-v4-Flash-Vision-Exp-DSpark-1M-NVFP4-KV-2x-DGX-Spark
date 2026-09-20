@@ -90,11 +90,12 @@ API-13|entrypoints/anthropic/serving.py|_STICKY_TOOLS|a flapping client tool shr
 API-14|entrypoints/anthropic/serving.py|_engine_cached_tokens|the engine num_cached_tokens value never reaches the client
 MNT-5|v1/engine/detokenizer.py|VLLM_SUPPRESS_STOPS_IN_REASONING|stop strings can fire inside the reasoning segment
 MNT-6a|v1/core/single_type_kv_cache_manager.py|_PROTECTED_FRACTION_ENV|unbounded legacy protection caps swallow the block pool
-MNT-6b|v1/core/single_type_kv_cache_manager.py|_RECYCLE_ENABLED|sliding-window pages churn the shared LRU instead of recycling
+MNT-6b|v1/core/single_type_kv_cache_manager.py|_recycle_enabled(|sliding-window pages churn the shared LRU instead of recycling
 MNT-7|v1/core/block_pool.py|_dup_old|duplicate cached blocks hold LRU slots forever (3.9x retention)
 MNT-8|v1/core/kv_cache_utils.py|prepend_n(self|scratch pages queue behind cached prefixes; the allocator evicts live prefixes first
 MNT-8b|v1/core/block_pool.py|prepend_n(freed)|free_blocks cannot route scratch pages to the head of the queue
 MNT-9|v1/core/single_type_kv_cache_manager.py|_FLAG_PIN_HEAD|the static head is pinned only to the prompt end, and released FIFO
+MNT-6c|v1/core/single_type_kv_cache_manager.py|_recycle_cached_pages(|recycling destroys the prefix-cache mapping of every page it reuses
 '
 
 # PLG-14b is not a patch over a vLLM file -- it is an ADDED site-packages plugin,

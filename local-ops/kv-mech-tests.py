@@ -108,6 +108,7 @@ def mkstub(pool, blocks, rid, window=None):
     st.req_to_blocks = {rid: blocks}; st._head_pins = OrderedDict()
     st._pinned_head_block_ids = set(); st._head_boundary = {}
     st._head_pin_logged = True
+    st._head_pin_incomplete_logged = True
     if window is not None:
         st.sliding_window = window
     return st
@@ -145,12 +146,13 @@ key = blocks_a[0].block_hash
 assert st._head_pins[key]["hits"] == 1, st._head_pins[key]
 print("PASS 6 re-pin is a hit, not a second reference; hits =", st._head_pins[key]["hits"])
 
-# a block below B that never got cached is skipped, not pinned
+# An uncached block anywhere inside [0,B) makes the run incomplete, and an
+# incomplete run cannot serve a hit -- so nothing is pinned (see PASS 15).
 blocks_c = fresh(40, 'headC', uncached={5})
 st_c = mkstub(pool, blocks_c, 'r9')
 S._maybe_pin_static_head(st_c, mkreq('r9', 600), 40)
-assert blocks_c[5].ref_cnt == 1 and len(st_c._pinned_head_block_ids) == 31
-print("PASS 7 uncached blocks inside the head are skipped")
+assert blocks_c[5].ref_cnt == 1 and len(st_c._pinned_head_block_ids) == 0
+print("PASS 7 one uncached block inside the head => the head is NOT pinned")
 
 # prefill that has NOT crossed B yet pins nothing
 blocks_d = fresh(40, 'headD'); st_d = mkstub(pool, blocks_d, 'r8')
@@ -197,5 +199,48 @@ assert S._static_head_boundary(st_f, mkreq('r5', 300)) == 0
 assert S._static_head_boundary(mkstub(pool, [], 'r6'), mkreq('r6', 70)) == 0
 print("PASS 13 heads below the 512-token floor are not pinned")
 
+# ------------------------------------------------- MNT-6b / MNT-6c / MNT-9 fix
+# Recycle gates: env overrides the file; the file decides otherwise.
+# NOTE: this runs inside the live container, whose env really does set
+# VLLM_SWA_RECYCLE_SKIPPED_BLOCKS=1 -- drop it first, or the override under test
+# is the thing masking the test.
+_saved_env = os.environ.pop('VLLM_SWA_RECYCLE_SKIPPED_BLOCKS', None)
+json.dump({"swa_recycle": 0, "swa_recycle_cached": 0}, open('/tmp/kvtest/flags2.json', 'w'))
+M._flags_checked_at = -1e9
+assert M._recycle_enabled() is False
+assert M._recycle_cached_pages() is False
+os.environ['VLLM_SWA_RECYCLE_SKIPPED_BLOCKS'] = '1'
+assert M._recycle_enabled() is True, "env must override the file for MNT-6b"
+del os.environ['VLLM_SWA_RECYCLE_SKIPPED_BLOCKS']
+json.dump({}, open('/tmp/kvtest/flags2.json', 'w'))
+M._flags_checked_at = -1e9
+assert M._recycle_enabled() is True and M._recycle_cached_pages() is True, "defaults = today"
+if _saved_env is not None:
+    os.environ['VLLM_SWA_RECYCLE_SKIPPED_BLOCKS'] = _saved_env
+print("PASS 14 MNT-6b/6c gates: default on, file off, env overrides")
+
+# MNT-9 must REFUSE an incomplete run rather than pin an unusable subset -- the
+# defect that made arm C a confident null (3 of 33 blocks on KV group 3).
+json.dump({"pin_static_head": 1, "head_pin_fraction": 0.5}, open('/tmp/kvtest/flags2.json', 'w'))
+M._flags_checked_at = -1e9
+blocks_g = fresh(40, 'headG', uncached={25})          # one hole inside the SWA run
+st_g = mkstub(pool, blocks_g, 'r20', window=128)
+st_g._head_pin_logged = False; st_g._head_pin_incomplete_logged = False
+S._maybe_pin_static_head(st_g, mkreq('r20', 600), 40)
+assert not st_g._pinned_head_block_ids, "an incomplete run must not be pinned"
+assert st_g._head_pin_incomplete_logged, "and it must say so, loudly"
+print("PASS 15 MNT-9 refuses an incomplete run and logs it")
+
+# head_pin_partial=1 restores the old behaviour, for diagnosis only
+json.dump({"pin_static_head": 1, "head_pin_fraction": 0.5, "head_pin_partial": 1},
+          open('/tmp/kvtest/flags2.json', 'w'))
+M._flags_checked_at = -1e9
+blocks_h = fresh(40, 'headH', uncached={25})
+st_h = mkstub(pool, blocks_h, 'r21', window=128)
+st_h._head_pin_logged = True; st_h._head_pin_incomplete_logged = True
+S._maybe_pin_static_head(st_h, mkreq('r21', 600), 40)
+assert len(st_h._pinned_head_block_ids) == 8, len(st_h._pinned_head_block_ids)
+print("PASS 16 head_pin_partial=1 pins the partial run anyway (diagnosis escape hatch)")
+
 print("")
-print("ALL PASS - 13 checks")
+print("ALL PASS - 16 checks")
