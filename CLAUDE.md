@@ -31,8 +31,19 @@ Start at `docs/local/README.md` if none of those is obviously right.
 `main` tracks upstream. **All of our work is on `local/main`**, in coherent commits — `git log` is
 now the change history these docs used to carry in prose.
 
-`branch.local/main.pushRemote` is `no-push`, because `origin` is upstream's GitHub repo and
-`git remote -v` shows the **same URL for push**. Never push this branch there.
+`branch.local/main.pushRemote` is `no-push`, because `origin` is upstream's GitHub repo and shows
+the **same URL for push**. Never push this branch there.
+
+**Both nodes are git checkouts of `local/main` too (since 2026-09-20), so deploying is a push:**
+
+```bash
+git push head local/main && git push worker local/main
+```
+
+They are set `receive.denyCurrentBranch = updateInstead`, so this updates their working trees and
+**refuses if a node's tree is dirty** — investigate rather than override. A push stages the next
+restart; it never performs one, and never changes the running engine. Details:
+`docs/local/CLUSTER.md`.
 
 The mounted patch files are whole-file copies of vLLM source, so the reviewable delta is the
 generated diff:

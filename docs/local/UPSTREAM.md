@@ -14,7 +14,14 @@ notes (one cable, not two; the `NCCL_IB_GID_INDEX` non-issue) that keep getting 
 > git checkout main && git pull            # fast-forward upstream
 > git checkout local/main && git rebase main
 > bash scripts/regen-local-patches.sh --check   # do our patches still apply to the new tree?
+> git push head local/main && git push worker local/main   # deploy (no restart)
 > ```
+>
+> A rebase rewrites history, so the nodes cannot fast-forward to it. `updateInstead` will refuse
+> the push; that is correct, not a problem to force past. Either `git push --force-with-lease` to
+> each node (their trees are clean and carry nothing of their own — that is the whole point of the
+> branch), or `git fetch && git reset --hard local/main` on each. Re-run
+> `scripts/check-local-patches.sh` on both afterwards.
 >
 > If `recipe/overlay/` changed, rebuild the runtime image on both nodes — and then **re-capture
 > `patches/pristine/`**, because every generated diff is computed against the old image. The image

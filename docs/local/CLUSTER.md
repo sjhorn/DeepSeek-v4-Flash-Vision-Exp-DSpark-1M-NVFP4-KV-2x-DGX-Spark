@@ -24,32 +24,62 @@ Repo path on **both** nodes: `/home/shorn/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4
 HF cache on both nodes: `/home/shorn/.cache/huggingface`
 API (head only, localhost-bound): `http://127.0.0.1:8888/v1`, served name `deepseek-v4-flash-dspark`
 
-## Three copies of the repo — know which one you are editing
+## Three copies of the repo — all three are now git checkouts of `local/main`
 
-1. **This Mac checkout** (`/Users/shorn/dev/spark/...`) — authoring copy and git remote tracker.
-   Nothing here runs. Changes reach the cluster only by `scp`.
-2. **Head `spark-45ea`** — the copy that actually runs. It holds files that exist *nowhere else*:
-   `switch-model.sh`, `.env.dspark`, `.env.dspark.text-0731`, `.env.dspark.vision-exp`,
-   `docker-compose.vision-exp.yml`, `vision-exp/`, and `~/vision-stage/`.
-3. **Worker `spark-da08`** — `start-deepseek-v4-flash-dspark.sh` syncs it automatically on every
-   start: `docker-compose.dspark.yml`, `.env.dspark`, `patches/*.py`, `patches/prefill_plugin/`
-   (a **directory** — `patches/*.py` does not match one, so it needs its own `scp -r`), and (in
-   vision mode) `docker-compose.vision-exp.yml`. **`~/vision-stage/` is deliberately not synced** — those
-   files are derived from the image each node runs, so they get regenerated per node; the start
-   script preflights them on both sides and refuses to boot if any are missing.
+**Changed 2026-09-20.** The Mac used to author and `scp`; the nodes carried our work as a dirty
+working tree on `main`. That is how the head came to be running `API-14`/`PLG-14b` that existed in
+no checkout, and how an `scp` nearly deleted it. Now all three track the same branch and drift is
+just `git status`.
 
-> **This "drift RESOLVED" note went stale within a day — see
-> [`UPSTREAM.md`](UPSTREAM.md) "Drift found on import (2026-09-20)", where the head turned out to
-> be AHEAD of every checkout by a whole live patch (`API-14` / `PLG-14b`). Re-diff; never trust an
-> "in sync" claim as a property rather than a timestamp.**
->
-> **Drift RESOLVED — re-checked 2026-09-19.** This note used to warn that the Mac's
-> `docker-compose.dspark.yml` was ahead of the head's on journald logging,
-> `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` and `NCCL_IB_MERGE_NICS`, and then (2026-09-18) that the
-> Patch 5 mount and Patch 9 aliases were Mac-only. **Both claims are now stale.** Diffed the two
-> files before the 2026-09-19 deploy: they were **identical** apart from the new kill-switch block,
-> which was then copied over. The two copies are in sync. Re-diff rather than trusting this note:
-> `ssh shorn@spark-45ea cat <repo>/docker-compose.dspark.yml | diff - docker-compose.dspark.yml`.
+| copy | path | role |
+|---|---|---|
+| **Mac** | `/Users/shorn/dev/spark/...` | authoring. Nothing here runs. |
+| **Head** `spark-45ea` | `/home/shorn/DeepSeek-v4-Flash-...` | runs rank 0. Also holds `.env.dspark*` and `~/vision-stage/`, neither tracked. |
+| **Worker** `spark-da08` | same path | runs rank 1. |
+
+```bash
+git remote -v
+#   head    shorn@spark-45ea:/home/shorn/DeepSeek-v4-Flash-...
+#   worker  shorn@spark-da08:/home/shorn/DeepSeek-v4-Flash-...
+#   origin  https://github.com/tonyd2wild/...   <- UPSTREAM. Never push local/main here.
+```
+
+### Deploying = pushing
+
+Both nodes are configured `receive.denyCurrentBranch = updateInstead`, so a push **updates their
+working tree as well as the ref**:
+
+```bash
+git push head local/main && git push worker local/main
+```
+
+`updateInstead` refuses if that node's working tree is dirty — which is the safety property worth
+having. If it refuses, something was edited on the node: find out what before overriding it.
+
+> **A push does NOT restart anything, and does not change the running engine.** The patches are
+> bind-mounted, and the container holds the inodes it imported at boot. A push stages the next
+> restart; it never performs one. Restarting still needs a specific ask — see `CLAUDE.md`.
+
+Afterwards, confirm the nodes agree:
+
+```bash
+for h in spark-45ea spark-da08; do
+  ssh shorn@$h "cd <repo> && git rev-parse --short HEAD && git status --porcelain | wc -l"
+done
+```
+
+### Still not tracked, on purpose
+
+`.env.dspark*` (they carry `SERPER_API_KEY`), `~/vision-stage/` (derived per node from that node's
+image), and everything `local-ops/` produces — see [`TOOLING.md`](TOOLING.md).
+
+### If a node has to go back
+
+`/home/shorn/dspark-archive/pre-branch-20260920/` on **both** nodes holds `repo-full.tar.gz` (the
+complete pre-branch working tree including `.git`), `working-files/` (just the dirty and untracked
+files, readable without unpacking), and `strays/` — two unreferenced copies that shadowed live
+files and were moved out, with a README explaining each. `git checkout main` returns a node to
+upstream without touching the archive.
 
 ## Lifecycle (all from the head node)
 
