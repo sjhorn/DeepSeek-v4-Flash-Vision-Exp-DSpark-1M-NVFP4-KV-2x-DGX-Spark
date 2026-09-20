@@ -69,6 +69,13 @@ sandbox dir and run the patch with `VLLM_PYTHON_DIR=<sandbox>` (zero cluster ris
 | `03-dedupe` | `v1/core/block_pool.py` | **PORTED as `MNT-7`.** Our `CachedBlockHashToBlock.insert()` explicitly merges a duplicate `(hash, group)` into a dict while lookups return only one, so stale copies hold LRU slots forever. 14-line guard; **3.9x retention** (72,109 → 280,690 tokens), needle 5/5, no throughput cost. |
 | `04-boundfix` | `single_type_kv_cache_manager.py` + `kv_cache_coordinator.py` | **Not applicable.** It fixes *sparse retention*, which our fork does not have: `reachable_block_mask`, `retention_interval`, `scheduler_block_size`, `_swa_anchor_slack`, `eagle_slack` are **0 occurrences** in our tree. Nothing to port onto. (It does *not* conflict with `MNT-6b` as first feared — `MNT-6b` touches `__init__`, `allocate_new_blocks`, `take_new_block_ids`, `free`, `remove_skipped_blocks`; boundfix targets `cache_blocks`.) |
 
+> **CAUTION 2026-09-20 — the exoneration below rests on an OFFLINE A/B that does not model
+> multi-turn decode, which is exactly the condition that destroys the prefix.** Live replay of the
+> same captured bodies shows the head at 99.6% with `max_tokens=1` and 0.0% with 50 decode tokens
+> over seven turns. `MNT-6b`'s `_maybe_evict_cached_block()` on recycled pages is the leading
+> suspect, and `SWA_RECYCLE=0` has never been A/B'd live. See
+> [`CACHE_TEST.md`](../../CACHE_TEST.md) §8; do not cite the paragraph below as settled.
+
 **`MNT-6b` was investigated and exonerated.** Its `_maybe_evict_cached_block()` call on recycled
 pages looked like a retention leak, but it is correct hygiene: only `ref_cnt == 1` pages (held
 solely by that request) are recycled, and their stale hash mapping must be dropped because the page

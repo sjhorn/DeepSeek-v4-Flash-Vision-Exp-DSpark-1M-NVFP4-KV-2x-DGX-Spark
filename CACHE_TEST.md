@@ -1,8 +1,9 @@
 # CACHE_TEST.md — three candidate prefix-cache mechanisms against our tree, and how we would test them
 
-**Status (2026-09-20, after the 15:34Z boot): Mechanisms 1 and 3 are implemented, mounted and
-MEASURED. Both are INERT on the metric they were built to move, and both are switched back OFF.
-Mechanism 2 is not implemented. Results and what they eliminate: §6.**
+**Status (2026-09-20, after the 15:34Z boot): the cause is FOUND — see §8. Decode across several
+turns destroys the prompt's cached prefix, reproducibly, with no client and no pressure involved.
+Mechanisms 1 and 3 are implemented, mounted, measured and INERT (§6), both switched back OFF;
+Mechanism 2 is not implemented. The next test targets `MNT-6b` and needs one restart (§8.4).**
 
 `MNT-8` (Mechanism 1) and `MNT-9` (Mechanism 3) ship gated on a flags file rather than container
 env, so the whole A/B costs **one** restart instead of three:
@@ -527,6 +528,95 @@ does not move this metric, and a synthetic head is durable where a session head 
    tools array in both sessions (swift-lsp attaching), costing a full **17.85s** re-prefill in the
    cold session. `death-probe.sh` disables the plugin deliberately; ordinary sessions do not. That
    is a client-side setting worth more than either engine mechanism.
+
+
+## 8. FOUND IT: decode across turns destroys the prompt's cached prefix (2026-09-20)
+
+§7 left "what kills a session's head" open. Six controlled runs on the same captured bodies closed
+it. **The killer is decode, and only when the conversation has several turns.**
+
+### 8.1 The runs
+
+All against the same head, each probe a single fresh-tail request, stock flags, engine otherwise
+quiet.
+
+| what was done to the engine | head afterwards |
+|---|---|
+| nothing (control, repeated all evening) | **99.5-99.6%, 0.5-0.8s** |
+| 224,500 tokens of unrelated prefill (5 requests) | **99.5%, 1.01s** — alive |
+| 1,122,240 tokens of unrelated prefill (25 requests) | 0.0%, 14.86s — dead |
+| replay the session's 7 bodies, `max_tokens=1` | **99.6%, 0.73s** — alive |
+| replay the same 7 bodies, `max_tokens=400` | **0.0%, 14.91s — DEAD** |
+| replay 1 body only, 166 tokens decoded | **99.5%, 0.67s** — alive |
+| replay all 7 bodies, 350 tokens decoded total (50 each) | **0.0%, 14.83s — DEAD** |
+
+Read the last three together: **identical prompts, identical order, identical everything except
+generation.** 166 decoded tokens on one turn is harmless. 350 decoded tokens spread over seven
+turns of a growing conversation destroys the prefix completely.
+
+So it is not volume — of prefill *or* of decode. It is decode **on a conversation that keeps
+extending**.
+
+### 8.2 What is now ruled out, with controls
+
+- **The client.** Plain `urllib` against `/v1/messages`, no Claude Code, no SSE, no aborts, no
+  beta headers, reproduces it exactly — and the `max_tokens=1` arm proves the same bodies are
+  harmless without decode.
+- **Preemption.** `vllm:num_preemptions_total` was **0.0** before and after a full real session.
+- **Allocation pressure as the everyday cause.** It takes ~1.1M tokens / ~25 large requests to
+  evict a warm head by pressure; a 7-turn session allocates a small fraction of that and kills it
+  every time.
+- **`MNT-8`'s free-queue ordering** (arm B) and **`MNT-9` as built** (arm C, and it pinned an
+  incomplete run anyway — §7.3).
+
+### 8.3 The mechanism this points at, and why it implicates our own patch
+
+Putting it together with the code:
+
+1. `MNT-6a` protects each request's aligned prompt prefix by holding a reference — that is why a
+   single turn's decode is harmless, and why the **last** turn's prefix survives into the next
+   session (measured: 87.1% in §7.2).
+2. That protected set is **FIFO with a cap** (1,674 blocks/group). Several turns — or ~25 unrelated
+   requests — push the head's blocks out of it.
+3. Once unprotected, the head's blocks are held only by the running request. As its sliding window
+   advances past them, `remove_skipped_blocks` fires and **`MNT-6b` calls
+   `_maybe_evict_cached_block()` on each recycled page**, destroying its hash mapping rather than
+   leaving it cached-but-free in the LRU.
+4. `find_longest_cache_hit` takes the **minimum across KV groups**, so the moment the sliding-window
+   groups lose their checkpoints, the hit is 0 — even though group 0 (full attention) may still
+   hold the whole head.
+
+That is consistent with every row in §8.1, including why pressure needs ~25 requests (it exhausts
+the same FIFO protection) and why decode matters (it is what advances the window past the prompt).
+
+**This contradicts two standing notes, and they are corrected, not quietly edited:**
+
+- `PREFIX-CACHE.md` listed **"Generation / decode"** as eliminated on the strength of *one request
+  generating 388 tokens*. That control is reproduced here (one turn, 166 tokens, alive) — it simply
+  does not generalise to multiple turns.
+- `PATCHES-KV.md` recorded **`MNT-6b` as "investigated and exonerated"** on the strength of an
+  **offline** four-cell A/B. The offline harness does not model multi-turn decode, which is exactly
+  the condition that matters.
+
+### 8.4 The next test, and it needs one restart
+
+`MNT-6b`'s kill switch is `SWA_RECYCLE=0`, a **container env var**, so it cannot be flipped on a
+running engine — the very problem the flags file was built to solve. The proposal is therefore:
+
+1. Move `MNT-6b`'s switch onto the flags file (`swa_recycle`), keeping the env var as an override.
+2. Fix `MNT-9` to verify the full `need`-wide run is present and **log loudly when it is not**
+   (§7.3), so arm C can be judged for the first time.
+3. One restart to load both. After that, this A/B needs no further restarts:
+
+| arm | flags | question |
+|---|---|---|
+| D | `swa_recycle: 0` | does the prefix survive multi-turn decode without the evict-on-recycle? |
+| C' | `pin_static_head: 1` (fixed) | does a complete pin hold the head through decode? |
+| D+C' | both | belt and braces, if either half works |
+
+**Reproducer for whoever runs it** (no session, no client, ~45s):
+`python3 <decode-dose> 7 50` — seven captured bodies, 50 decode tokens each, probe before and
+after. Alive→dead is the signal.
 
 ## 5. What is settled and needs no further work
 

@@ -50,6 +50,9 @@ writes a format nobody thought to list.
 | `local-ops/kv-flags.sh` | read or flip the `MNT-8` / `MNT-9` runtime flags on **both** nodes. No restart: the engine re-reads `/var/tmp/vllm-kv-flags/flags.json` once a second. `reset` returns to stock behaviour. |
 | `local-ops/kv-mech-tests.sh` | stage the patched KV files into a container and run `kv-mech-tests.py` (13 checks) against the **real** vLLM classes. No GPU, no restart, never touches the node's repo or the running engine. |
 
+| `local-ops/xsess/decode-dose.py <turns> <max_tokens>` | **the 45s reproducer for the prefix-destruction bug.** Replays captured request bodies with a chosen decode length, probing before and after. `7 50` = dead, `1 400` = alive. No client, no session, no restart. |
+| `local-ops/xsess/pressure-dose.py` | how much unrelated prefill it takes to evict a warm head (224K: survives, 1.1M: dies). |
+
 Arms and what each is supposed to move: `CACHE_TEST.md`.
 
 ## Operations

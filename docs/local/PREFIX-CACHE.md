@@ -703,8 +703,8 @@ Do not re-test these without new evidence:
 | `max_tokens` (4 vs 32000), `stream` | 2x2 matrix, all four shapes **99.7%**, clean. |
 | Transport (direct tunnel vs tap→mTLS→proxy) | Same body both paths, **99.7%** both, clean. |
 | Session growth to 97K tokens | Head retrievable **before and after** growth, 99.7% both. |
-| Generation / decode | A single request generating 388 tokens: head survived at **99.4%, 0.69s**. |
-| Time / pressure eviction | Probe-written head survived **5 min** including a 777K-token burst. |
+| ~~Generation / decode~~ | **WRONG — this was the cause. Withdrawn 2026-09-20.** The control (one request, 388 tokens) is real and reproduces (one turn, 166 tokens: 99.5%, 0.67s), but it does not generalise: the SAME seven captured bodies replayed with `max_tokens=1` leave the head at **99.6%**, and with 50 decode tokens each leave it at **0.0% / 14.83s**. Decode across a conversation that keeps extending is what destroys the prefix — [`CACHE_TEST.md`](../../CACHE_TEST.md) §8. |
+| Time / pressure eviction | Probe-written head survived **5 min** including a 777K-token burst. **Quantified 2026-09-20:** 224,500 tokens of unrelated prefill (5 requests) leaves it at 99.5%; **1,122,240 tokens (25 requests) kills it.** So pressure *can* evict a head, but it needs ~25 large requests — far more than a session does, which is why pressure is not the everyday cause. |
 | Patch 6, `SWA_RECYCLE`, `PROTECTED_FRACTION` | Offline A/B, four cells, identical row for row — and a grow-then-free session sim does **not** reproduce it in any arm. |
 | vllm#42948 hybrid cascade | Does not reproduce; this fork already carries repairs for the neighbouring 0%-hit modes. **No upstream report filed.** |
 | **Claude Code moving the head** | **Innocent.** A real captured session (inline `system` messages in the messages array, the Patch 1 path) is a **strict prefix at every turn**, with `system` and `tools` hashes stable throughout. Patch 1's inline-system merge is idempotent. |
@@ -722,10 +722,14 @@ harness does not model — it reproduces neither stock, with Patch 6, nor with r
 Candidates not yet separated: chunked prefill across turns, async scheduling, spec-decode
 rollback, or preemption under the co-tenant's ~140K-token requests.
 
-**Narrowed further 2026-09-20 (the `MNT-8`/`MNT-9` arms):** whatever it is, it is **not eviction** —
-a head whose blocks are pinned by reference on an idle engine is still unreachable 2s after its
-session ends. Look at what drops the hash mappings at the end of a real session (an abort/cancel
-path, or an eviction call on a path we have not instrumented), not at what reclaims blocks.
+**RESOLVED 2026-09-20 — it is decode across turns.** Identical captured bodies, replayed with no
+client at all: `max_tokens=1` leaves the head at 99.6%, `max_tokens=50` over seven turns leaves it
+at 0.0% / 14.83s. One turn decoding 166 tokens is harmless. The leading mechanism is `MNT-6a`'s
+FIFO protection releasing the head's blocks, after which `MNT-6b`'s `_maybe_evict_cached_block()`
+destroys their hash mappings as the sliding window passes — and the coordinator's
+minimum-across-groups rule then reads 0. Full evidence and the next A/B:
+[`CACHE_TEST.md`](../../CACHE_TEST.md) §8. Reproduce in 45s with
+`python3 local-ops/xsess/decode-dose.py 7 50`.
 
 **Narrowed 2026-09-19 (Phase A):** it is not "a real session" — it is **multi-turn**. A one-prompt,
 no-tool real session's head survives at +2s (99.6%, 0.57s, n=2), where a six-turn one is gone
