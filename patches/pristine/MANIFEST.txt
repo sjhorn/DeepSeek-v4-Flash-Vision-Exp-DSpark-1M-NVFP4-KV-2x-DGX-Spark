@@ -1,0 +1,28 @@
+# patches/pristine/ — unpatched vLLM sources, pulled from the runtime image
+#
+# These are the ORIGINALS that patches/*.py are derived from, and the left-hand
+# side of every diff in patches/generated/.  Apache-2.0, same as vLLM.
+#
+# Pull method (do NOT read through a bind-mount — that returns the PATCHED file,
+# which is how local-ops/baseline-20260914/MISLABELLED-was-patched-*.py happened):
+#
+#   ssh shorn@spark-45ea "docker run --rm --entrypoint cat \
+#     vllm-dspark-runtime:dspark-nvfp4-stage-c <abs path inside the image>"
+#
+# If the image id below no longer matches the running image, these files are STALE
+# and every generated diff is suspect.  Re-pull, then re-run:
+#   bash scripts/regen-local-patches.sh
+
+image=vllm-dspark-runtime:dspark-nvfp4-stage-c
+image_id=sha256:4035bb5a535dd0e794f40e8d320532083eda605a78efa97cf0aad88bfea70b09
+vllm_version=0.21.1rc1.dev339+g1967a5627bc3
+site_packages=/opt/env/lib/python3.12/site-packages
+captured=2026-09-20
+captured_from=spark-45ea
+
+# sha256  lines  path (relative to this directory)
+1bd74edf3344e5f598d9959a5be253bead63e499939a43cdf961a13549df4045     247  vllm/entrypoints/anthropic/protocol.py
+c7744bf7c598c8ff908204d121b04b2e98fc7506630129b6beae74cff4ff3b0b     839  vllm/entrypoints/anthropic/serving.py
+36a1683a7341a27862b0301e991e76734d968701632775932fbeb0420e894283     520  vllm/v1/core/block_pool.py
+fc68b4ca9914f7c81bda8cc4d0f7495d0665b1165f29d3b08fbc106064ecfb47    1421  vllm/v1/core/single_type_kv_cache_manager.py
+52d43b97d5c0f84285df596b2da5f4ee32184b9f41b87c6ef99437225b5720b5     344  vllm/v1/engine/detokenizer.py

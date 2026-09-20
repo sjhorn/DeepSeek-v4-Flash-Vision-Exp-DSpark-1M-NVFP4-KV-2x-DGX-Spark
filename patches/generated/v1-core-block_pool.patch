@@ -1,0 +1,23 @@
+--- a/vllm/v1/core/block_pool.py
++++ b/vllm/v1/core/block_pool.py
+@@ -278,6 +278,20 @@
+                 block_hash, kv_cache_group_id
+             )
+             blk.block_hash = block_hash_with_group_id
++            # [kvfix-dedupe] Ported from co-l/ds4-prefix-cache-fixes 03-dedupe.py
++            # for vLLM 0.21.1rc1.dev339 (their anchor targets a different fork).
++            # A re-computed position (hit-path drop / spec-decode boundary) would
++            # otherwise insert a SECOND block with the same (hash, group); our
++            # CachedBlockHashToBlock.insert() explicitly merges them into a dict,
++            # while lookups only ever return one. The older copy then lingers
++            # forever, never read, holding an LRU slot against older contexts.
++            # Both copies are byte-identical (same hash chain), so drop the stale
++            # mapping and keep one block per position.
++            _dup_old = self.cached_block_hash_to_block.get_one_block(
++                block_hash_with_group_id
++            )
++            if _dup_old is not None and _dup_old is not blk:
++                self._maybe_evict_cached_block(_dup_old)
+             self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
+             if new_hashes is not None:
+                 new_hashes.append(maybe_convert_block_hash(block_hash))

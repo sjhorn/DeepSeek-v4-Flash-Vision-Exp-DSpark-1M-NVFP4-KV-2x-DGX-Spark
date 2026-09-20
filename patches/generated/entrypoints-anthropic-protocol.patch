@@ -1,0 +1,91 @@
+--- a/vllm/entrypoints/anthropic/protocol.py
++++ b/vllm/entrypoints/anthropic/protocol.py
+@@ -2,6 +2,30 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ """Pydantic models for Anthropic API protocol"""
+ 
++# =============================================================================
++# ===== API-0: accept what Claude Code actually sends =========================
++#
++# LOCAL FORK.  Bind-mounted over vllm/entrypoints/anthropic/protocol.py in
++# docker-compose.dspark.yml.  Whole-file copy because that is what a bind-mount
++# needs; the reviewable delta is
++#   patches/generated/entrypoints-anthropic-protocol.patch
++# (regenerate: scripts/regen-local-patches.sh, original: patches/pristine/).
++#
++# why: stock validation rejects four things Claude Code sends every day --
++#   1. role:"system" inside the messages array          (vllm-project/vllm#44283)
++#   2. server_tool_use / web_search_tool_result blocks, replayed from history
++#      by clients after our serving patch emits them
++#   3. server-side tool definitions, which carry `type`/`max_uses` and NO
++#      input_schema, so the required-dict validator 422'd them
++#   4. the `thinking` control block, which pydantic's extra="ignore" dropped --
++#      see API-9d in patches/anthropic_serving_inline_system.py
++# Each one is a 422 before any inference happens, i.e. a hard client failure.
++#
++# kill switch: none -- validation relaxations have no runtime toggle.  Roll back
++#      by removing the protocol.py bind-mount line from the compose.
++# detail: docs/local/PATCHES-API.md#api-0
++# =============================================================================
++
+ import time
+ from typing import Any, Literal
+ 
+@@ -42,6 +66,10 @@
+         "tool_reference",
+         "thinking",
+         "redacted_thinking",
++        # Server-side tool blocks — emitted by our web_search/web_fetch
++        # patch and replayed by clients in conversation history.
++        "server_tool_use",
++        "web_search_tool_result",
+     ]
+     text: str | None = None
+     # For image content
+@@ -65,21 +93,25 @@
+ class AnthropicMessage(BaseModel):
+     """Message structure"""
+ 
+-    role: Literal["user", "assistant"]
++    role: Literal["user", "assistant", "system"]
+     content: str | list[AnthropicContentBlock]
+ 
+ 
+ class AnthropicTool(BaseModel):
+     """Tool definition"""
+ 
++    type: str | None = None
+     name: str
+     description: str | None = None
+-    input_schema: dict[str, Any]
++    input_schema: dict[str, Any] | None = None
+     defer_loading: bool | None = None
++    max_uses: int | None = None
+ 
+     @field_validator("input_schema")
+     @classmethod
+     def validate_input_schema(cls, v):
++        if v is None:
++            return v
+         if not isinstance(v, dict):
+             raise ValueError("input_schema must be a dictionary")
+         if "type" not in v:
+@@ -129,6 +161,18 @@
+         ),
+     )
+ 
++    # PATCH 9d (staged 2026-09-18; LIVE -- verified in the running container
++    # 2026-09-20, engine started 08:58Z): Claude Code STATES its
++    # intent per request -- {"type": "disabled"} on auto-mode permission
++    # classifier calls, {"type": "adaptive"} on main-agent calls. Pydantic's
++    # default extra="ignore" dropped it, so we were inferring from the system
++    # prompt what the client says outright. Declared so serving.py can honour
++    # it; the system-prompt marker check stays as the fallback.
++    thinking: dict[str, Any] | None = Field(
++        default=None,
++        description="Anthropic extended-thinking control block.",
++    )
++
+     @field_validator("model")
+     @classmethod
+     def validate_model(cls, v):
