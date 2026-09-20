@@ -32,7 +32,19 @@ REMOTE="${REMOTE:-}"
 # the check silently reports only one line.  Always detach stdin here.
 dk() {
   if [ -n "$REMOTE" ]; then
-    ssh -n "$REMOTE" docker "$@" < /dev/null
+    # ssh hands the command to a REMOTE shell, which re-splits it, so every
+    # argument has to arrive quoted.  Without this a marker containing a SPACE
+    # silently became several arguments:
+    #   grep -qF -- def prepend_n FILE
+    # searches for "def" in a file named "prepend_n" (absent) and in FILE, and
+    # passes on any file containing "def".  Found 2026-09-20: MNT-8 reported OK
+    # against a file that did not have the patch at all, and API-9d / API-10b /
+    # API-11b had been passing the same way.  A backstop that cannot fail is
+    # worse than no backstop.
+    local q=""
+    local a
+    for a in "$@"; do q="$q $(printf '%q' "$a")"; done
+    ssh -n "$REMOTE" "docker$q" < /dev/null
   else
     docker "$@" < /dev/null
   fi
@@ -80,8 +92,8 @@ MNT-5|v1/engine/detokenizer.py|VLLM_SUPPRESS_STOPS_IN_REASONING|stop strings can
 MNT-6a|v1/core/single_type_kv_cache_manager.py|_PROTECTED_FRACTION_ENV|unbounded legacy protection caps swallow the block pool
 MNT-6b|v1/core/single_type_kv_cache_manager.py|_RECYCLE_ENABLED|sliding-window pages churn the shared LRU instead of recycling
 MNT-7|v1/core/block_pool.py|_dup_old|duplicate cached blocks hold LRU slots forever (3.9x retention)
-MNT-8|v1/core/kv_cache_utils.py|def prepend_n|scratch pages queue behind cached prefixes; the allocator evicts live prefixes first
-MNT-8b|v1/core/block_pool.py|prepend and hasattr|free_blocks cannot route scratch pages to the head of the queue
+MNT-8|v1/core/kv_cache_utils.py|prepend_n(blocks|scratch pages queue behind cached prefixes; the allocator evicts live prefixes first
+MNT-8b|v1/core/block_pool.py|prepend_n(freed)|free_blocks cannot route scratch pages to the head of the queue
 MNT-9|v1/core/single_type_kv_cache_manager.py|_FLAG_PIN_HEAD|the static head is pinned only to the prompt end, and released FIFO
 '
 

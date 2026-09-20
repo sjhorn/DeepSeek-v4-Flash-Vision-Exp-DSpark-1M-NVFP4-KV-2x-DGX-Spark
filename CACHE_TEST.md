@@ -15,7 +15,10 @@ HOST=spark-45ea bash local-ops/kv-mech-tests.sh          # 13 offline checks, no
 ```
 
 Neither flag does anything until the next restart imports the mounted files; after that, arms flip
-with no restart at all.
+with no restart at all. **Until that restart `check-local-patches.sh` reports `FAIL` for `MNT-8`,
+`MNT-8b` and `MNT-9`, and that is correct** — a single-file bind mount holds the inode git replaced,
+so the container is still reading the pre-push file (`INCIDENTS.md`, 2026-09-20). The flags file is
+deliberately not subject to this: its **directory** is what the compose mounts.
 Assessed 2026-09-20 against the running image `vllm-dspark-runtime:dspark-nvfp4-stage-c`
 (vLLM `0.21.1rc1.dev339+g1967a5627bc3`), by diffing the PR against the image's real sources —
 `patches/pristine/` plus `kv_cache_utils.py` / `kv_cache_coordinator.py` read out of the container.

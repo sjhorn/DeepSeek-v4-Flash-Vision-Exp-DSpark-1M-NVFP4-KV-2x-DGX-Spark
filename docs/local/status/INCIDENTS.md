@@ -550,6 +550,65 @@ old one kept as `MISLABELLED-was-patched-...py`. `pristine-block_pool.py` and
 `local-ops/baseline-20260914/PRISTINE-README.md`. Always re-pull with
 `docker run --rm --entrypoint cat <image> <path>`.
 
+### A push makes a single-file bind mount STALE, and `check-local-patches.sh` reads the stale copy (2026-09-20)
+
+**Symptom.** Immediately after `git push head local/main && git push worker local/main`, with both
+nodes reporting the new commit and 0 dirty, `scripts/check-local-patches.sh` reports `FAIL` for
+rows whose code is demonstrably present in the pushed file.
+
+**Root cause.** A `:ro` bind mount of a single FILE binds that file's **inode**. `updateInstead`
+checks out by REPLACING files, so the working tree gets a new inode and the container keeps the
+old one. Measured on `spark-45ea` right after the `MNT-8`/`MNT-9` push:
+
+```
+host      inode 7864609   patches/patch6-single_type_kv_cache_manager.py   1,749 lines
+container inode 7864612   .../v1/core/single_type_kv_cache_manager.py      1,506 lines
+```
+
+The container is not reading a cached copy — it is reading a *different file* that no longer has a
+name in the working tree. `docker exec … cat` confirms the old content.
+
+**Consequences, in the order they bite:**
+
+1. **Expected `FAIL`s after a push are not a defect.** A newly added marker cannot appear in the
+   container until the container is **recreated** (a restart re-binds the path). Read
+   `check-local-patches.sh` between a push and the next restart as "what the RUNNING engine has",
+   never as "what the branch has" — for that, read the file, or `regen-local-patches.sh --check`.
+2. **It also means the reverse**: a row that passes after a push may be passing on the *old* file.
+   The check is a statement about the running container, full stop.
+3. It is a stronger version of "a push is not a restart": not only are imported modules pinned, the
+   files themselves are.
+
+**What is NOT affected:** the flags file (`/var/tmp/vllm-kv-flags/flags.json`), because the compose
+mounts its **directory**. A directory mount follows replacement, which is exactly why `MNT-8` and
+`MNT-9` are gated on a file in a mounted directory rather than on a mounted file.
+
+### `check-local-patches.sh` could not fail on a marker containing a space (2026-09-20)
+
+**Symptom.** A newly added row, `MNT-8|v1/core/kv_cache_utils.py|def prepend_n|…`, reported `OK`
+against a container whose `kv_cache_utils.py` had no `prepend_n` at all — `grep -c` said `0` while
+the checker said `OK`.
+
+**Root cause.** `dk()` ran `ssh -n "$REMOTE" docker "$@"`, and **ssh hands the command to a remote
+shell that re-splits it**. The marker's space made it two arguments:
+
+```
+grep -qF -- def prepend_n FILE      # pattern "def", files "prepend_n" (absent) and FILE
+```
+
+so the row passed on any file containing `def`. Three existing rows had space-bearing markers and
+had been passing the same way: `API-9d` (`def client_disabled_thinking`), `API-10b`
+(`def recover_dsml_arguments`), `API-11b` (`def leading_system_boundary`). All three do genuinely
+hold — verified after the fix — so nothing was actually missing, but the backstop could not have
+told us.
+
+**Fix.** `dk()` now `printf '%q'`-quotes every argument before handing it to ssh, and the two new
+rows use space-free markers as well. **Signature to recognise it again:** a `check-local-patches.sh`
+row that passes while `docker exec <c> grep -c '<marker>' <file>` returns 0.
+
+**The general lesson** — a fail-closed check is only fail-closed if you have watched it fail. This
+one was added as a backstop after a near-miss, and had a whole class of rows it could not fail on.
+
 ## Known issues
 
 ### KV pool exhaustion under long-context sessions
