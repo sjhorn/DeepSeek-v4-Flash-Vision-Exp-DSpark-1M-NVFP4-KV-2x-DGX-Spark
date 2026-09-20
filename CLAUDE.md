@@ -12,9 +12,10 @@ same facts were restated in two places and drifted apart.
 
 | I want to… | read |
 |---|---|
+| **deploy a change to the cluster** | **"Deploying" below — it is a `git push`, never a copy** |
 | restart, stop, check, switch text↔vision | `docs/local/CLUSTER.md` |
 | know what is patched, its kill switch, its rollback | `docs/local/PATCH-REGISTRY.md` |
-| change an Anthropic-endpoint patch (`API-0`, `API-8`…`API-13`) | `docs/local/PATCHES-API.md` |
+| change an Anthropic-endpoint patch (`API-0`, `API-8`…`API-14`) or the `PLG-14b` plugin | `docs/local/PATCHES-API.md` |
 | change a KV / block-pool patch (`MNT-5`, `MNT-6`, `MNT-7`) | `docs/local/PATCHES-KV.md` |
 | find out why a session re-prefilled, or measure the cache | `docs/local/PREFIX-CACHE.md` |
 | choose a thinking tier or effort level | `docs/local/THINKING-AND-EFFORT.md` |
@@ -34,17 +35,6 @@ now the change history these docs used to carry in prose.
 `branch.local/main.pushRemote` is `no-push`, because `origin` is upstream's GitHub repo and shows
 the **same URL for push**. Never push this branch there.
 
-**Both nodes are git checkouts of `local/main` too (since 2026-09-20), so deploying is a push:**
-
-```bash
-git push head local/main && git push worker local/main
-```
-
-They are set `receive.denyCurrentBranch = updateInstead`, so this updates their working trees and
-**refuses if a node's tree is dirty** — investigate rather than override. A push stages the next
-restart; it never performs one, and never changes the running engine. Details:
-`docs/local/CLUSTER.md`.
-
 The mounted patch files are whole-file copies of vLLM source, so the reviewable delta is the
 generated diff:
 
@@ -58,6 +48,33 @@ then allows `*.py`, `*.sh`, `*.md` and `requirements.txt` back. Deny-by-default 
 capture or log format is ignored automatically, while a new script has to be added on purpose.
 **Prompt captures contain full conversations — if you add a format, check it is ignored before you
 commit.** See `docs/local/TOOLING.md`.
+
+## Deploying — push, never copy
+
+**All three copies of this repo are git checkouts of `local/main`** (Mac, head `spark-45ea`, worker
+`spark-da08`), and deploying is one command — the only supported way:
+
+```bash
+git push head local/main && git push worker local/main
+# then: both nodes must report the new commit and 0 dirty, and
+# scripts/check-local-patches.sh must be 17/17 on each.
+```
+
+Both nodes are `receive.denyCurrentBranch = updateInstead`, so a push updates their **working
+tree**, not just the ref. Three rules follow from that:
+
+1. **Never `scp` or `rsync` into a node's repo.** Not style — on 2026-09-20 the head was running
+   `API-14`/`PLG-14b`, a live feature in no checkout, and an `scp` of our copy would have silently
+   deleted it, its worker sync and both compose mount lines, failing nowhere. A push cannot.
+2. **A refused push is information, not an obstacle.** `updateInstead` declines a dirty tree, which
+   means something was changed on the node. Find it, bring it into the branch, push. Do not
+   `--force` past it, and do not fall back to copying.
+3. **A push is not a restart and changes nothing running.** The patches are bind-mounted and the
+   container holds the inodes it imported at boot, so a push only stages the next restart.
+
+Narrow exceptions, which do not travel by push: `.env.dspark*` (they carry `SERPER_API_KEY`),
+`~/vision-stage/` (regenerated per node from that node's image), and everything `local-ops/`
+produces. The start script syncs what the worker needs at boot. Detail: `docs/local/CLUSTER.md`.
 
 ## Working agreement — update these docs as part of the work, not after it
 
@@ -73,6 +90,7 @@ Triggers, and what each must record:
 
 | Trigger | Record where | What |
 |---|---|---|
+| **Any change to a tracked file that runs on a node** | commit, then `git push head local/main && git push worker local/main` | the change is **not deployed until both nodes report the new commit and 0 dirty**. Never `scp` — see "Deploying" above |
 | Any restart / deploy | `docs/local/status/BOOT-METRICS.md` | date, KV pool + concurrency from the boot log, what changed, which start script was used |
 | New or removed patch / bind-mount | `docs/local/PATCH-REGISTRY.md` **and** the patch's detail doc | registry: one row (id, target, kill switch, rollback, one-line evidence). Detail doc: why, and the measurement that justified it. Then `bash scripts/regen-local-patches.sh` and add a marker row to `scripts/check-local-patches.sh` |
 | `git pull` from upstream | `docs/local/UPSTREAM.md` | new commit, what it brings, adopt/skip verdict **per item**, whether a rebuild or restart is implied. If the image changed, re-capture `patches/pristine/` |
@@ -107,6 +125,10 @@ When asking, state all four:
 
 A restart is genuinely required only to change code that is already imported (bind-mounted `.py`
 files) or an env var the container reads at start.
+
+**Do not restart merely to "apply" a push.** A push has already put the files in place; they take
+effect at the next restart whenever it happens, for whatever reason. If the change genuinely needs
+to be live now, that is the goal to state when asking — not "to deploy it".
 
 Two habits that have already paid for themselves here:
 
@@ -157,3 +179,6 @@ Two habits that have already paid for themselves here:
 - **A bind mount to the wrong path fails SILENTLY** — the container starts, the API answers, the
   smoke test passes, and the patch is not there. After any restart run all three checks in
   `docs/local/CLUSTER.md`, not just the smoke test.
+- **Never edit a file directly on a node.** It will block the next deploy (`updateInstead` refuses
+  a dirty tree) and, until someone notices, the node is silently ahead of the branch — which is
+  exactly how `API-14`/`PLG-14b` came to exist in no checkout. Edit on the Mac, commit, push.
