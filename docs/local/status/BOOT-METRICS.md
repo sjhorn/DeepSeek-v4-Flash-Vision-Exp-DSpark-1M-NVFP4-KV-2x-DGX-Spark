@@ -12,6 +12,40 @@ boot log, what changed, and which start script was used. That is the working agr
 > Moved verbatim from `STATUS.md` during the 2026-09-20 doc split.
 
 
+## Boot metrics (2026-09-20 14:33Z boot: first boot of `local/main`, boot sentinel proven)
+
+**Deliberate test restart.** Nothing new was deployed — both nodes were already at the pushed
+commit; the restart only made the staged files live, and answered whether a *real* cold boot
+survives a running watchdog.
+
+| | |
+|---|---|
+| started | head 14:33:06Z, worker 14:33:05Z, `RestartCount=0` both |
+| API answering | 14:39:09Z — **363s cold boot** |
+| **GPU KV cache size** | **2,484,672 tokens** (2.37x at 1,048,576) |
+| init engine | 68.86s (compilation 3.25s) |
+| protected block cap | 1,674 blocks/group — pool 16,741 blocks, 5 managers, fraction 0.50 |
+| started by | `start-deepseek-v4-flash-dspark.sh`, detached, **watchdog left running on purpose** |
+
+KV pool 2,484,672 against the 08:58Z boot's 2,510,051 — a 1.0% swing, well inside the documented
+~11% per-boot variation. Not a regression.
+
+**What this boot proved:**
+
+- **The boot sentinel works.** `0` failed watchdog polls across a 363s boot, where the previous
+  cold boot reached **7 of 8**. The hold-off logged 9s after the sentinel appeared and the failure
+  count was reset, so the `stop` that preceded it cost nothing.
+- **`MNT-6a` / `MNT-6b` labels are live** — the relabel this branch made, now in the engine log,
+  with **0** lines carrying the old `Patch 5:` / `Patch 6:` names. The `MNT-6a` cap line only
+  appears on first real prompt allocation, so it took a 40,008-token request to surface.
+- **The git-pushed tree loads.** `check-local-patches.sh` 17/17 on both nodes against the fresh
+  container, `check-patch4.sh` OK, `PLG-14b` registered at 14:33:20
+  (`prefill_collector -> prefill_collector:PrefillCollector`).
+- Vision auto-detection, both-node stage preflight and the page-cache reclaim all ran.
+
+> **It also found a real defect — see [`INCIDENTS.md`](INCIDENTS.md), "The boot sentinel survived
+> the boot".** The boot was clean; the *cleanup* was not.
+
 ## Boot metrics (2026-09-20 08:58Z boot: Vision-Exp, no config change)
 
 **Recorded retroactively on 2026-09-20 from the container and engine logs.** This restart was not

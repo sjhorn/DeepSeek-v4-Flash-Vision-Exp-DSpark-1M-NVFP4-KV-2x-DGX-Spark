@@ -10,6 +10,41 @@ The boot-metrics section for the recovery boot after the watchdog incident lives
 > Moved verbatim from `STATUS.md` during the 2026-09-20 doc split.
 
 ## Incidents
+### The boot sentinel survived the boot — `set -e` aborted its own cleanup (2026-09-20)
+
+**Found by the test restart that was meant to confirm the sentinel works.** It did work: 363s cold
+boot, **0 failed watchdog polls**. But the start script exited without removing
+`/tmp/dspark-booting`, so the watchdog stayed **held off after the boot had finished** — blind,
+with the cluster healthy and nobody counting.
+
+**Root cause, reproduced with the exact code:**
+
+| condition | result |
+|---|---|
+| `DROP_PID` unset | sentinel removed — ok |
+| `DROP_PID` set, process already dead | **sentinel SURVIVED** |
+
+`cleanup_on_exit` runs under `set -e` and opened with a bare
+`[ -n "$DROP_PID" ] && kill "$DROP_PID" 2>/dev/null`. In production the page-cache reclaim **is**
+active, so `DROP_PID` is set, and the wait loop already killed that subshell on success — so `kill`
+returns non-zero, `set -e` aborts the function, and the `rm -f` on the next line never runs.
+
+**The pre-deploy sandbox test passed because it exercised the `DROP_PID`-unset branch.** It tested
+the path that could not fail. A trap that cleans up two things must be tested with both of them
+present, not just the one that is convenient to simulate.
+
+**Fix.** `if` instead of `&&`, and `|| true` on everything that can fail, with the reason recorded
+inside the function. Every command in an exit trap must be failure-proof.
+
+**Blast radius was bounded by design**, which is the one part that went right: `SENTINEL_MAX_AGE`
+(900s) means a stale sentinel expires on its own. In practice it was removed by hand at 16:40 and
+the watchdog logged `boot sentinel gone -- resuming normal polling` one poll later. The API stayed
+200 throughout and nothing was ever at risk.
+
+**Signature.** `ls -l /tmp/dspark-booting` when no start script is running — from a script file, or
+`pgrep -f` will match the ssh command line carrying the pattern and tell you one *is* running when
+none is. That trap cost time here too.
+
 ### Restarting the watchdog left the cluster with ZERO watchdogs (2026-09-20)
 
 **Hit while deploying the boot sentinel below.** `pkill` the old watchdog, confirm `pgrep` reads 0,
