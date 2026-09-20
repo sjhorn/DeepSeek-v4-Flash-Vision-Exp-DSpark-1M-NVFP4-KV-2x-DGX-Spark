@@ -115,7 +115,7 @@ retention", confirmed on 0.22.1rc1) is **not in our 0.21.1rc1.dev339 runtime**.
 
 | half of the PR | verdict |
 |---|---|
-| **Free-queue ordering** — `prepend_n()`, `free_blocks(prepend=True)`, scratch blocks reused before cached ones, in `remove_skipped_blocks()` *and* `SlidingWindowManager.free()` | **PORTED 2026-09-20 as `MNT-8`**, mounted and OFF (flag `free_queue_prepend_uncached`). It is the missing end-of-request half of `MNT-6b`, and the first mechanism that predicts multi-turn prefix decay while a single-turn head survives. **Not yet measured.** |
+| **Free-queue ordering** — `prepend_n()`, `free_blocks(prepend=True)`, scratch blocks reused before cached ones, in `remove_skipped_blocks()` *and* `SlidingWindowManager.free()` | **PORTED 2026-09-20 as `MNT-8`**, mounted and OFF (flag `free_queue_prepend_uncached`). It is the missing end-of-request half of `MNT-6b`, and the first mechanism that predicts multi-turn prefix decay while a single-turn head survives. **Measured 2026-09-20 and inert here** — not because the port is wrong, but because our failure is not eviction at all (`CACHE_TEST.md` §6). |
 | **`VLLM_PREFIX_CACHE_RETENTION_INTERVAL`** — sparse SWA checkpointing (`0`, or a multiple of the 256-token alignment such as `32768`) | **Applies in principle, second in line.** Our SWA groups cache densely *regardless* of any interval, because `kv_cache_coordinator.py:515` disables the mask under MTP. Adopting it means replacing that fork-local bail-out with upstream's eagle-aware mask — a live A/B, where a mistake reads as 0% hit. |
 
 Full analysis, the per-group block-size table, the porting surface and the test plan:

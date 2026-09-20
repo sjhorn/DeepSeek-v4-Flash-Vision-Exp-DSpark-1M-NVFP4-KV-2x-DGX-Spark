@@ -12,6 +12,38 @@ boot log, what changed, and which start script was used. That is the working agr
 > Moved verbatim from `STATUS.md` during the 2026-09-20 doc split.
 
 
+## Boot metrics (2026-09-20 15:34Z boot: make `MNT-8` / `MNT-9` live for the A/B)
+
+**Restart spent deliberately, with a specific ask, to run arms A and B of `CACHE_TEST.md`.**
+Both mechanisms shipped OFF; the restart imported the mounted files so the flags could be flipped
+afterwards **without** further restarts.
+
+| | |
+|---|---|
+| started | 15:34:2xZ head and worker, `RestartCount=0` both |
+| API answering | **17:40:18 local (15:40Z)** — ~360s cold boot |
+| **GPU KV cache size** | **2,517,769 tokens** (2.40x at 1,048,576) |
+| init engine | 67.95s (compilation 3.13s) |
+| protected block cap | 1,674 blocks/group — pool 16,741 blocks, 5 managers, fraction 0.50 |
+| MNT-9 head-pin cap | 169 blocks/group (`head_pin_fraction` 0.05, same 5 managers) |
+| started by | `start-deepseek-v4-flash-dspark.sh`, detached; watchdog stopped first and restarted after, exactly one running |
+| what changed | `MNT-8` (new `kv_cache_utils.py` mount + `free_blocks(prepend=)` + `_free_split`), `MNT-9` (static-head pinning), the flags-directory mount |
+
+KV pool 2,517,769 against the 14:33Z boot's 2,484,672 — a **1.3% swing**, inside the documented
+~11% per-boot variance and not attributable to the new mounts.
+
+**Post-boot checks, all three, both nodes:** `check-local-patches.sh` **20/20** on head and worker
+(up from 17 rows; `MNT-8`, `MNT-8b`, `MNT-9` added), `check-patch4.sh` OK, `verify-server.py`
+**14/14**.
+
+> **One check row was wrong, and the boot is what caught it.** `MNT-8` asserted the marker
+> `prepend_n(blocks` while the signature is `def prepend_n(self, blocks: ...)`, so it FAILed against
+> a node where the mount was correct and loaded (`kv_cache_utils.py:329`). Fixed the same session —
+> the mirror image of the false PASS fixed hours earlier, and the reason both were caught is that
+> the rows were read against a real boot instead of being trusted.
+
+Results of the arms this boot bought: [`CACHE_TEST.md`](../../../CACHE_TEST.md) §6.
+
 ## Boot metrics (2026-09-20 14:33Z boot: first boot of `local/main`, boot sentinel proven)
 
 **Deliberate test restart.** Nothing new was deployed — both nodes were already at the pushed

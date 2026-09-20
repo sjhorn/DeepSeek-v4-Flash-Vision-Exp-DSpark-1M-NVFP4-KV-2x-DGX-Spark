@@ -1,7 +1,8 @@
 # CACHE_TEST.md — three candidate prefix-cache mechanisms against our tree, and how we would test them
 
-**Status (2026-09-20): Mechanisms 1 and 3 are IMPLEMENTED and mounted, both OFF. Mechanism 2 is
-not implemented. Nothing is measured, and no restart has been spent.**
+**Status (2026-09-20, after the 15:34Z boot): Mechanisms 1 and 3 are implemented, mounted and
+MEASURED. Both are INERT on the metric they were built to move, and both are switched back OFF.
+Mechanism 2 is not implemented. Results and what they eliminate: §6.**
 
 `MNT-8` (Mechanism 1) and `MNT-9` (Mechanism 3) ship gated on a flags file rather than container
 env, so the whole A/B costs **one** restart instead of three:
@@ -392,6 +393,66 @@ is not, A has to be re-measured after the restart with the flag off, which costs
 
 That restart will be asked for separately, with the four required points, at the time it is wanted.
 Per `CLAUDE.md`: this document is not that ask, and reading it is not an approval.
+
+
+## 6. Results — arms A, B and C, 2026-09-20 (15:34Z boot)
+
+All five runs on one boot, one KV pool (2,517,769 tokens), engine otherwise idle, alternating
+arm order. Instrument: `local-ops/xsess/death-probe.sh 2 …/workload-a.txt <tag>` — a real six-step
+Claude Code session, then **one** probe 2s after it ends. Read the seconds: ~0.7s alive, 14-22s
+dead.
+
+| run | arm | flags | head at +2s | prefill |
+|---|---|---|---|---|
+| armA | A (control) | both 0 | **0.0%, 0 tok** | 14.16s |
+| armB | B | `free_queue_prepend_uncached: 1` | **0.0%, 0 tok** | 14.21s |
+| armB2 | B | ″ | **0.0%, 0 tok** | 14.17s |
+| armA2 | A (control) | both 0 | **0.0%, 0 tok** | 14.13s |
+| armC | C | `pin_static_head: 1` | **0.0%, 0 tok** | 14.24s |
+
+Spread across all five: **0.6%**. Within-session behaviour is also unchanged — arm A and arm B
+both report 6/6 strict prefix, median **99.6%** of the achievable ceiling (`matrix-report.py`).
+
+### Both mechanisms provably ran
+
+Neither result is a "flag never arrived" null:
+
+- **The flag reaches the engine live.** `docker exec … cat /etc/vllm-kv-flags/flags.json` returned
+  `{"free_queue_prepend_uncached": 1, …}` mid-run, through the directory mount, with no restart.
+  **The no-restart A/B design works** — that is the one unambiguous win of this boot.
+- **`MNT-9` logged what it did**, on all five KV groups:
+  `MNT-9: KV group 0 pinned a static head at B=22784 tokens (89 blocks, cap 169 blocks)`, with
+  2 / 2 / 3 / 16 blocks on groups 1-4. B was found in-engine from the token stream exactly as
+  designed, and the SWA groups pinned only their tails.
+
+### What this eliminates — and it is worth more than the arms
+
+**The head does not die of eviction.** The strongest reading is not "`MNT-8` and `MNT-9` are
+useless" but that the failure they target is not the failure that is happening:
+
+1. The engine was **idle** with a 2.5M-token pool and a 44K conversation. Nothing was competing for
+   blocks, so free-queue *order* (`MNT-8`) cannot matter — there is nothing to evict for.
+2. `MNT-9` **held 112 blocks of the head by reference**, so they could not be evicted or reused by
+   anyone, and the head was *still* unreachable 2s later.
+3. Caching and lookup were working perfectly at that moment: three probes on the same head in a row
+   returned **27,136 tokens at 0.49-0.58s**, repeatably.
+
+So a probe-written head survives while a session-written head does not, **even when its blocks are
+pinned in memory**. That rules out the whole family of "something evicted it" explanations —
+`MNT-8`, `MNT-9`, `MNT-6a`'s cap and LRU pressure alike — and points at the **hash registry**
+rather than the block pool: the blocks are alive and unreachable, so what disappears is the
+`(hash → block)` mapping, not the memory.
+
+**Next candidate, and it needs no restart:** find who drops those mappings at the end of a real
+session — `_maybe_evict_cached_block` on a path we have not instrumented, an abort/cancel path
+(Claude Code ends a streaming turn), or a reset. `MNT-9` can be re-used as an instrument here
+rather than a fix: it already proves the blocks outlive the session.
+
+### Housekeeping
+
+Both flags were set back to `0` on both nodes at the end of the run (`kv-flags.sh reset`), so the
+cluster is on stock behaviour. Neither mechanism is rolled back — they stay mounted and inert,
+because the next experiment above uses them as instruments.
 
 ## 5. What is settled and needs no further work
 

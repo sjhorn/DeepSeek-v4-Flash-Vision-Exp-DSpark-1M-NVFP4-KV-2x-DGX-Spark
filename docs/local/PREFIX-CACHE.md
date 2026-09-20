@@ -711,6 +711,7 @@ Do not re-test these without new evidence:
 | **An aborted / severed request** | **Innocent.** Severing a streaming request mid-flight left the head at 99.7%, clean. |
 | **The `?beta=true` path, `anthropic-beta`, the full live header set** | **Innocent (2026-09-19, A2).** Four arms direct to the engine — control, beta path, beta header, full captured headers — all **99.6% / ~0.76s / clean**. `prompt-caching-scope-2026-01-05` does nothing here. |
 | **A per-session `cache_salt`** | **Disproven from outside.** No client-reachable path sets one; if it did, the beta-header and full-live arms above would have read 0%. |
+| **Eviction, of any kind** | **Eliminated 2026-09-20, and this is the big one.** `MNT-9` pinned 112 blocks of a session head by reference (logged, all 5 KV groups, B=22,784 tokens) on an **idle** engine with a 2.5M pool — the blocks could not be evicted or reused by anyone — and the head was still 0.0% / 14.2s at +2s. Meanwhile three probes on that same head returned 27,136 tokens at 0.5s, repeatably. The blocks are alive and unreachable, so what vanishes is the **`(hash → block)` mapping**, not the memory. `MNT-8` (free-queue order) was inert for the same reason: nothing was competing. Five runs, one boot, 0.6% spread — [`CACHE_TEST.md`](../../CACHE_TEST.md) §6. |
 | **Being a "real session" as such** | **Innocent (2026-09-19, A3).** A single-turn real `claude -p` session (no tools) leaves a head that is **ALIVE at +2s: 99.6%, 0.57s, n=2**. Real-client, beta path, `cache_control`, `context_management`, `thinking:enabled`, per-session `metadata.session_id` and the live streaming shape are all exercised by that session and are all out. |
 
 ### What is NOT established
@@ -719,6 +720,11 @@ Do not re-test these without new evidence:
 harness does not model — it reproduces neither stock, with Patch 6, nor with recycling disabled.
 Candidates not yet separated: chunked prefill across turns, async scheduling, spec-decode
 rollback, or preemption under the co-tenant's ~140K-token requests.
+
+**Narrowed further 2026-09-20 (the `MNT-8`/`MNT-9` arms):** whatever it is, it is **not eviction** —
+a head whose blocks are pinned by reference on an idle engine is still unreachable 2s after its
+session ends. Look at what drops the hash mappings at the end of a real session (an abort/cancel
+path, or an eviction call on a path we have not instrumented), not at what reclaims blocks.
 
 **Narrowed 2026-09-19 (Phase A):** it is not "a real session" — it is **multi-turn**. A one-prompt,
 no-tool real session's head survives at +2s (99.6%, 0.57s, n=2), where a six-turn one is gone
@@ -758,8 +764,11 @@ reproduction, no GPU, seconds.
 - **Read latency alongside hit%** — see the boxed warning above.
 - **A probe that misses REBUILDS what it was measuring.** You get one cold/warm datum per session;
   every later probe hits regardless. Hence one run per time-point in `death-probe.sh`.
-- **`vllm:gpu_cache_usage_perc` reads 0.0 even under load** on this build, like
-  `vllm:num_requests_running`. Use `vllm:prompt_tokens_total` deltas.
+- **`vllm:gpu_cache_usage_perc` reads 0.0 even under load** on this build. Use
+  `vllm:prompt_tokens_total` deltas. **CORRECTED 2026-09-20:** the sibling claims in this list were
+  too broad — on the 15:34Z boot `vllm:kv_cache_usage_perc` read **0.2337** and
+  `vllm:num_requests_running` read **1.0** with a live request, both tracking reality. Check the
+  specific counter on the current boot before dismissing it.
 - **Blended deltas are everywhere** — this cluster's co-tenant runs 285-315K-char prompts; blend
   factors of x4-x9 were routine. `queries == input_tokens` or discard the row.
 
