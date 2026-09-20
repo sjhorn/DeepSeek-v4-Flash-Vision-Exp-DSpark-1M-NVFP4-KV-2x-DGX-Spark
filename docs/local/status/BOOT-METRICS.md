@@ -42,7 +42,8 @@ KV pool 2,517,769 against the 14:33Z boot's 2,484,672 — a **1.3% swing**, insi
 > the mirror image of the false PASS fixed hours earlier, and the reason both were caught is that
 > the rows were read against a real boot instead of being trusted.
 
-Results of the arms this boot bought: [`CACHE_TEST.md`](../../../CACHE_TEST.md) §6.
+Results of the arms this boot bought: [`CACHE_TEST.md`](../../../CACHE_TEST.md) §6, and the
+warm-up experiment that corrected them, §7.
 
 ## Boot metrics (2026-09-20 14:33Z boot: first boot of `local/main`, boot sentinel proven)
 

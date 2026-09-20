@@ -454,6 +454,80 @@ Both flags were set back to `0` on both nodes at the end of the run (`kv-flags.s
 cluster is on stock behaviour. Neither mechanism is rolled back — they stay mounted and inert,
 because the next experiment above uses them as instruments.
 
+
+## 7. The warm-up experiment (2026-09-20, same boot) — and a CORRECTION to §6
+
+§6 concluded "the head does not die of eviction". **That conclusion was wrong, and this experiment
+is what caught it.** See §7.3.
+
+### 7.1 What was run
+
+Stock flags (both 0). One head throughout, six measurements, each probe a single fresh-tail request:
+
+| step | what | result |
+|---|---|---|
+| S1 | a real six-step session writes the head | turn 0: **0.0%, 16.47s** (cold, as expected) |
+| P0 | probe 2s after S1 ends | **0.0%, 0 tok, 14.49s** — the session's head is gone |
+| P1 | probe 120s after P0 (P0 itself re-wrote the head synthetically) | **99.5%, 27,648 tok, 0.50s** |
+| S2 | a second session, same head, head now WARM | turn 0: **99.6%, 4.26s** |
+| P2 | probe 2s after S2 ends | **0.0%, 0 tok, 14.40s** — gone again |
+| P3 | probe 120s after P2 | **99.5%, 27,648 tok, 0.45s** |
+
+### 7.2 What it answers
+
+**A warm-up does exactly what it was supposed to do.** A head written by a plain request is
+reusable at **99.5% in 0.5s**, survives 120s idle, and a real session starting on it pays
+**4.26s instead of 16.47s at turn 0 — a 3.9x faster start**. That is the original goal, and it needs
+no patch at all: one request, not a mechanism.
+
+**But a session ending destroys it, every time.** P1 was alive at 18:40. S2 ran. P2, seconds later,
+read 0.0%. The only thing that happened in between was a session. So a warm-up is a **band-aid that
+has to be re-applied after each session**, not a one-time fix — and re-applying costs 0.5s.
+
+**It is not the "ending" that matters, it is the session's own later turns.** The head is written by
+turn 0; turns 1-6 then allocate tens of thousands of blocks across five KV groups with 4-, 8- and
+64-token pages. That is enough allocation to cycle the free queue and reuse the turn-0 blocks.
+Corroborating detail from the same captures: the head of turns 1-6 (after the tools array changes,
+`42ce1118e8` -> `e38be74405`) **did** survive from S1 into S2 (turn 1: 87.1%, 3.81s) — because it is
+the *last* prefix in the session, and `MNT-6a` protects that one.
+
+### 7.3 The correction: arm C did not test what it claimed
+
+§6 argued that eviction was eliminated because `MNT-9` held the head by reference and it still
+vanished. **`MNT-9` did not hold the head.** Re-reading its own log against the geometry:
+
+| group | page | blocks needed for a hit at B (`cdiv(127, page) + 1`) | blocks `MNT-9` actually pinned |
+|---|---|---|---|
+| 0 | 256 | 89 (the whole prefix) | **89** |
+| 1 | 64 | 3 | **2** |
+| 2 | 64 | 3 | **2** |
+| 3 | 4 | 33 | **3** |
+| 4 | 8 | 17 | **16** |
+
+Every sliding-window group pinned **fewer blocks than a hit at B requires** — group 3 pinned 3 of
+33. `_maybe_pin_static_head` skips candidates whose `block_hash is None`, so the run it pinned was
+incomplete, and `find_longest_cache_hit` takes the **minimum across groups**: an incomplete run in
+any SWA group means no hit at B at all, no matter what group 0 holds.
+
+So arm C measured a pin that could never have worked. Eviction is **back on the table** as the
+cause, and the §6 claim "this rules out the whole family of 'something evicted it' explanations" is
+**withdrawn**. What survives from §6 is narrower and still useful: `MNT-8`'s free-queue ordering
+does not move this metric, and a synthetic head is durable where a session head is not.
+
+### 7.4 What to do next, in order
+
+1. **Ship the warm-up.** It is measured, it is 0.5s, and it needs no engine change. Re-warm after
+   each session, not only at startup. The head must be byte-identical to what the client sends,
+   including the tier (`API-12`'s blind spot: the effort prefix is injected downstream).
+2. **Fix `MNT-9` before judging it.** It must check that the full `need`-wide run is cacheable and
+   **log loudly when it is not**, rather than silently pinning an unusable subset. A pin that
+   cannot serve a hit is worse than no pin: it consumed budget and produced a confident null.
+3. **Then re-run arm C**, which will be the first real test of head pinning.
+4. **The `tools` flap is still the biggest single cost in these captures** — turn 1 diverges on the
+   tools array in both sessions (swift-lsp attaching), costing a full **17.85s** re-prefill in the
+   cold session. `death-probe.sh` disables the plugin deliberately; ordinary sessions do not. That
+   is a client-side setting worth more than either engine mechanism.
+
 ## 5. What is settled and needs no further work
 
 - **Patch 6 is applied and both settings are on**, on both nodes, in the running engine:
