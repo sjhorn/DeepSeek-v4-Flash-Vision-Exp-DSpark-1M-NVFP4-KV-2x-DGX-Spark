@@ -20,6 +20,49 @@ notes (one cable, not two; the `NCCL_IB_GID_INDEX` non-issue) that keep getting 
 > `patches/pristine/`**, because every generated diff is computed against the old image. The image
 > id in `patches/pristine/MANIFEST.txt` exists to make that failure loud.
 
+## Drift found on import (2026-09-20) — the head was AHEAD of every checkout
+
+Putting the fork on a branch turned up drift in the direction nobody checks for. The rule in
+`CLUSTER.md` has always been "the Mac authors, the head runs". On 2026-09-20 the head was running
+**a whole feature that existed in no checkout**:
+
+| file | who was ahead | what |
+|---|---|---|
+| `docker-compose.dspark.yml` | **head**, by 21 lines | the two `PLG-14b` mount lines |
+| `start-deepseek-v4-flash-dspark.sh` | **head**, by 10 lines | `scp -r patches/prefill_plugin` to the worker — `patches/*.py` is a glob that does **not** match a directory |
+| `patches/anthropic_serving_inline_system.py` | **head**, by ~50 lines | `API-14` |
+| `patches/anthropic_protocol_inline_system.py` | **head**, by 1 line | `engine_cached_tokens` |
+| `patches/prefill_plugin/` | **head only** | `PLG-14b`, did not exist here at all |
+
+It was deployed by the 08:58Z boot and was live and loaded — the engine log shows
+`prefill_collector -> prefill_collector:PrefillCollector` registered at 08:58:20.
+
+**This was caught only because the deploy of an unrelated change diffed before copying.** The
+near-miss is the lesson: `scp`-ing our copy over would have silently deleted a live patch, the
+worker sync for it, and both mount lines — and the next restart would have come up without them,
+with nothing failing loudly.
+
+Two habits, both now enforced by something other than memory:
+
+1. **Diff before you copy, in BOTH directions.** The head is not only a deployment target; it is
+   where changes are sometimes made first.
+2. **`scripts/check-local-patches.sh` is the backstop.** `PLG-14b` now has two rows in it (the
+   module *and* its `.dist-info`, because without the metadata the entry point is never discovered
+   and the module is a silent no-op). Had the clobber happened, the next run would have said
+   `FAIL PLG-14b` on both nodes instead of nothing at all.
+
+> **The compose "drift RESOLVED" note in `CLUSTER.md` is about a 2026-09-19 check and was true
+> then.** It went stale within a day. Treat any "in sync" claim in these docs as a timestamp, not a
+> property, and re-diff:
+>
+> ```bash
+> R=/home/shorn/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark
+> for f in docker-compose.dspark.yml start-deepseek-v4-flash-dspark.sh watchdog-dspark.sh \
+>          patches/anthropic_serving_inline_system.py patches/anthropic_protocol_inline_system.py; do
+>   ssh shorn@spark-45ea "cat $R/$f" | diff -q - "$f" >/dev/null || echo "DIFFERS: $f"
+> done
+> ```
+
 > Moved verbatim from `CLAUDE.md` during the 2026-09-20 doc split. Where a line was found stale
 > on the way across it was corrected in place and the correction is marked **CORRECTED**.
 

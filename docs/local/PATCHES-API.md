@@ -392,3 +392,52 @@ and how to read its output are all in
 Why a flapping client tool (`swift-lsp`) shrinking the `tools` array costs a full re-prefill, and
 the 16-turn replay that measured 3 tool-set changes → 1, are in
 [`PREFIX-CACHE.md`](PREFIX-CACHE.md) under "The one thing that actually moves the head".
+
+<a id="api-14"></a>
+<a id="plg-14b"></a>
+
+## API-14 / PLG-14b — the engine's own prefill record (2026-09-20)
+
+**Imported into this repo on 2026-09-20, already live.** It was deployed to the head by the
+08:58Z boot and existed in no checkout — found while diffing the head before deploying the watchdog
+boot sentinel. See "Drift found on import" in [`../UPSTREAM.md`](UPSTREAM.md).
+
+**The problem it solves.** Every instrument we had could see *that* a turn re-prefilled, but not
+*by how much*, and not *which request* caused a stall:
+
+- `/metrics` counters are **engine-wide**, so on a cluster with a co-tenant nothing attributes a
+  delta to one request — `matrix-report.py` exists only to detect and discard blended rows.
+- `API-12`'s `PREFIX_WATCH` hashes the prompt, so it reports the head **moving**, never the turn
+  being **recomputed** — and it is blind to a tier switch entirely.
+- `prefill-attribute.py` infers from a global 10s throughput gauge and cannot give a true per-turn
+  number.
+
+That ambiguity is not academic: it forced the conclusion "eviction, not invalidation" to be walked
+back twice ([`PREFIX-CACHE.md`](PREFIX-CACHE.md)). vLLM already computes the exact number per
+request and then throws it away.
+
+**Two halves, deliberately separate:**
+
+| | |
+|---|---|
+| **`API-14`** — response side | `_engine_cached_tokens()` reads `usage.prompt_tokens_details` and surfaces it as `engine_cached_tokens` on the Anthropic response (declared in the protocol patch). Set on both the non-streaming and streaming paths; **only the FINAL stream chunk carries it**. Returns `None` rather than `0` when absent, so a vLLM that does not report it stays distinguishable from a prompt that genuinely hit nothing. Never raises: a usage object of an unexpected shape costs the number, never the response. |
+| **`PLG-14b`** — engine side | `patches/prefill_plugin/` registers a `StatLoggerBase` through the `vllm.stat_logger_plugins` entry-point group and serves a ring buffer of per-request rows (cached tokens, queued/prefill/decode time) over HTTP on `127.0.0.1:9094` inside the container, for sparkstats to proxy. |
+
+**Why the plugin is an entry point and not an import**, and why it needs a `.dist-info`: see the
+boxed note in [`PATCH-REGISTRY.md`](PATCH-REGISTRY.md). The short version is that `AsyncLLM` is
+built before the serving patch is imported, so by the time our code runs the plugin factories have
+already been loaded. Getting this wrong fails **silently** — the module sits in site-packages and
+is never called.
+
+**Verify it is actually loaded**, which the file being present does not prove:
+
+```bash
+docker logs <container> | grep -A1 'vllm.stat_logger_plugins'
+#   Available plugins for group vllm.stat_logger_plugins:
+#   - prefill_collector -> prefill_collector:PrefillCollector
+```
+
+**Not established here.** No measurement is attached to this entry because it reports a number
+rather than changing one — decode, prompt and cache behaviour are untouched. Whether the per-turn
+rows actually settle the eviction-vs-invalidation question is the open work in `MERGE.md`, and is
+not yet done.

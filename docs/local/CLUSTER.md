@@ -32,11 +32,17 @@ API (head only, localhost-bound): `http://127.0.0.1:8888/v1`, served name `deeps
    `switch-model.sh`, `.env.dspark`, `.env.dspark.text-0731`, `.env.dspark.vision-exp`,
    `docker-compose.vision-exp.yml`, `vision-exp/`, and `~/vision-stage/`.
 3. **Worker `spark-da08`** — `start-deepseek-v4-flash-dspark.sh` syncs it automatically on every
-   start: `docker-compose.dspark.yml`, `.env.dspark`, `patches/anthropic_*.py`, and (in vision
-   mode) `docker-compose.vision-exp.yml`. **`~/vision-stage/` is deliberately not synced** — those
+   start: `docker-compose.dspark.yml`, `.env.dspark`, `patches/*.py`, `patches/prefill_plugin/`
+   (a **directory** — `patches/*.py` does not match one, so it needs its own `scp -r`), and (in
+   vision mode) `docker-compose.vision-exp.yml`. **`~/vision-stage/` is deliberately not synced** — those
    files are derived from the image each node runs, so they get regenerated per node; the start
    script preflights them on both sides and refuses to boot if any are missing.
 
+> **This "drift RESOLVED" note went stale within a day — see
+> [`UPSTREAM.md`](UPSTREAM.md) "Drift found on import (2026-09-20)", where the head turned out to
+> be AHEAD of every checkout by a whole live patch (`API-14` / `PLG-14b`). Re-diff; never trust an
+> "in sync" claim as a property rather than a timestamp.**
+>
 > **Drift RESOLVED — re-checked 2026-09-19.** This note used to warn that the Mac's
 > `docker-compose.dspark.yml` was ahead of the head's on journald logging,
 > `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` and `NCCL_IB_MERGE_NICS`, and then (2026-09-18) that the

@@ -1,0 +1,2 @@
+[vllm.stat_logger_plugins]
+prefill_collector = prefill_collector:PrefillCollector

@@ -13,7 +13,7 @@
 # diff at patches/generated/entrypoints-anthropic-serving.patch (regenerate with
 # scripts/regen-local-patches.sh, pristine original in patches/pristine/).
 #
-# Six local patches live in this one file.  Each has a banner of the form
+# Seven local patches live in this one file.  Each has a banner of the form
 #   # ===== API-N: <one line> =====
 #   # why / measured / kill switch / detail:
 # so the banners, the generated diff and docs/local/PATCH-REGISTRY.md line up.
@@ -24,9 +24,12 @@
 #   API-11  prompt-head stabilisers                (sub-sites: 11a, 11b)
 #   API-12  prefix-cache tripwire (PREFIX_WATCH log line)
 #   API-13  sticky tool set
+#   API-14  surface the engine's own num_cached_tokens on the response
 #
 # API-0, the companion protocol patch, is a separate file:
 #   patches/anthropic_protocol_inline_system.py
+# PLG-14b, the prefill collector API-14 is the response-side half of, is
+# patches/prefill_plugin/ -- an added site-packages plugin, not a patch.
 #
 # Sub-sites that could not move under their parent banner are cross-referenced
 # from it by line-anchored comment ("PATCH 9b: ...") rather than relocated --
@@ -403,7 +406,7 @@ def strip_leaked_reasoning(text: str, role: str) -> str:
 # why: CLAUDE_CODE_EXTRA_BODY is one JSON blob merged into EVERY request, so it
 #      cannot say "thinking for the main tier, not for the cheap one".  The
 #      model id is already per-request and already per-tier, and
-#      --served-model-name takes a LIST, so one engine answers to eleven names
+#      --served-model-name takes a LIST, so one engine answers to twelve names
 #      at no cost.  This maps label -> chat_template_kwargs.
 # measured: HMMT Feb 2026, high 11/12 at 8,243 tokens per correct answer vs off
 #      5/12 at 20,035 and max 8/12 at 18,959 (max truncated 33%).  Hence
@@ -415,7 +418,7 @@ def strip_leaked_reasoning(text: str, role: str) -> str:
 #      API-9b  two sites in the response/stream paths -- echo the model id the
 #              CLIENT asked for, since vLLM resolves every alias to the served
 #              name and Claude Code compares what it gets back
-# NOTE: keep MODEL_THINKING_ALIASES in sync with SERVED_MODEL_ALIASES in
+# NOTE: keep MODEL_THINKING_RULES in sync with SERVED_MODEL_ALIASES in
 #      docker-compose.dspark.yml -- an unserved name is rejected by vLLM before
 #      this map is ever consulted.
 # detail: docs/local/PATCHES-API.md#api-9
@@ -741,6 +744,40 @@ def wrap_data_with_event(data: str, event: str):
     return f"event: {event}\ndata: {data}\n\n"
 
 
+# ===== API-14: surface the engine's own num_cached_tokens on the response ===
+# why: every external instrument we had could see that a turn re-prefilled but
+#      not by how much.  /metrics is engine-wide, so nothing attributes a stall
+#      to a request; that ambiguity forced a published conclusion ("eviction,
+#      not invalidation") to be walked back twice.  vLLM already computes the
+#      number per request and then discards it.
+# measured: n/a -- this reports a number, it does not change one.  Decode,
+#      prompt and cache behaviour are untouched.
+# kill switch: none needed -- it only ADDS a response field, and returns None
+#      (not 0) when the engine does not report it, so "not available" stays
+#      distinguishable from "hit nothing".
+# paired with: PLG-14b, patches/prefill_plugin/ -- the engine-side collector
+#      that publishes the same rows on their own loopback port.
+# sub-sites: the non-streaming and streaming response paths both set it; only
+#      the FINAL stream chunk carries it.  Search this file for "PATCH 14".
+# detail: docs/local/PATCHES-API.md#api-14
+def _engine_cached_tokens(usage) -> int | None:
+    """PATCH 14: vLLM's num_cached_tokens, if this response carried it.
+
+    Returns None rather than 0 when it is absent, so a version of vLLM that
+    does not report it is distinguishable downstream from a prompt that
+    genuinely hit nothing. Never raises: a usage object of an unexpected shape
+    costs the number, never the response.
+    """
+    try:
+        details = getattr(usage, "prompt_tokens_details", None)
+        if details is None:
+            return None
+        n = getattr(details, "cached_tokens", None)
+        return int(n) if n is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # ===== API-13: sticky tool set -- the tools array only ever grows ===========
 # why: a client tool that flaps out (swift-lsp attaches seconds into a session
 #      and can drop again) SHRINKS the advertised tools array, which rewrites
@@ -989,6 +1026,23 @@ class AnthropicServingMessages(OpenAIServingChat):
             enable_force_include_usage=enable_force_include_usage,
             default_chat_template_kwargs=default_chat_template_kwargs,
         )
+        # PATCH 14: report how much of each prompt the prefix cache actually
+        # served, per request.
+        #
+        # THIS HANDLER IS AN OpenAIServingChat, and that is the whole
+        # mechanism. It builds its Anthropic events by parsing the OpenAI SSE
+        # it produces itself (ChatCompletionStreamResponse.model_validate_json
+        # below), so it never holds the RequestOutput and cannot read
+        # res.num_cached_tokens directly. The number only reaches the OpenAI
+        # chunk through usage.prompt_tokens_details, which serving.py fills
+        # only when this flag is set -- and only on the FINAL usage chunk.
+        #
+        # Forcing it HERE rather than adding --enable-prompt-tokens-details to
+        # the launch line keeps it to this file: the flag would otherwise also
+        # change /v1/chat/completions for every other caller, and this
+        # deployment's launch args are a two-node restart to change. The cost
+        # is one extra integer on the last chunk of an Anthropic response.
+        self.enable_prompt_tokens_details = True
         self.stop_reason_map = {
             "stop": "end_turn",
             "length": "max_tokens",
@@ -1818,6 +1872,11 @@ class AnthropicServingMessages(OpenAIServingChat):
             usage=AnthropicUsage(
                 input_tokens=generator.usage.prompt_tokens,
                 output_tokens=generator.usage.completion_tokens,
+                # PATCH 14: see the streaming path. The proxy cannot split a
+                # non-stream's prefill from its decode at all, so this is the
+                # ONLY per-request cache number a non-streaming turn will ever
+                # have.
+                engine_cached_tokens=_engine_cached_tokens(generator.usage),
             ),
             kv_transfer_params=generator.kv_transfer_params,
         )
@@ -2001,6 +2060,16 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     output_tokens=origin_chunk.usage.completion_tokens
                                     if origin_chunk.usage
                                     else 0,
+                                    # PATCH 14: only the FINAL chunk carries
+                                    # prompt_tokens_details, which is why this
+                                    # rides message_delta and not
+                                    # message_start. exclude_unset below drops
+                                    # it when it is None, so a build that does
+                                    # not report it sends nothing rather than
+                                    # a zero.
+                                    engine_cached_tokens=_engine_cached_tokens(
+                                        origin_chunk.usage
+                                    ),
                                 ),
                             )
                             data = chunk.model_dump_json(exclude_unset=True)

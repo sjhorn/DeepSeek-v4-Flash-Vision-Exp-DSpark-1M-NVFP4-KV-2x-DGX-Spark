@@ -75,10 +75,21 @@ API-11a|entrypoints/anthropic/serving.py|_PROMPT_CACHE_STRIP_PATTERNS|the per-re
 API-11b|entrypoints/anthropic/serving.py|def leading_system_boundary|every turn hoists its system reminder to position 0
 API-12|entrypoints/anthropic/serving.py|_PREFIX_WATCH|no PREFIX_WATCH line; head moves become undetectable
 API-13|entrypoints/anthropic/serving.py|_STICKY_TOOLS|a flapping client tool shrinks the tools array, moving the head
+API-14|entrypoints/anthropic/serving.py|_engine_cached_tokens|the engine num_cached_tokens value never reaches the client
 MNT-5|v1/engine/detokenizer.py|VLLM_SUPPRESS_STOPS_IN_REASONING|stop strings can fire inside the reasoning segment
 MNT-6a|v1/core/single_type_kv_cache_manager.py|_PROTECTED_FRACTION_ENV|unbounded legacy protection caps swallow the block pool
 MNT-6b|v1/core/single_type_kv_cache_manager.py|_RECYCLE_ENABLED|sliding-window pages churn the shared LRU instead of recycling
 MNT-7|v1/core/block_pool.py|_dup_old|duplicate cached blocks hold LRU slots forever (3.9x retention)
+'
+
+# PLG-14b is not a patch over a vLLM file -- it is an ADDED site-packages plugin,
+# found through the vllm.stat_logger_plugins entry-point group rather than by
+# import, so it needs a path relative to site-packages (the vllm package's parent)
+# and a check that the .dist-info is there too: without the metadata the entry
+# point is never discovered and the module sits on disk doing nothing.
+PLUGIN_ROWS='
+PLG-14b|prefill_collector.py|PrefillCollector|per-request prefill rows are discarded; no per-turn attribution
+PLG-14b|prefill_collector-0.1.dist-info/entry_points.txt|vllm.stat_logger_plugins|the module is present but never loaded -- silent no-op
 '
 
 if [ $# -eq 0 ]; then
@@ -116,6 +127,21 @@ for c in "$@"; do
       printf '       cost if absent:   %s\n' "$cost"
       printf '       the mount is probably at the wrong path — mount to the path\n'
       printf '       printed above, not to a remembered one; it fails SILENTLY.\n'
+      echo "FAILED" >> "${TMPDIR:-/tmp}/.check-local-patches.$$"
+    fi
+  done
+
+  # PLG-* live NEXT TO the vllm package, not inside it.
+  sp="$(dirname "$root")"
+  printf '%s\n' "$PLUGIN_ROWS" | while IFS='|' read -r id rel marker cost; do
+    [ -n "${id:-}" ] || continue
+    f="$sp/$rel"
+    if dk exec "$c" grep -qF -- "$marker" "$f" 2>/dev/null; then
+      printf '  OK   %-7s %s\n' "$id" "$rel"
+    else
+      printf '  FAIL %-7s MISSING from %s\n' "$id" "$f"
+      printf '       marker not found: %s\n' "$marker"
+      printf '       cost if absent:   %s\n' "$cost"
       echo "FAILED" >> "${TMPDIR:-/tmp}/.check-local-patches.$$"
     fi
   done

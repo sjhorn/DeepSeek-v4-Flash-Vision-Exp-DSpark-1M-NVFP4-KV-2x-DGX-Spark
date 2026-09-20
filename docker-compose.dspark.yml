@@ -82,6 +82,27 @@ services:
       # PREREQUISITE for the thinking:true experiment, not a fix on its own.
       # Opt out with VLLM_SUPPRESS_STOPS_IN_REASONING=0 (process-wide).
       - ./patches/patch5-detokenizer.py:/opt/env/lib/python3.12/site-packages/vllm/v1/engine/detokenizer.py:ro
+      # PATCH 14b: the prefill collector -- the per-request prefill rows vLLM
+      # measures and then discards (num_cached_tokens, queued/prefill/decode
+      # time), published on its own loopback port for sparkstats to proxy.
+      #
+      # TWO LINES AND NOT ONE, and a .dist-info rather than an import, because
+      # of WHEN the engine looks. AsyncLLM is built in
+      # build_async_engine_client, which runs BEFORE init_app_state imports the
+      # anthropic serving patch -- so importing the collector from that patch
+      # is too late; load_stat_logger_plugin_factories() has already run. The
+      # supported hook is the vllm.stat_logger_plugins entry-point group, and
+      # importlib.metadata finds it off sys.path, so a module and a .dist-info
+      # dropped into site-packages is enough with no image rebuild and no
+      # wheel. Mounting into site-packages rather than adding PYTHONPATH keeps
+      # this to volumes: site-packages is already on the path.
+      #
+      # It binds 127.0.0.1 INSIDE the container and is reached only through
+      # sparkstats. It is deliberately NOT a route on :8888 -- the proxy's
+      # Caddy catch-all forwards every path to the vLLM pool, which would put
+      # engine observability in front of every mTLS and LAN client.
+      - ./patches/prefill_plugin/prefill_collector.py:/opt/env/lib/python3.12/site-packages/prefill_collector.py:ro
+      - ./patches/prefill_plugin/prefill_collector-0.1.dist-info:/opt/env/lib/python3.12/site-packages/prefill_collector-0.1.dist-info:ro
       # KV disk-offload tier (probe). Inert unless KV_TRANSFER_CONFIG is set in .env.dspark.
       - ${KVOFFLOAD_DIR:-/home/shorn/kvoffload}:/kvoffload
 

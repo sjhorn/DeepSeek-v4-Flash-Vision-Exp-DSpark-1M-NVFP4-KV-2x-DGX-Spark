@@ -16,7 +16,8 @@ would orphan that history.
 |---|---|---|---|
 | `IMG-` | baked into the runtime image | an image **rebuild** on both nodes | `recipe/overlay/` |
 | `MNT-` | bind-mounted whole file, one per target | remove the compose line, **restart** | `patches/*.py` |
-| `API-` | bind-mounted, **six patches share one file** | per-patch env kill switch, **restart** | `patches/anthropic_*.py` |
+| `API-` | bind-mounted, **seven patches share one file** | per-patch env kill switch, **restart** | `patches/anthropic_*.py` |
+| `PLG-` | an **added** site-packages plugin, found by entry point | remove the compose lines, **restart** | `patches/prefill_plugin/` |
 
 > **`API-*` cannot be rolled back file-by-file.** They all live in
 > `patches/anthropic_serving_inline_system.py` (except `API-0`, which is the protocol file). Use
@@ -68,6 +69,26 @@ file, matching the anchors below.
 | `API-11b` | Patch 11b | none | only the leading run of system messages is hoisted; mid-conversation ones stay in place. With 11a: **0 head moves over 16 turns, 100% strict prefix** | [`PREFIX-CACHE.md`](PREFIX-CACHE.md) |
 | `API-12` | Patch 12 | `PREFIX_WATCH=0` (on) | one `PREFIX_WATCH head=… tools=… sys=… user0=… len=…` line per request, hashing slices only. 50.8 KB/hour, 37µs/request. **Blind spot: the effort prefix is injected downstream, so a tier switch produces identical hashes** | [`#api-12`](PATCHES-API.md) |
 | `API-13` | Patch 13 | `STICKY_TOOLS=0` (on), `STICKY_TOOLS_TTL=3600` | keeps the advertised `tools` array monotonic per conversation, so a flapping client tool (swift-lsp) cannot shrink it and break the append chain. Replaying the real 16-turn capture: 3 tool-set changes → 1 | [`#api-13`](PATCHES-API.md) |
+| `API-14` | Patch 14 | none needed — it only ADDS a response field | returns vLLM's own `num_cached_tokens` as `engine_cached_tokens`. Every external instrument could see *that* a turn re-prefilled but not *by how much*; `/metrics` is engine-wide, so nothing attributed a stall to a request — an ambiguity that forced a published conclusion to be walked back twice. Returns `None`, not `0`, when the engine does not report it | [`#api-14`](PATCHES-API.md) |
+
+### Added as a plugin, not patched over anything (`PLG-*`)
+
+| id | was | target | kill switch | rollback | evidence | detail |
+|---|---|---|---|---|---|---|
+| `PLG-14b` | Patch 14b | `site-packages/prefill_collector.py` **+** `prefill_collector-0.1.dist-info/` | `PREFILL_COLLECTOR_PORT` / `PREFILL_COLLECTOR_HOST` | remove the two compose lines | publishes the per-request prefill rows vLLM measures and discards (`num_cached_tokens`, queued/prefill/decode time) on its own loopback port for sparkstats to proxy | [`#plg-14b`](PATCHES-API.md) |
+
+> **Two mount lines, not one, and a `.dist-info` rather than an import — because of WHEN the engine
+> looks.** `AsyncLLM` is built in `build_async_engine_client`, which runs *before* `init_app_state`
+> imports the Anthropic serving patch, so importing the collector from that patch is too late:
+> `load_stat_logger_plugin_factories()` has already run. The supported hook is the
+> `vllm.stat_logger_plugins` entry-point group, and `importlib.metadata` finds it off `sys.path` —
+> so a module plus a `.dist-info` dropped into site-packages is enough, with no image rebuild and
+> no wheel. **Without the `.dist-info` the module sits on disk and is never loaded, silently**;
+> that is why `check-local-patches.sh` verifies both.
+>
+> It binds `127.0.0.1` **inside** the container and is deliberately NOT a route on `:8888` — the
+> proxy's Caddy catch-all forwards every path to the vLLM pool, which would put engine
+> observability in front of every mTLS and LAN client.
 
 ## Verifying the registry against reality
 
@@ -86,7 +107,7 @@ bash scripts/regen-local-patches.sh --check
 python3 local-ops/verify-server.py
 ```
 
-`check-local-patches.sh` asserts a distinctive **code** marker, never a comment, so a comment-only
+`check-local-patches.sh` checks **17 rows** and asserts a distinctive **code** marker, never a comment, so a comment-only
 edit cannot fake a pass. It checks every container you name, which is how head/worker drift shows
 up — the start script's `scp patches/*.py` glob fixes drift at start time, but nothing verified it
 afterwards.

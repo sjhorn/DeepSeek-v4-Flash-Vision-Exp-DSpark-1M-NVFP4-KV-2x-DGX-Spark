@@ -1,6 +1,6 @@
 --- a/vllm/entrypoints/anthropic/serving.py
 +++ b/vllm/entrypoints/anthropic/serving.py
-@@ -5,12 +5,50 @@
+@@ -5,12 +5,53 @@
  
  """Anthropic Messages API serving handler"""
  
@@ -12,7 +12,7 @@
 +# diff at patches/generated/entrypoints-anthropic-serving.patch (regenerate with
 +# scripts/regen-local-patches.sh, pristine original in patches/pristine/).
 +#
-+# Six local patches live in this one file.  Each has a banner of the form
++# Seven local patches live in this one file.  Each has a banner of the form
 +#   # ===== API-N: <one line> =====
 +#   # why / measured / kill switch / detail:
 +# so the banners, the generated diff and docs/local/PATCH-REGISTRY.md line up.
@@ -23,9 +23,12 @@
 +#   API-11  prompt-head stabilisers                (sub-sites: 11a, 11b)
 +#   API-12  prefix-cache tripwire (PREFIX_WATCH log line)
 +#   API-13  sticky tool set
++#   API-14  surface the engine's own num_cached_tokens on the response
 +#
 +# API-0, the companion protocol patch, is a separate file:
 +#   patches/anthropic_protocol_inline_system.py
++# PLG-14b, the prefill collector API-14 is the response-side half of, is
++# patches/prefill_plugin/ -- an added site-packages plugin, not a patch.
 +#
 +# Sub-sites that could not move under their parent banner are cross-referenced
 +# from it by line-anchored comment ("PATCH 9b: ...") rather than relocated --
@@ -51,13 +54,12 @@
  
  from fastapi import Request
  
-@@ -47,12 +85,873 @@
-     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+@@ -48,11 +89,906 @@
  
  logger = logging.getLogger(__name__)
-+
+ 
 +_SERVER_SIDE_TOOL_NAMES = {"web_search", "web_fetch"}
-+
+ 
 +# Identify server-side search/fetch tools WITHOUT hijacking the client's
 +# capitalised harness tools (WebSearch, WebFetch).  Claude Code sends
 +# tools in several shapes:
@@ -373,7 +375,7 @@
 +# why: CLAUDE_CODE_EXTRA_BODY is one JSON blob merged into EVERY request, so it
 +#      cannot say "thinking for the main tier, not for the cheap one".  The
 +#      model id is already per-request and already per-tier, and
-+#      --served-model-name takes a LIST, so one engine answers to eleven names
++#      --served-model-name takes a LIST, so one engine answers to twelve names
 +#      at no cost.  This maps label -> chat_template_kwargs.
 +# measured: HMMT Feb 2026, high 11/12 at 8,243 tokens per correct answer vs off
 +#      5/12 at 20,035 and max 8/12 at 18,959 (max truncated 33%).  Hence
@@ -385,7 +387,7 @@
 +#      API-9b  two sites in the response/stream paths -- echo the model id the
 +#              CLIENT asked for, since vLLM resolves every alias to the served
 +#              name and Claude Code compares what it gets back
-+# NOTE: keep MODEL_THINKING_ALIASES in sync with SERVED_MODEL_ALIASES in
++# NOTE: keep MODEL_THINKING_RULES in sync with SERVED_MODEL_ALIASES in
 +#      docker-compose.dspark.yml -- an unserved name is rejected by vLLM before
 +#      this map is ever consulted.
 +# detail: docs/local/PATCHES-API.md#api-9
@@ -446,8 +448,8 @@
 +    r"(?P<value>.*?)</\｜DSML\｜parameter>",
 +    re.DOTALL,
 +)
- 
- 
++
++
 +def recover_dsml_arguments(raw: str | None) -> dict[str, Any] | None:
 +    """Extract parameters from leaked DSML markup. None if nothing usable."""
 +    if not raw or "DSML" not in raw:
@@ -709,8 +711,42 @@
 +
  def wrap_data_with_event(data: str, event: str):
      return f"event: {event}\ndata: {data}\n\n"
- 
- 
++
++
++# ===== API-14: surface the engine's own num_cached_tokens on the response ===
++# why: every external instrument we had could see that a turn re-prefilled but
++#      not by how much.  /metrics is engine-wide, so nothing attributes a stall
++#      to a request; that ambiguity forced a published conclusion ("eviction,
++#      not invalidation") to be walked back twice.  vLLM already computes the
++#      number per request and then discards it.
++# measured: n/a -- this reports a number, it does not change one.  Decode,
++#      prompt and cache behaviour are untouched.
++# kill switch: none needed -- it only ADDS a response field, and returns None
++#      (not 0) when the engine does not report it, so "not available" stays
++#      distinguishable from "hit nothing".
++# paired with: PLG-14b, patches/prefill_plugin/ -- the engine-side collector
++#      that publishes the same rows on their own loopback port.
++# sub-sites: the non-streaming and streaming response paths both set it; only
++#      the FINAL stream chunk carries it.  Search this file for "PATCH 14".
++# detail: docs/local/PATCHES-API.md#api-14
++def _engine_cached_tokens(usage) -> int | None:
++    """PATCH 14: vLLM's num_cached_tokens, if this response carried it.
++
++    Returns None rather than 0 when it is absent, so a version of vLLM that
++    does not report it is distinguishable downstream from a prompt that
++    genuinely hit nothing. Never raises: a usage object of an unexpected shape
++    costs the number, never the response.
++    """
++    try:
++        details = getattr(usage, "prompt_tokens_details", None)
++        if details is None:
++            return None
++        n = getattr(details, "cached_tokens", None)
++        return int(n) if n is not None else None
++    except Exception:  # noqa: BLE001
++        return None
++
++
 +# ===== API-13: sticky tool set -- the tools array only ever grows ===========
 +# why: a client tool that flaps out (swift-lsp attaches seconds into a session
 +#      and can drop again) SHRINKS the advertised tools array, which rewrites
@@ -749,11 +785,11 @@
 +_STICKY_TOOLS = os.environ.get("STICKY_TOOLS", "1") != "0"
 +_STICKY_TTL_S = float(os.environ.get("STICKY_TOOLS_TTL", "3600"))
 +_STICKY_MAX_CONVS = 512
-+
+ 
 +# conv_key -> {"ts": float, "tools": {name: ChatCompletionToolsParam}}
 +_STICKY_STORE: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 +_STICKY_LOCK = threading.Lock()
-+
+ 
 +
 +def sticky_conversation_key(anthropic_request) -> str | None:
 +    """Identify the conversation from content the client does not vary.
@@ -925,7 +961,31 @@
  class AnthropicServingMessages(OpenAIServingChat):
      """Handler for Anthropic Messages API requests"""
  
-@@ -130,6 +1029,10 @@
+@@ -90,6 +1026,23 @@
+             enable_force_include_usage=enable_force_include_usage,
+             default_chat_template_kwargs=default_chat_template_kwargs,
+         )
++        # PATCH 14: report how much of each prompt the prefix cache actually
++        # served, per request.
++        #
++        # THIS HANDLER IS AN OpenAIServingChat, and that is the whole
++        # mechanism. It builds its Anthropic events by parsing the OpenAI SSE
++        # it produces itself (ChatCompletionStreamResponse.model_validate_json
++        # below), so it never holds the RequestOutput and cannot read
++        # res.num_cached_tokens directly. The number only reaches the OpenAI
++        # chunk through usage.prompt_tokens_details, which serving.py fills
++        # only when this flag is set -- and only on the FINAL usage chunk.
++        #
++        # Forcing it HERE rather than adding --enable-prompt-tokens-details to
++        # the launch line keeps it to this file: the flag would otherwise also
++        # change /v1/chat/completions for every other caller, and this
++        # deployment's launch args are a two-node restart to change. The cost
++        # is one extra integer on the last chunk of an Anthropic response.
++        self.enable_prompt_tokens_details = True
+         self.stop_reason_map = {
+             "stop": "end_turn",
+             "length": "max_tokens",
+@@ -130,6 +1083,10 @@
          cls._handle_streaming_options(req, anthropic_request)
          cls._convert_tool_choice(anthropic_request, req)
          cls._convert_tools(anthropic_request, req)
@@ -936,7 +996,7 @@
          return req
  
      @classmethod
-@@ -139,40 +1042,92 @@
+@@ -139,40 +1096,92 @@
          openai_messages: list[dict[str, Any]],
      ) -> None:
          """Convert Anthropic system message to OpenAI format"""
@@ -1047,7 +1107,7 @@
      @classmethod
      def _convert_message_content(
          cls,
-@@ -221,7 +1176,12 @@
+@@ -221,7 +1230,12 @@
      ) -> None:
          """Convert individual content block"""
          if block.type == "text" and block.text:
@@ -1061,7 +1121,7 @@
          elif block.type == "image" and block.source:
              image_url = cls._convert_image_source_to_url(block.source)
              content_parts.append({"type": "image_url", "image_url": {"url": image_url}})
-@@ -241,6 +1201,12 @@
+@@ -241,6 +1255,12 @@
              # Tool references are expanded during tool_result processing
              # when they appear inside tool_result content.
              pass
@@ -1074,7 +1134,7 @@
  
      @classmethod
      def _convert_tool_use_block(cls, block, tool_calls: list[dict[str, Any]]) -> None:
-@@ -339,11 +1305,28 @@
+@@ -339,11 +1359,28 @@
          openai_messages: list[dict[str, Any]],
      ) -> ChatCompletionRequest:
          """Build base ChatCompletionRequest"""
@@ -1104,7 +1164,7 @@
              )
  
          return ChatCompletionRequest(
-@@ -356,7 +1339,7 @@
+@@ -356,7 +1393,7 @@
              top_p=anthropic_request.top_p,
              top_k=anthropic_request.top_k,
              kv_transfer_params=anthropic_request.kv_transfer_params,
@@ -1113,7 +1173,7 @@
          )
  
      @classmethod
-@@ -393,10 +1376,17 @@
+@@ -393,10 +1430,17 @@
          elif tool_choice_type == "none":
              req.tool_choice = "none"
          elif tool_choice_type == "tool":
@@ -1132,7 +1192,7 @@
                  }
              )
  
-@@ -412,6 +1402,42 @@
+@@ -412,6 +1456,42 @@
  
          tools = []
          for tool in anthropic_request.tools:
@@ -1175,7 +1235,7 @@
              tools.append(
                  ChatCompletionToolsParam.model_validate(
                      {
-@@ -428,8 +1454,158 @@
+@@ -428,8 +1508,158 @@
  
          if req.tool_choice is None:
              req.tool_choice = "auto"
@@ -1334,7 +1394,7 @@
      async def create_messages(
          self,
          request: AnthropicMessagesRequest,
-@@ -446,24 +1622,199 @@
+@@ -446,27 +1676,207 @@
          chat_req = self._convert_anthropic_to_openai_request(request)
          if logger.isEnabledFor(logging.DEBUG):
              logger.debug("Convert to OpenAI request %s", chat_req.model_dump_json())
@@ -1367,13 +1427,13 @@
 +        # then generate the final answer with the original stream setting.
 +        original_stream = chat_req.stream
 +        chat_req.stream = False
- 
++
 +        max_tool_rounds = 5
 +        tool_rounds_executed = 0
 +        executed_tools: list[dict] = []
 +        for round_num in range(max_tool_rounds):
 +            generator = await self.create_chat_completion(chat_req, raw_request)
-+
+ 
 +            if isinstance(generator, ErrorResponse):
 +                return generator
 +
@@ -1541,7 +1601,15 @@
              usage=AnthropicUsage(
                  input_tokens=generator.usage.prompt_tokens,
                  output_tokens=generator.usage.completion_tokens,
-@@ -511,6 +1862,7 @@
++                # PATCH 14: see the streaming path. The proxy cannot split a
++                # non-stream's prefill from its decode at all, so this is the
++                # ONLY per-request cache number a non-streaming turn will ever
++                # have.
++                engine_cached_tokens=_engine_cached_tokens(generator.usage),
+             ),
+             kv_transfer_params=generator.kv_transfer_params,
+         )
+@@ -511,6 +1921,7 @@
      async def message_stream_converter(
          self,
          generator: AsyncGenerator[str, None],
@@ -1549,7 +1617,7 @@
      ) -> AsyncGenerator[str, None]:
          try:
  
-@@ -615,7 +1967,8 @@
+@@ -615,7 +2026,8 @@
                                  message=AnthropicMessagesResponse(
                                      id=origin_chunk.id,
                                      content=[],
@@ -1559,3 +1627,20 @@
                                      stop_reason=None,
                                      stop_sequence=None,
                                      usage=AnthropicUsage(
+@@ -648,6 +2060,16 @@
+                                     output_tokens=origin_chunk.usage.completion_tokens
+                                     if origin_chunk.usage
+                                     else 0,
++                                    # PATCH 14: only the FINAL chunk carries
++                                    # prompt_tokens_details, which is why this
++                                    # rides message_delta and not
++                                    # message_start. exclude_unset below drops
++                                    # it when it is None, so a build that does
++                                    # not report it sends nothing rather than
++                                    # a zero.
++                                    engine_cached_tokens=_engine_cached_tokens(
++                                        origin_chunk.usage
++                                    ),
+                                 ),
+                             )
+                             data = chunk.model_dump_json(exclude_unset=True)

@@ -16,6 +16,11 @@
 # check with `pgrep -fx "bash ./watchdog-dspark.sh"` -- note the -x, because a
 # plain `pgrep -f watchdog-dspark.sh` also matches the shell you typed it in.
 #
+# BOOT HOLD-OFF: while /tmp/dspark-booting exists and is fresh, this watchdog
+# skips its poll and resets its failure count -- the start script creates it for
+# the life of a boot. Added 2026-09-20 after a 407s boot reached 7/8. Disable
+# with BOOT_SENTINEL=/nonexistent.
+#
 # WHY FAIL_THRESHOLD IS 8, NOT 3: a restart here is BLOCKING (stop, then start
 # to completion, then cooldown), so a single watchdog never interrupts its own
 # boot. The threshold only matters for boots this instance did not start. At 3
@@ -34,11 +39,30 @@ POLL_INTERVAL="${POLL_INTERVAL:-60}"
 FAIL_THRESHOLD="${FAIL_THRESHOLD:-8}"
 RESTART_COOLDOWN="${RESTART_COOLDOWN:-900}"
 LOCK_FILE="${LOCK_FILE:-/tmp/dspark-watchdog.lock}"
+# Boot sentinel, written by start-deepseek-v4-flash-dspark.sh for the life of a
+# boot and mtime-refreshed while it waits. See the block in the poll loop.
+BOOT_SENTINEL="${BOOT_SENTINEL:-/tmp/dspark-booting}"
+# Ignore a sentinel older than this. The start script refreshes the mtime every
+# wait iteration, so this is a NO-PROGRESS timeout, not a cap on boot duration:
+# it only bites if the start script was SIGKILLed and left the file behind.
+SENTINEL_MAX_AGE="${SENTINEL_MAX_AGE:-900}"
 
 fail_count=0
+sentinel_logged=0
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+# Age of $BOOT_SENTINEL in seconds, or empty if it does not exist.
+# GNU stat on the nodes; the BSD form is there so this is testable on a Mac.
+sentinel_age() {
+  local mtime
+  [ -e "$BOOT_SENTINEL" ] || return 1
+  mtime=$(stat -c %Y "$BOOT_SENTINEL" 2>/dev/null) \
+    || mtime=$(stat -f %m "$BOOT_SENTINEL" 2>/dev/null) \
+    || return 1
+  echo $(( $(date +%s) - mtime ))
 }
 
 # --- singleton ---------------------------------------------------------------
@@ -59,6 +83,32 @@ fi
 log "Watchdog started: polling $API_URL every ${POLL_INTERVAL}s, restart after ${FAIL_THRESHOLD} consecutive failures"
 
 while true; do
+  # --- boot hold-off ---------------------------------------------------------
+  # A failing /v1/models means "dead" OR "not up yet", and this watchdog cannot
+  # tell them apart. On 2026-09-20 a 407s cold boot reached 7 of 8 failures --
+  # one poll from issuing `stop` into a live weight load, the exact move that
+  # boot-looped the cluster for two hours the day before. FAIL_THRESHOLD alone
+  # cannot fix that: it is a guess against a 250-600s boot, so raising it only
+  # moves the overlap and delays real death detection.
+  #
+  # So the start script states its intent instead of us inferring it. While its
+  # sentinel is present and fresh we skip the poll AND reset the count -- the
+  # reset matters because a manual restart's `stop` runs BEFORE the start script
+  # creates the file, so failures accumulate first.
+  if age=$(sentinel_age) && [ "$age" -lt "$SENTINEL_MAX_AGE" ]; then
+    if [ "$sentinel_logged" -eq 0 ]; then
+      log "boot in progress ($BOOT_SENTINEL, ${age}s old) -- holding off, failure count reset"
+      sentinel_logged=1
+    fi
+    fail_count=0
+    sleep "$POLL_INTERVAL"
+    continue
+  fi
+  if [ "$sentinel_logged" -eq 1 ]; then
+    log "boot sentinel gone -- resuming normal polling"
+    sentinel_logged=0
+  fi
+
   if curl -fsS --max-time 10 "$API_URL" >/dev/null 2>&1; then
     if [ "$fail_count" -gt 0 ]; then
       log "API recovered (was at $fail_count/$FAIL_THRESHOLD failures)"

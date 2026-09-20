@@ -21,6 +21,9 @@
 #      see API-9d in patches/anthropic_serving_inline_system.py
 # Each one is a 422 before any inference happens, i.e. a hard client failure.
 #
+# It also DECLARES one response field: engine_cached_tokens (API-14), which
+# carries vLLM's own num_cached_tokens back to the client.
+#
 # kill switch: none -- validation relaxations have no runtime toggle.  Roll back
 #      by removing the protocol.py bind-mount line from the compose.
 # detail: docs/local/PATCHES-API.md#api-0
@@ -53,6 +56,15 @@ class AnthropicUsage(BaseModel):
     output_tokens: int
     cache_creation_input_tokens: int | None = None
     cache_read_input_tokens: int | None = None
+    # PATCH 14: the ENGINE's own count of prompt tokens it did not have to
+    # recompute (vLLM's num_cached_tokens), as a SUBSET of input_tokens.
+    #
+    # A DISTINCT NAME, deliberately, and NOT cache_read_input_tokens. That
+    # field is Anthropic's and is DISJOINT from input_tokens -- the proxy's
+    # rollups sum the two side by side -- while num_cached_tokens is part of
+    # the prompt. Reusing the name would double-count in a 90-day rollup, or
+    # silently change what input_tokens means part-way through the history.
+    engine_cached_tokens: int | None = None
 
 
 class AnthropicContentBlock(BaseModel):
@@ -161,8 +173,7 @@ class AnthropicMessagesRequest(BaseModel):
         ),
     )
 
-    # PATCH 9d (staged 2026-09-18; LIVE -- verified in the running container
-    # 2026-09-20, engine started 08:58Z): Claude Code STATES its
+    # PATCH 9d (staged 2026-09-18, NOT yet deployed): Claude Code STATES its
     # intent per request -- {"type": "disabled"} on auto-mode permission
     # classifier calls, {"type": "adaptive"} on main-agent calls. Pydantic's
     # default extra="ignore" dropped it, so we were inferring from the system

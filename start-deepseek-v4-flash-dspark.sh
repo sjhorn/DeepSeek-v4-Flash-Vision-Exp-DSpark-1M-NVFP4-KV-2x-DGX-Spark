@@ -7,6 +7,11 @@ COMPOSE_FILE="${COMPOSE_FILE:-$SCRIPT_DIR/docker-compose.dspark.yml}"
 VISION_COMPOSE_FILE="${VISION_COMPOSE_FILE:-$SCRIPT_DIR/docker-compose.vision-exp.yml}"
 VISION_STAGE_DIR="${VISION_STAGE_DIR:-$HOME/vision-stage}"
 WAIT_ATTEMPTS="${WAIT_ATTEMPTS:-100}"
+# Boot sentinel: exists for the life of this script, mtime refreshed while we
+# wait. watchdog-dspark.sh skips polling (and resets its failure count) while it
+# is present and fresh, so a boot this script is driving cannot be torn down by
+# a watchdog that did not start it. See "Boot sentinel" below.
+BOOT_SENTINEL="${BOOT_SENTINEL:-/tmp/dspark-booting}"
 WAIT_SECONDS="${WAIT_SECONDS:-15}"
 
 if [ ! -f "$ENV_FILE" ]; then
@@ -128,10 +133,51 @@ if compgen -G "$SCRIPT_DIR/patches/anthropic_*.py" >/dev/null; then
   ssh "$WORKER_HOST" "mkdir -p $REMOTE_WORKER_DIR/patches"
   # sync ALL bind-mounted patches (anthropic_*, patch6 kv-cache-manager, patch7 dedupe, ...)
   scp "$SCRIPT_DIR"/patches/*.py "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/"
+  # THE SAME TRAP ONE LEVEL DEEPER. patches/*.py does not match a directory, and
+  # the prefill collector ships as a DIRECTORY -- a module plus a .dist-info,
+  # because the engine finds it through the vllm.stat_logger_plugins entry-point
+  # group rather than by import. Without this the worker starts with compose
+  # bind-mounts pointing at paths that do not exist, Docker helpfully creates
+  # empty DIRECTORIES for them inside site-packages, and one of those is an
+  # empty .dist-info that importlib.metadata then has to walk.
+  if [ -d "$SCRIPT_DIR/patches/prefill_plugin" ]; then
+    scp -r "$SCRIPT_DIR/patches/prefill_plugin" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/"
+  fi
 fi
 if [ "$COMPOSE_VISION" = "1" ]; then
   scp "$VISION_COMPOSE_FILE" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/docker-compose.vision-exp.yml"
 fi
+
+# --- Boot sentinel (local extension, not upstream) --------------------------
+# WHY. The watchdog cannot tell "the engine is dead" from "the engine is not up
+# yet": both are a failing /v1/models. Raising FAIL_THRESHOLD 3 -> 8 on
+# 2026-09-19 bought ~480s, but a cold boot is 250-600s, so the windows still
+# overlap -- and on 2026-09-20 a 407s boot reached 7 of 8, one 60s poll from the
+# watchdog issuing `stop` into a live weight load. That is exactly the failure
+# that boot-looped the cluster for two hours on 2026-09-19.
+#
+# This closes the overlap instead of widening it: while this file exists and is
+# fresh, the watchdog skips its poll AND resets its failure count. The mtime is
+# refreshed on every wait iteration below, so a legitimately slow boot never
+# ages out -- the staleness limit is a no-progress timeout, not a boot cap. If
+# this script dies, the trap removes it; if it is SIGKILLed, the watchdog
+# ignores a sentinel older than its own limit (default 900s), so the blind spot
+# is bounded either way.
+#
+# Created here, AFTER every preflight and before the first compose call, so a
+# preflight failure never leaves the watchdog blinded.
+: > "$BOOT_SENTINEL" 2>/dev/null \
+  && echo "Boot sentinel: $BOOT_SENTINEL (watchdog will hold off while this boots)" \
+  || echo "Boot sentinel: could not create $BOOT_SENTINEL -- stop the watchdog by hand." >&2
+
+# ONE EXIT trap for both cleanups: bash keeps only the last `trap ... EXIT`, so
+# the page-cache reclaim's kill had to move in here rather than install its own.
+cleanup_on_exit() {
+  [ -n "${DROP_PID:-}" ] && kill "$DROP_PID" 2>/dev/null
+  rm -f "$BOOT_SENTINEL" 2>/dev/null
+  return 0
+}
+trap cleanup_on_exit EXIT
 
 echo "Starting DSpark worker on ${WORKER_HOST}..."
 ssh "$WORKER_HOST" "$REMOTE_COMPOSE NODE_RANK=1 HEADLESS=1 HF_CACHE='$WORKER_HF_CACHE' VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' docker compose --env-file .env.dspark $REMOTE_COMPOSE_FILES up -d"
@@ -162,7 +208,6 @@ if [ "$DROP_CACHES_ON_START" = "1" ]; then
       done
     ) &
     DROP_PID=$!
-    trap '[ -n "$DROP_PID" ] && kill "$DROP_PID" 2>/dev/null || true' EXIT
   else
     echo "Startup cache reclaim: SKIPPED (no passwordless sudo for vm.drop_caches)." >&2
   fi
@@ -170,8 +215,11 @@ fi
 
 echo "Waiting for DSpark vLLM API..."
 for _ in $(seq 1 "$WAIT_ATTEMPTS"); do
+  # Keep the sentinel fresh: a boot that is slow but progressing must not look
+  # stale to the watchdog. Cleanup is the EXIT trap's job, not this loop's.
+  touch "$BOOT_SENTINEL" 2>/dev/null || true
   if curl -fsS --max-time 5 "$API_URL" >/dev/null; then
-    [ -n "$DROP_PID" ] && kill "$DROP_PID" 2>/dev/null || true
+    [ -n "${DROP_PID:-}" ] && kill "$DROP_PID" 2>/dev/null || true
     echo "DeepSeek V4 Flash DSpark is running: $API_URL"
     COMPOSE_DISABLE_ENV_FILE=1 docker compose --env-file "$ENV_FILE" "${COMPOSE_ARGS[@]}" ps
     ssh "$WORKER_HOST" "$REMOTE_COMPOSE docker compose --env-file .env.dspark $REMOTE_COMPOSE_FILES ps"
