@@ -116,8 +116,8 @@ which is exactly what `SENTINEL_MAX_AGE` bounds. A preflight failure leaves no s
 **`FAIL_THRESHOLD` was deliberately NOT raised.** It is a guess against a 250-600s boot, so raising
 it only moves the overlap and delays genuine death detection by four minutes.
 
-**Rollback:** `/tmp/watchdog-dspark.sh.pre-sentinel` and
-`/tmp/start-deepseek-v4-flash-dspark.sh.pre-sentinel` on the head, or set
+**Rollback:** `local-ops/rollback/` on the head — **not** `/tmp`, which a reboot wipes (the
+2026-09-19 `.pre-singleton` copy was sitting there and has been moved too). Or set
 `BOOT_SENTINEL=/nonexistent` to disable the hold-off without reverting anything.
 
 > **Do not read "the watchdog has never fired wrongly" as evidence a threshold is sufficient.** It
@@ -153,7 +153,8 @@ running at once. Count the watchdogs first: `pgrep -afx "bash ./watchdog-dspark.
 > reported "REFUSING: 2 watchdogs already running" when there were none.
 
 **Hardened the same day** (script-only, no container restart — `watchdog-dspark.sh` on the head,
-backup at `/tmp/watchdog-dspark.sh.pre-singleton`):
+backup now at `local-ops/rollback/watchdog-dspark.sh.pre-singleton`, moved there 2026-09-20 —
+it had been in `/tmp`, which a reboot wipes):
 
 1. **`flock` singleton** on `/tmp/dspark-watchdog.lock` (`LOCK_FILE` overrides). A second instance
    exits immediately. **Verified live:** the second start printed
@@ -167,7 +168,7 @@ backup at `/tmp/watchdog-dspark.sh.pre-singleton`):
    "will retry after cooldown" branch unreachable dead code and leaving the cluster unsupervised
    exactly when it needed a supervisor. **Not yet exercised** — it needs a genuinely failing start.
 
-**Rollback:** `cp /tmp/watchdog-dspark.sh.pre-singleton <repo>/watchdog-dspark.sh`, then restart the
+**Rollback:** `cp local-ops/rollback/watchdog-dspark.sh.pre-singleton <repo>/watchdog-dspark.sh`, then restart the
 watchdog.
 
 ### Engine death: NCCL collective timeout (2026-09-19 14:01)
