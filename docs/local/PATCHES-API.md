@@ -21,18 +21,20 @@ Anchors used by the in-file banners and by `PATCH-REGISTRY.md` are the section h
 > Moved verbatim from `STATUS.md` and `CLAUDE.md` during the 2026-09-20 doc split. Where a line was found stale
 > on the way across it was corrected in place and the correction is marked **CORRECTED**.
 
-## Claude Code compatibility patches
+<a id="api-0"></a>
+
+## API-0 — the protocol patch, and the shape of the serving patch
 
 Two files are bind-mounted into the container via `docker-compose.dspark.yml` to fix Claude Code compatibility issues with vLLM's Anthropic endpoint.
 
-### `patches/anthropic_protocol_inline_system.py`
+### `patches/anthropic_protocol_inline_system.py` — API-0
 
 Patched copy of `vllm/entrypoints/anthropic/protocol.py`:
 
 - **Inline system messages** (vllm-project/vllm#44283): `AnthropicMessage.role` accepts `"system"` in addition to `"user"` and `"assistant"`. Claude Code sends `role: "system"` inside the messages array.
 - **Server-side tool acceptance**: `AnthropicTool.input_schema` made optional, added `type` and `max_uses` fields. Allows tools like `web_search_20250305` to pass Pydantic validation.
 
-### `patches/anthropic_serving_inline_system.py`
+### `patches/anthropic_serving_inline_system.py` — API-8 … API-13
 
 Patched copy of `vllm/entrypoints/anthropic/serving.py`:
 
@@ -41,7 +43,9 @@ Patched copy of `vllm/entrypoints/anthropic/serving.py`:
 - **Server-side tool execution loop**: `create_messages()` detects server-side tools, runs tool execution rounds as non-streaming (to inspect full response), executes via SERPER API (`web_search`) or urllib (`web_fetch`), feeds results back to the model. Final answer uses the original stream setting for real-time token delivery.
 - **Tool block injection**: `_stream_with_tool_blocks()` and `_full_response_with_tool_blocks()` inject `server_tool_use` + `web_search_tool_result` content blocks into responses so Claude Code's UI correctly shows the search count.
 
-### Patch 8 — leaked chain-of-thought strip (2026-09-16)
+<a id="api-8"></a>
+
+## API-8 — leaked chain-of-thought strip (2026-09-16)
 
 Added to `patches/anthropic_serving_inline_system.py`. `strip_leaked_reasoning()` drops everything
 up to and including the **last** `</think>` from **inbound assistant text only**, at both
@@ -59,7 +63,9 @@ the end marker, while 0731 runs a CoT anyway.
   below in this file for the full analysis and the open question about generation-side
   suppression.
 
-### Patch 9 — per-tier model aliases (2026-09-18)
+<a id="api-9"></a>
+
+## API-9 — per-tier model aliases (2026-09-18)
 
 One engine now answers to five names (`--served-model-name` takes a list; `SERVED_MODEL_ALIASES`
 in the compose). `thinking_kwargs_for_model()` in `patches/anthropic_serving_inline_system.py`
@@ -85,7 +91,11 @@ multi-model use needs the env block in [`THINKING-AND-EFFORT.md`](THINKING-AND-E
 "Model aliases" set by hand, and
 **`CLAUDE_CODE_EXTRA_BODY` must be dropped** — its `model` key overrides every tier variable.
 
-### Patch 11 — the prefix-cache killer: per-turn system messages (2026-09-18)
+<a id="api-11"></a>
+<a id="api-11a"></a>
+<a id="api-11b"></a>
+
+## API-11 (11a + 11b) — the prefix-cache killer: per-turn system messages (2026-09-18)
 
 **Symptom.** Turns taking 100s+ with large prefills, apparently on an unchanged prefix. KV at 52%,
 `Waiting: 0`, no preemptions — not pool pressure.
@@ -122,7 +132,9 @@ the *system prompt* — but the system prompt precedes every message, so per-req
 **Smoke test on the real captures: 6 distinct system prompts → 1.** Strip is idempotent; boundary
 detection verified; 16 per-turn system messages folded rather than hoisted.
 
-### API-9d — honour the client's stated thinking intent
+<a id="api-9d"></a>
+
+## API-9d — honour the client's stated thinking intent
 
 > **CORRECTED 2026-09-20: this is LIVE.** The heading said "STAGED, not deployed" and the body
 > below still reads that way — it was written 2026-09-18 and never revisited. Verified in the
@@ -146,7 +158,7 @@ says `disabled`. Only `disabled` is honoured — `adaptive` means "you decide", 
 model-name ladder is for. The system-prompt marker check stays as fallback, since it is keyed on
 English text Anthropic could reword. Five unit cases pass.
 
-### Auto-mode classifier verified end to end (2026-09-18)
+### API-9: the auto-mode classifier, verified end to end (2026-09-18)
 
 Replayed the **real captured classifier body** (25,788 prompt tokens) against the live server:
 
@@ -180,7 +192,9 @@ Verdict stability on the benign case: 16/16 ALLOW; severities 0-22 at default te
 > generation and return null content. Both mitigations now protect the same request — do not relax
 > one assuming the other is redundant.
 
-### Patch 10b — root cause: leaked DSML in tool arguments (2026-09-18)
+<a id="api-10b"></a>
+
+## API-10b — root cause: leaked DSML in tool arguments (2026-09-18)
 
 **Root cause identified**, captured live by Patch 10's logging (model=`claude-opus-5`,
 tool=`web_search`):
@@ -212,7 +226,9 @@ Verified against the captured payload: recovery yields
 `{"query": "who is the president of the United States September 2026"}`. Six unit cases cover the
 real payload, valid JSON, multi-parameter DSML with type coercion, prose, `None`, and a JSON array.
 
-### Patch 10 — malformed tool arguments must not 500 the turn (2026-09-18)
+<a id="api-10"></a>
+
+## API-10 — malformed tool arguments must not 500 the turn (2026-09-18)
 
 **Symptom.** `POST /v1/messages?beta=true` → 500, in retry bursts (client backoff 2s/2s/4s/6s/11s).
 9 occurrences, all with an identical traceback and an identical error offset:
@@ -249,7 +265,7 @@ cover valid, malformed, client-side, mixed, non-object and `None` arguments.
 the tool-call parser and the interleaved-thinking beta as alternatives. The logged `model=` field
 distinguishes them.
 
-### Patch 9 rev 2 — vendor-name routing + classifier exemption (2026-09-18)
+### API-9 rev 2 — vendor-name routing + classifier exemption (2026-09-18)
 
 Served names grew from 5 to 11: the four `deepseek-…-think-*` aliases plus `claude-haiku-4-5`,
 `claude-haiku-4-5-20251001`, `claude-sonnet-5`, `claude-sonnet-4-6`, `claude-opus-5`,
@@ -276,7 +292,9 @@ Precedence: explicit kwargs → classifier → name rules → server default. Ki
 The classifier prompt itself is well constructed — static block first, volatile transcript last,
 byte-identical across calls — so vLLM's prefix cache absorbs it after the first call.
 
-### Patch 9b — echo the requested model alias (2026-09-18)
+<a id="api-9b"></a>
+
+### API-9b — echo the requested model alias (2026-09-18)
 
 Observed: a request naming `deepseek-v4-flash-dspark-think-max` returned
 `model: deepseek-v4-flash-dspark`, on **both** streaming and non-streaming paths, for every alias.
@@ -291,7 +309,7 @@ updated. Falls back to the resolved name when not supplied, so a missed call sit
 today's behaviour instead of raising. Verified by AST sweep that no call site lacks the argument
 and that every `request.model` reference sits inside `create_messages`.
 
-## Leaked chain-of-thought, and Patch 8 (2026-09-16)
+## Leaked chain-of-thought, and API-8 — the full analysis (2026-09-16)
 
 **The symptom.** `</think>` appears in the body of Claude Code replies, with the model's
 scratchpad rendered as the answer.
@@ -353,3 +371,21 @@ were expected, so it is underpowered. Re-check once 40+ post-patch turns above 1
 > **The naming hazard this box used to warn about is FIXED (2026-09-20).** The protected-block cap
 > is `MNT-6a`; the stop-string guard is `MNT-5`. See
 > [`PATCHES-KV.md`](PATCHES-KV.md) and [`PATCH-REGISTRY.md`](PATCH-REGISTRY.md).
+
+<a id="api-12"></a>
+
+## API-12 — prefix-cache tripwire
+
+The tripwire's design, cost (50.8 KB/hour, 37µs per request), its **blind spot** — the
+reasoning-effort prefix is injected downstream of it, so a tier switch produces identical hashes —
+and how to read its output are all in
+[`PREFIX-CACHE.md`](PREFIX-CACHE.md), with the rest of the cache evidence. The consumer is
+`local-ops/prefix-watch.py` ([`TOOLING.md`](TOOLING.md)).
+
+<a id="api-13"></a>
+
+## API-13 — sticky tool set
+
+Why a flapping client tool (`swift-lsp`) shrinking the `tools` array costs a full re-prefill, and
+the 16-turn replay that measured 3 tool-set changes → 1, are in
+[`PREFIX-CACHE.md`](PREFIX-CACHE.md) under "The one thing that actually moves the head".
