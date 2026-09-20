@@ -783,6 +783,15 @@ document chases, and is **not in our runtime** (0.21.1rc1.dev339). Of its two ha
 - **`VLLM_PREFIX_CACHE_RETENTION_INTERVAL`** applies in principle but is blocked behind the fork's
   `eagle_extra_cache_blocks` bail-out, which makes our SWA groups cache densely regardless.
 
-Neither is implemented and neither is measured. **The analysis, the per-group page-size table, the
+A third candidate — **pinning the static head in-engine** (boundary = first `<｜User｜>`, token
+`128803`; verified on this build that tools and system both render before it) — is assessed
+alongside them. It is a **narrowing of `MNT-6a`**, not a new primitive: `_protect_prompt_blocks()`
+already pins the whole aligned prompt prefix on every request, under a FIFO cap of 1,674 blocks per
+group, so one long session's body evicts every other agent's head. It also explains the reported
+asymmetry — an identical resend hits 100% because the pinned boundary is the prompt end, while a
+session sharing only the head gets nothing, because `MNT-6b` evicted the sliding-window tails at
+that earlier boundary.
+
+None of the three is implemented and none is measured. **The analysis, the per-group page-size table, the
 porting surface and the test plan live in [`CACHE_TEST.md`](../../CACHE_TEST.md)** — not here, so
 the two cannot drift. Fold the result back into this document once it is measured.

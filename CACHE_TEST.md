@@ -1,11 +1,13 @@
-# CACHE_TEST.md — vllm#43447 against our tree: what applies, and how we would test it
+# CACHE_TEST.md — three candidate prefix-cache mechanisms against our tree, and how we would test them
 
 **Status: analysis only. Nothing implemented, nothing deployed, no restart spent.**
 Assessed 2026-09-20 against the running image `vllm-dspark-runtime:dspark-nvfp4-stage-c`
 (vLLM `0.21.1rc1.dev339+g1967a5627bc3`), by diffing the PR against the image's real sources —
 `patches/pristine/` plus `kv_cache_utils.py` / `kv_cache_coordinator.py` read out of the container.
 
-This is the working document for the experiment. The standing evidence it draws on lives in
+Two of the three mechanisms come from upstream vllm#43447; the third (§3a, pinning the static head
+in-engine) was proposed separately and is assessed here because it competes for the same budget and
+edits the same files. This is the working document for the experiment. The standing evidence it draws on lives in
 [`docs/local/PREFIX-CACHE.md`](docs/local/PREFIX-CACHE.md); the one-line verdict lives in
 [`docs/local/UPSTREAM.md`](docs/local/UPSTREAM.md). Nothing is restated in all three.
 
@@ -50,6 +52,8 @@ cache retention", confirmed on 0.22.1rc1, **not in our runtime**. Two independen
    multiple of `scheduler_block_size` = one tail per interval. Replaces the `alignment_tokens`
    argument of `cache_blocks()` with `retention_interval`, and rewrites the SWA reachable-block
    mask to be EAGLE-aware (`shift = 1`) instead of bailing out.
+
+The third candidate, §3a, is not part of this PR.
 
 Upstream's own result is 0% → 74.3% prefix hit on their workload on a later tree. **That is not a
 prediction for us** and should not be quoted as one.
@@ -141,6 +145,146 @@ on retained checkpoints, not at arbitrary prefixes.** `0` is right if only whole
 replayed; `32768` if partial prefixes should hit too. Claude Code replays a growing prefix, not a
 fixed one, so `32768` is the arm to test, not `0`.
 
+## 3a. Mechanism 3 — pin the static head in-engine (the "no proxy" proposal). **Applies, and it is smaller than proposed.**
+
+The proposal: move both proxy jobs into vLLM — (a) find where the static head ends, in-engine, from
+the prompt token IDs; (b) stop needing a re-warm by taking an extra reference on the blocks up to
+that boundary, so they never enter the free queue.
+
+Checked against this build, point by point. **Two of the four assumptions are already true in our
+image**, which makes the change considerably smaller than the sketch — and one of them is the
+reason it is worth doing at all.
+
+### 3a.1 Finding B — confirmed on this build, with the token id
+
+The assumption was that the V4 encoder renders tool definitions before the first user turn. **It
+does.** Rendered live through `/tokenize` + `/detokenize` on `spark-45ea` (283-token sample,
+system + tools + two user turns), the order is:
+
+```
+[0] <｜begin▁of▁sentence｜>
+[2] ## Tools …  ← the DSML boilerplate
+[199] ### Available Tool Schemas …  ← the tools array
+[261] SYSTEM HEAD TEXT.            ← the system prompt, AFTER the tools
+[266] <｜User｜>                     ← first user turn
+```
+
+So the static head is `[0, first <｜User｜>)`, and **`<｜User｜>` is token id `128803`**
+(`<｜Assistant｜>` is `128804`, for the same scan). Tools *and* system both land inside it, which is
+what the scheme needs. Record these ids in the overlay as constants derived from the tokenizer, not
+hard-coded — they are checkpoint-specific.
+
+Two of our own patches act upstream of this rendering and neither disturbs it: `API-11b` hoists only
+the *leading* run of system messages, and `API-8` strips leaked CoT from assistant turns (behind the
+boundary). `API-11a` already removed the per-request `<total_tokens>` counter that used to make the
+head volatile — see below.
+
+### 3a.2 "Creating the checkpoint as a side effect of normal prefill" — already how it works
+
+The primitive is not hypothetical and does not need adding. `_protect_prompt_blocks()` →
+`block_pool.touch()` takes the extra reference exactly as described, and **two managers already
+call it on every request**:
+
+| manager | what it pins today | line (pristine) |
+|---|---|---|
+| `MLAAttentionManager.cache_blocks` | the **whole** aligned prompt prefix, `blocks[:aligned(num_prompt-1)/block_size]` | 664 |
+| `SlidingWindowMLAManager.cache_blocks` | the sliding-window **tails around the aligned prompt boundary**, `blocks[aligned - contiguous : last_full_prompt_block]` | 875 |
+
+`MNT-6a` is the cap on that set. So the proposal's mechanism is running in production right now —
+**at the wrong boundary**.
+
+### 3a.3 What the gap actually is: the boundary is the prompt end, not the head, and release is FIFO
+
+Today's pin covers `[0, prompt_end)`, which is a **superset** of `[0, B)`. The head is therefore
+already pinned — briefly. The failure is the budget:
+
+- cap is `pool x fraction / managers` = `16741 x 0.50 / 5` = **1,674 blocks per group**, which in
+  group 0 (256-token pages) is ~428K tokens — close to the measured 457,079 retention;
+- release is **FIFO** (`_protected_prompt_block_queue.popleft()`), not hit-aware;
+- so **one long session's body consumes the entire budget and FIFO-evicts the oldest pins — which
+  are the static heads of every other agent.**
+
+A 12.6K-token Claude Code head is ~47 blocks in group 0. Pinning `[0, B)` instead of
+`[0, prompt_end)` fits **dozens** of distinct agent heads in the same budget, permanently, instead
+of one conversation's body transiently. That is the whole change: **narrow what is pinned, and make
+release hit-aware**, not "add pinning".
+
+### 3a.4 Why the SWA tail at B is the part that actually matters
+
+`find_longest_cache_hit` takes the **minimum across groups**, so a head is only reusable if the
+sliding-window and compressor groups can also serve it at B. They cannot, today:
+
+- SWA blocks *are* cached densely during prefill (§3 — the mask is disabled under MTP), but
+- `MNT-6b` evicts each one as the window passes it (`_maybe_evict_cached_block()` before recycling),
+  and
+- the only SWA tails that survive are the ones `SlidingWindowMLAManager` pins — **at the prompt end**.
+
+This predicts precisely the asymmetry in the original report: **an identical resend hits 100%**
+(its boundary is the pinned prompt end) **while a different session sharing only the head re-prefills
+from zero** (its boundary is B, where the SWA tails were evicted). Pinning the small SWA/compressor
+tails at B is the missing piece, and it is why this mechanism is not merely a tidier proxy.
+
+### 3a.5 Chunked prefill — the ordering question, answered
+
+The concern was that pinning must happen at the step where caching crosses B, before the next step
+frees the out-of-window blocks. In our `kv_cache_manager.allocate_slots()` the order **within one
+call** is `coordinator.remove_skipped_blocks()` (line 378) then `coordinator.cache_blocks()`
+(line 432). The existing `_protect_prompt_blocks()` calls live *inside* the managers' `cache_blocks`
+overrides — i.e. already after the free and at the moment the blocks become cached. **Hooking the
+B-pin in the same place inherits the correct ordering**; no scheduler change is needed.
+
+### 3a.6 The extra work, re-scoped against our measurements
+
+| the sketch's concern | where it actually stands here |
+|---|---|
+| **Volatile heads** (date / cwd / session id early in the system prompt) | **Measured low-risk, not zero.** `API-12` fingerprints are identical across two live sessions (`head=942f33360604 tools=077941266e1a sys=5e46e83cd5d3`), and `API-11a` already removed the per-request counter that made the head volatile. Keep pin-on-first-sight + evict-never-hit anyway; it is the cheap half. |
+| **Multiple agents** | Budget + LRU among pins. Agreed — but it must be a **reserved sub-budget**, see conflicts below. |
+| **Short heads (<512 tokens)** | Skip them. Ours is ~12.6K, so this is a guard, not a limit. |
+| **Chunked prefill ordering** | **Resolved, §3a.5.** |
+| **First session must still compute the head once** | A launcher `curl` with `max_tokens=1` after the health check works — but it must reproduce the head **byte-for-byte as the client sends it**, i.e. through the Anthropic endpoint with the same tools array and the same tier. `API-12`'s documented blind spot bites here: the effort prefix is injected *downstream* of fingerprinting, so a warm-up at the wrong tier pins a head nothing will ever hit. Verify with `engine_cached_tokens` on the first real turn, not with the warm-up's own response. |
+
+### 3a.7 Interaction with Mechanisms 1 and 2 — one conflict, and it is schedulable
+
+| pair | interaction |
+|---|---|
+| **3 x 1** (free-queue ordering) | **None. Complementary.** Pinned blocks hold a reference and never enter the free queue, so queue ordering cannot touch them; Mechanism 1 governs everything *not* pinned. They do share `MNT-6b`'s code, so implement 1 first and rebase 3 onto it rather than developing both against pristine. |
+| **3 x 2** (retention interval) | **Real conflict — do not ship blind.** Mechanism 2 stops caching SWA checkpoints that are not on a retained boundary. If B is not a retained checkpoint, **there is nothing at B to pin** and Mechanism 3 silently becomes a no-op. If both ever ship, B must be rounded down to the retention interval (not to 256), or upstream's "latest replay boundary" carve-out must be extended to cover pinned Bs. |
+| **3 x `MNT-6a`** | **Shared budget — must be split.** A B-pin placed in the existing `_protected_prompt_block_queue` is FIFO-evicted by ordinary prompt protection, which is the very failure being fixed. Head pins need their own reserve (a second queue, own cap, LRU-by-hit), with `MNT-6a`'s cap applying to the remainder. Non-negotiable; without it the change does nothing. |
+| **3 x `MNT-6b`** | Mechanism 3 depends on `MNT-6b` **not** evicting the pinned tails. `_protect_prompt_blocks` already skips nothing on ref-count, and `MNT-6b` only recycles `ref_cnt == 1` blocks — a pinned block has 2, so it is passed to `to_free` instead. Verify this holds for the compressor groups, whose pages are 4 and 8 tokens. |
+
+### 3a.8 Test arm
+
+Add as arm **C**, its own restart, after B is decided:
+
+| arm | flag | note |
+|---|---|---|
+| C | `VLLM_PIN_STATIC_HEAD=1` (default 0) | Mechanism 3 on top of whatever B concluded |
+
+Its primary measurement is **not** the six-turn survival probe — it is **cross-agent**: start
+session 1, let it pin, then measure `engine_cached_tokens` on the *first* turn of session 2 with a
+different body and the same head. Expected without it: ~0. Expected with it: the head, to the
+256-token alignment. Report both alongside latency, per §4.3.
+
+### 3a.9 Source for the port
+
+The two files requested are in the repo now, captured from the image with the documented
+`docker run --rm --entrypoint cat` method (never through a bind-mount) and listed in
+`patches/pristine/MANIFEST.txt` as **reference-only, not diff bases**:
+
+- `patches/pristine/vllm/v1/core/single_type_kv_cache_manager.py` (already there — 1,421 lines; the
+  `MNT-6*` diff against it is `patches/generated/v1-core-single_type_kv_cache_manager.patch`)
+- `patches/pristine/vllm/v1/core/kv_cache_manager.py` (601 lines, new)
+
+Two more went in for Mechanisms 1 and 2, since they are unreadable without them:
+
+- `patches/pristine/vllm/v1/core/kv_cache_coordinator.py` (689 lines — `eagle_extra_cache_blocks`
+  is at line 515)
+- `patches/pristine/vllm/v1/core/kv_cache_utils.py` (2,149 lines — `FreeKVCacheBlockQueue`)
+
+Anyone drafting the overlay should work against those four plus the generated diff, and **not**
+against upstream vLLM at any tag: this fork's hybrid re-alignment, `eagle_extra_cache_blocks` and
+prompt protection do not exist upstream, and a patch written against a stock tree will not apply.
+
 ## 4. The test plan
 
 Written before the change, so the result cannot be rationalised afterwards.
@@ -162,9 +306,10 @@ Secondary, free per request: `engine_cached_tokens` (`API-14`) on every response
 | A (control) | 0 | must reproduce today's decay, or the run is void |
 | B | 1 | Mechanism 1 only |
 
-Mechanism 2 is **not** in this matrix. It gets its own restart later, only if B wins, because
-stacking them makes an ambiguous result uninterpretable — the mistake `PREFIX-CACHE.md` records
-twice already.
+Mechanisms 2 and 3 are **not** in this matrix. Each gets its own restart later (arm C is
+§3a.8), because stacking them makes an ambiguous result uninterpretable — the mistake
+`PREFIX-CACHE.md` records twice already. Mechanism 2 and Mechanism 3 in particular must never share
+a boot: §3a.7 shows 2 can silently turn 3 into a no-op.
 
 ### 4.3 Traps this run must not step into (all previously invalidated work here)
 
@@ -197,7 +342,11 @@ Per `CLAUDE.md`: this document is not that ask, and reading it is not an approva
   `Unknown vLLM environment variable detected: VLLM_SWA_RECYCLE_SKIPPED_BLOCKS` warning is vLLM's
   `envs.py` not recognising a var that is not upstream's; our patch reads it directly via
   `os.environ` and recycling is on.
-- **Neither half of #43447 supersedes `MNT-6a`, `MNT-6b` or `MNT-7`.** Mechanism 1 is the missing
-  end-of-request half of `MNT-6b`, not a replacement for it.
+- **No mechanism here supersedes `MNT-6a`, `MNT-6b` or `MNT-7`.** Mechanism 1 is the missing
+  end-of-request half of `MNT-6b`; Mechanism 3 is a narrowing of `MNT-6a`, at a different boundary
+  and with a hit-aware release. Both build on what is deployed rather than replacing it.
+- **The chat template renders tools before the system prompt, and both before the first
+  `<｜User｜>` (token `128803`)** — verified live on this build, §3a.1. That is the only tokenizer
+  assumption any of this rests on.
 - **This is unrelated to the API-side movers** (`API-8`, `API-11a/b`, `API-13`), which address a
   different failure: the prompt's *head* moving between turns.
