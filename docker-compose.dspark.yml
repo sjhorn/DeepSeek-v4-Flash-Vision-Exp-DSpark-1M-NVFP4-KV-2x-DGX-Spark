@@ -58,12 +58,58 @@ services:
       # DSpark source patches are baked into the image from recipe/overlay/
       # (see README "vLLM version note"); do not bind-mount a proposer copy
       # here — a copy from one vLLM version crashes another.
+      # Inline system message + server-side tool fixes for Claude Code (vllm-project/vllm#44283)
+      - ./patches/anthropic_protocol_inline_system.py:/opt/env/lib/python3.12/site-packages/vllm/entrypoints/anthropic/protocol.py:ro
+      - ./patches/anthropic_serving_inline_system.py:/opt/env/lib/python3.12/site-packages/vllm/entrypoints/anthropic/serving.py:ro
+      # Patch 6 (upstream PR #54, unmerged): caps DSv4 prompt-block protection and
+      # recycles sliding-window pages in-request instead of churning the shared LRU.
+      # Fixes long-context turns re-prefilling cold (0% hit, 235s) instead of hitting
+      # cache (100%, 1.2s). See patches/patch6-single_type_kv_cache_manager.py and
+      # STATUS.md "Known issues: KV pool exhaustion under long-context sessions".
+      - ./patches/patch6-single_type_kv_cache_manager.py:/opt/env/lib/python3.12/site-packages/vllm/v1/core/single_type_kv_cache_manager.py:ro
+      # Patch 7 (ported from co-l/ds4-prefix-cache-fixes 03-dedupe.py): commit-time
+      # same-content dedupe in block_pool.cache_full_blocks. Our insert() merges a
+      # duplicate (hash, group) into a dict while lookups return only one, so the
+      # stale copy holds an LRU slot forever. Remove this line to roll back.
+      - ./patches/patch7-block_pool-dedupe.py:/opt/env/lib/python3.12/site-packages/vllm/v1/core/block_pool.py:ro
+      # Patch 5 (upstream patches/0005-suppress-stops-in-reasoning.patch): keeps
+      # client stop strings dormant inside the reasoning segment, so a CoT that
+      # restates a stop phrase cannot decapitate generation before </think> and
+      # leave content: null.  Verified 2026-09-16 to apply cleanly to our tree
+      # (0.21.1rc1.dev339, 4 hunks / 0 rejects) and staged as a mountable file.
+      # INERT under thinking:false -- arming needs <think> in the prompt or as
+      # the first output token, and our leak shape has no opening tag.  It is a
+      # PREREQUISITE for the thinking:true experiment, not a fix on its own.
+      # Opt out with VLLM_SUPPRESS_STOPS_IN_REASONING=0 (process-wide).
+      - ./patches/patch5-detokenizer.py:/opt/env/lib/python3.12/site-packages/vllm/v1/engine/detokenizer.py:ro
+      # KV disk-offload tier (probe). Inert unless KV_TRANSFER_CONFIG is set in .env.dspark.
+      - ${KVOFFLOAD_DIR:-/home/shorn/kvoffload}:/kvoffload
 
     environment:
       HF_HOME: /cache/huggingface
+      # Server-side tool execution (web_search via SERPER API)
+      SERPER_API_KEY: "${SERPER_API_KEY:-}"
       HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-0}"
       TRANSFORMERS_OFFLINE: "${TRANSFORMERS_OFFLINE:-0}"
       HF_HUB_DISABLE_XET: "${HF_HUB_DISABLE_XET:-1}"
+
+      # Kill switches for the bind-mounted Anthropic patches. Every one of
+      # these is documented in CLAUDE.md as an opt-out, but none of them were
+      # passed into the container, so setting one in .env.dspark did nothing
+      # (found 2026-09-19 while adding PREFIX_WATCH). Defaults here match each
+      # patch's own default, so this block changes no behaviour on its own.
+      STRIP_LEAKED_COT: "${STRIP_LEAKED_COT:-1}"        # Patch 8
+      MODEL_ALIAS_THINKING: "${MODEL_ALIAS_THINKING:-1}"  # Patch 9
+      CLASSIFIER_NOTHINK: "${CLASSIFIER_NOTHINK:-1}"      # Patch 9
+      TOOL_ARGS_STRICT: "${TOOL_ARGS_STRICT:-0}"          # Patch 10
+      # Patch 12 prefix-cache tripwire: one INFO line per request carrying
+      # four short hashes and a length. Consumed by local-ops/prefix-watch.py.
+      PREFIX_WATCH: "${PREFIX_WATCH:-1}"
+      # Patch 13 sticky tool set: keep the served tool array monotonic per
+      # conversation so a flapping client tool (swift-lsp) cannot shrink it and
+      # break the append chain. STICKY_TOOLS=0 disables; TTL in seconds.
+      STICKY_TOOLS: "${STICKY_TOOLS:-1}"
+      STICKY_TOOLS_TTL: "${STICKY_TOOLS_TTL:-3600}"
       # All seven JIT/workspace caches point at the node-local /vllm-cache
       # volume above, NOT at the HF cache tree. See the volume comment and
       # issue #27 — the set matters, they were found one crash at a time.
@@ -164,6 +210,18 @@ services:
       # reasoning_effort reachable from configuration instead of per request.
       DEFAULT_CHAT_TEMPLATE_KWARGS: "${DEFAULT_CHAT_TEMPLATE_KWARGS:-}"
 
+      # Vision-Exp: set HF_OVERRIDES in .env to select multimodal arch alias.
+      # Empty by default (text-only); vision env sets it to the V4V class.
+      HF_OVERRIDES: "${HF_OVERRIDES:-}"
+      # Optional raw --compilation-config JSON (cudagraph sizes etc). Empty = vLLM derives.
+      COMPILATION_CONFIG: "${COMPILATION_CONFIG:-}"
+      # Optional raw --kv-transfer-config JSON (KV disk-offload probe). Empty = off.
+      KV_TRANSFER_CONFIG: "${KV_TRANSFER_CONFIG:-}"
+
+      # Patch 6 knobs (see volumes: above). Defaults match upstream PR #54.
+      VLLM_PROTECTED_PROMPT_BLOCKS_FRACTION: "${PROTECTED_FRACTION:-0.30}"
+      VLLM_SWA_RECYCLE_SKIPPED_BLOCKS: "${SWA_RECYCLE:-1}"
+
     command:
       - bash
       - -lc
@@ -179,6 +237,7 @@ services:
         echo "serving with chat-template-kwargs=$${CHAT_TEMPLATE_KWARGS}";
         exec /opt/env/bin/vllm serve ${DSPARK_MODEL:-deepseek-ai/DeepSeek-V4-Flash-DSpark}
         --served-model-name ${SERVED_MODEL_NAME:-deepseek-v4-flash-dspark}
+        ${SERVED_MODEL_ALIASES:-deepseek-v4-flash-dspark-nothink deepseek-v4-flash-dspark-think-low deepseek-v4-flash-dspark-think-high deepseek-v4-flash-dspark-think-max claude-haiku-4-5 claude-haiku-4-5-20251001 claude-sonnet-5 claude-sonnet-4-6 claude-opus-5 claude-opus-4-6 claude-fable-5}
         --host ${VLLM_HOST:-127.0.0.1}
         --port ${VLLM_PORT:-8888}
         --trust-remote-code
@@ -207,4 +266,7 @@ services:
         --node-rank ${NODE_RANK}
         --master-addr ${MASTER_ADDR}
         --master-port ${MASTER_PORT:-25000}
+        $${HF_OVERRIDES:+--hf-overrides "$$HF_OVERRIDES"}
+        $${COMPILATION_CONFIG:+--compilation-config "$$COMPILATION_CONFIG"}
+        $${KV_TRANSFER_CONFIG:+--kv-transfer-config "$$KV_TRANSFER_CONFIG"}
         ${HEADLESS:+--headless}

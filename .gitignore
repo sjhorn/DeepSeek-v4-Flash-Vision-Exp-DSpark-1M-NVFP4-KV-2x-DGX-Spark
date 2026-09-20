@@ -1,4 +1,8 @@
+# Env files carry SERPER_API_KEY. Ignore every .env.dspark variant
+# (.text-0731, .vision-exp, ...) but keep the committed example.
 .env.dspark
+.env.dspark.*
+!.env.dspark.example
 .env
 .secrets/
 *.pem
@@ -9,3 +13,4 @@ __pycache__/
 *.log
 vllm-cache/
 /models/
+/local-ops/

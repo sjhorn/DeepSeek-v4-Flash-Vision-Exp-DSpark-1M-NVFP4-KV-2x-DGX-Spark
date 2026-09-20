@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env.dspark}"
 COMPOSE_FILE="${COMPOSE_FILE:-$SCRIPT_DIR/docker-compose.dspark.yml}"
+VISION_COMPOSE_FILE="${VISION_COMPOSE_FILE:-$SCRIPT_DIR/docker-compose.vision-exp.yml}"
+VISION_STAGE_DIR="${VISION_STAGE_DIR:-$HOME/vision-stage}"
 WAIT_ATTEMPTS="${WAIT_ATTEMPTS:-100}"
 WAIT_SECONDS="${WAIT_SECONDS:-15}"
 
@@ -30,6 +32,55 @@ CHAT_URL="${CHAT_URL:-http://127.0.0.1:${VLLM_PORT:-8888}/v1/chat/completions}"
 : "${NCCL_SOCKET_IFNAME:?NCCL_SOCKET_IFNAME must be set in $ENV_FILE}"
 : "${VLLM_HOST_IP:?VLLM_HOST_IP must be set to the head node fabric IP in $ENV_FILE}"
 : "${WORKER_VLLM_HOST_IP:?WORKER_VLLM_HOST_IP must be set to the worker node fabric IP in $ENV_FILE}"
+
+# Worker paths are needed by the vision preflight below, not just at sync time.
+WORKER_DIR="${WORKER_SCRIPT_DIR:-${WORKER_DIR:-$SCRIPT_DIR}}"
+WORKER_HF_CACHE="${WORKER_HF_CACHE:-${HF_CACHE:-}}"
+
+# Vision-Exp needs a compose overlay (bind-mounts the four ported files) on TOP of the
+# base compose. Selecting it by hand is the failure this block removes: switch-model.sh
+# swaps in the vision .env, and a plain start would then boot with HF_OVERRIDES naming a
+# multimodal class the unpatched registry does not have.
+# Auto-detected from the active env; force with COMPOSE_VISION=1 / disable with 0.
+if [ -z "${COMPOSE_VISION:-}" ]; then
+  case "${DSPARK_MODEL:-}${HF_OVERRIDES:-}" in
+    *Vision-Exp*|*DeepseekV4V*) COMPOSE_VISION=1 ;;
+    *)                          COMPOSE_VISION=0 ;;
+  esac
+fi
+
+COMPOSE_ARGS=(-f "$COMPOSE_FILE")
+REMOTE_COMPOSE_FILES="-f docker-compose.dspark.yml"
+VISION_STAGE_FILES="ds4v_model.py ds4v_vision.py ds4v_mm.py ds4v_registry.py"
+
+if [ "$COMPOSE_VISION" = "1" ]; then
+  [ -f "$VISION_COMPOSE_FILE" ] || {
+    echo "COMPOSE_VISION=1 but $VISION_COMPOSE_FILE is missing." >&2; exit 1; }
+  COMPOSE_ARGS+=(-f "$VISION_COMPOSE_FILE")
+  REMOTE_COMPOSE_FILES="$REMOTE_COMPOSE_FILES -f docker-compose.vision-exp.yml"
+  echo "Vision-Exp mode: overlaying $(basename "$VISION_COMPOSE_FILE")"
+
+  # The overlay bind-mounts four files from $VISION_STAGE_DIR on EACH node. A file that
+  # exists only on the head yields a half-patched cluster that fails deep in model load,
+  # so check both sides up front and say exactly how to fix it.
+  stage_missing=""
+  for f in $VISION_STAGE_FILES; do
+    [ -f "$VISION_STAGE_DIR/$f" ] || stage_missing="$stage_missing $f"
+  done
+  [ -z "$stage_missing" ] || {
+    echo "Missing in $VISION_STAGE_DIR on this node:$stage_missing" >&2
+    echo "Regenerate with: ./vision-exp/build-ds4v-files.sh \"$DSPARK_VLLM_IMAGE\" \"$VISION_STAGE_DIR\"" >&2
+    exit 1; }
+
+  worker_missing="$(ssh "$WORKER_HOST" "for f in $VISION_STAGE_FILES; do \
+    [ -f '$VISION_STAGE_DIR'/\$f ] || printf ' %s' \$f; done" || true)"
+  [ -z "$worker_missing" ] || {
+    echo "Missing in $VISION_STAGE_DIR on worker ${WORKER_HOST}:$worker_missing" >&2
+    echo "Regenerate THERE (files are derived from that node's image):" >&2
+    echo "  ssh $WORKER_HOST 'cd $WORKER_DIR && ./vision-exp/build-ds4v-files.sh \"$DSPARK_VLLM_IMAGE\" \"$VISION_STAGE_DIR\"'" >&2
+    exit 1; }
+  echo "Vision stage files present on both nodes."
+fi
 
 cd "$SCRIPT_DIR"
 
@@ -62,8 +113,6 @@ if [ "${SKIP_OVERLAY_CHECK:-0}" != "1" ]; then
   fi
 fi
 
-WORKER_DIR="${WORKER_SCRIPT_DIR:-${WORKER_DIR:-$SCRIPT_DIR}}"
-WORKER_HF_CACHE="${WORKER_HF_CACHE:-${HF_CACHE:-}}"
 REMOTE_WORKER_DIR="$(printf '%q' "$WORKER_DIR")"
 REMOTE_COMPOSE="cd $REMOTE_WORKER_DIR && env -u MASTER_ADDR -u MASTER_PORT -u NODE_RANK -u HEADLESS COMPOSE_DISABLE_ENV_FILE=1"
 
@@ -72,18 +121,60 @@ ssh "$WORKER_HOST" "mkdir -p $REMOTE_WORKER_DIR"
 scp "$COMPOSE_FILE" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/docker-compose.dspark.yml"
 scp "$ENV_FILE" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/.env.dspark"
 
+# The compose file bind-mounts these from the repo dir on EVERY node, but only the two
+# files above were ever synced -- so a patch edited on the head silently ran unpatched
+# on the worker.
+if compgen -G "$SCRIPT_DIR/patches/anthropic_*.py" >/dev/null; then
+  ssh "$WORKER_HOST" "mkdir -p $REMOTE_WORKER_DIR/patches"
+  # sync ALL bind-mounted patches (anthropic_*, patch6 kv-cache-manager, patch7 dedupe, ...)
+  scp "$SCRIPT_DIR"/patches/*.py "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/"
+fi
+if [ "$COMPOSE_VISION" = "1" ]; then
+  scp "$VISION_COMPOSE_FILE" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/docker-compose.vision-exp.yml"
+fi
+
 echo "Starting DSpark worker on ${WORKER_HOST}..."
-ssh "$WORKER_HOST" "$REMOTE_COMPOSE NODE_RANK=1 HEADLESS=1 HF_CACHE='$WORKER_HF_CACHE' VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' docker compose --env-file .env.dspark -f docker-compose.dspark.yml up -d"
+ssh "$WORKER_HOST" "$REMOTE_COMPOSE NODE_RANK=1 HEADLESS=1 HF_CACHE='$WORKER_HF_CACHE' VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' docker compose --env-file .env.dspark $REMOTE_COMPOSE_FILES up -d"
 
 echo "Starting DSpark head..."
-COMPOSE_DISABLE_ENV_FILE=1 NODE_RANK=0 HEADLESS= docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d
+COMPOSE_DISABLE_ENV_FILE=1 NODE_RANK=0 HEADLESS= docker compose --env-file "$ENV_FILE" "${COMPOSE_ARGS[@]}" up -d
+
+# --- Startup page-cache reclaim (local extension, not upstream) -------------
+# On DGX Spark the CPU, GPU, model weights and KV cache share one memory pool.
+# Reading the safetensors shards during model load fills the page cache, and
+# vLLM profiles free memory *after* that load to size the KV pool. Dropping the
+# cache repeatedly across the load window reduces memory pressure at startup and
+# shortens boot. Bounded on purpose: it stops the moment the API answers, and
+# never runs while the engine is serving (during serving only ~1.5 GiB is
+# reclaimable and the repeated full-cache walks are pure overhead).
+# Set DROP_CACHES_ON_START=0 to disable. Requires passwordless sudo for
+# `sysctl -w vm.drop_caches=3` on both nodes; skipped with a warning if absent.
+DROP_CACHES_ON_START="${DROP_CACHES_ON_START:-1}"
+DROP_PID=""
+if [ "$DROP_CACHES_ON_START" = "1" ]; then
+  if sudo -n sysctl -qw vm.drop_caches=3 2>/dev/null; then
+    echo "Startup cache reclaim: active on both nodes (stops when API is ready)."
+    (
+      while ! curl -fsS --max-time 2 "$API_URL" >/dev/null 2>&1; do
+        sync; sudo -n sysctl -qw vm.drop_caches=3 2>/dev/null || true
+        ssh "$WORKER_HOST" "sync; sudo -n sysctl -qw vm.drop_caches=3" >/dev/null 2>&1 || true
+        sleep 2
+      done
+    ) &
+    DROP_PID=$!
+    trap '[ -n "$DROP_PID" ] && kill "$DROP_PID" 2>/dev/null || true' EXIT
+  else
+    echo "Startup cache reclaim: SKIPPED (no passwordless sudo for vm.drop_caches)." >&2
+  fi
+fi
 
 echo "Waiting for DSpark vLLM API..."
 for _ in $(seq 1 "$WAIT_ATTEMPTS"); do
   if curl -fsS --max-time 5 "$API_URL" >/dev/null; then
+    [ -n "$DROP_PID" ] && kill "$DROP_PID" 2>/dev/null || true
     echo "DeepSeek V4 Flash DSpark is running: $API_URL"
-    COMPOSE_DISABLE_ENV_FILE=1 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps
-    ssh "$WORKER_HOST" "$REMOTE_COMPOSE docker compose --env-file .env.dspark -f docker-compose.dspark.yml ps"
+    COMPOSE_DISABLE_ENV_FILE=1 docker compose --env-file "$ENV_FILE" "${COMPOSE_ARGS[@]}" ps
+    ssh "$WORKER_HOST" "$REMOTE_COMPOSE docker compose --env-file .env.dspark $REMOTE_COMPOSE_FILES ps"
     echo "Running minimal OpenAI-compatible chat request..."
     curl -fsS --max-time 60 "$CHAT_URL" \
       -H "Content-Type: application/json" \
@@ -95,7 +186,7 @@ for _ in $(seq 1 "$WAIT_ATTEMPTS"); do
 done
 
 echo "Timed out waiting for DSpark API. Recent head logs:" >&2
-COMPOSE_DISABLE_ENV_FILE=1 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" logs --tail=120 vllm-dspark >&2 || true
+COMPOSE_DISABLE_ENV_FILE=1 docker compose --env-file "$ENV_FILE" "${COMPOSE_ARGS[@]}" logs --tail=120 vllm-dspark >&2 || true
 echo "Recent worker logs:" >&2
-ssh "$WORKER_HOST" "$REMOTE_COMPOSE docker compose --env-file .env.dspark -f docker-compose.dspark.yml logs --tail=120 vllm-dspark" >&2 || true
+ssh "$WORKER_HOST" "$REMOTE_COMPOSE docker compose --env-file .env.dspark $REMOTE_COMPOSE_FILES logs --tail=120 vllm-dspark" >&2 || true
 exit 1
