@@ -173,8 +173,19 @@ fi
 # ONE EXIT trap for both cleanups: bash keeps only the last `trap ... EXIT`, so
 # the page-cache reclaim's kill had to move in here rather than install its own.
 cleanup_on_exit() {
-  [ -n "${DROP_PID:-}" ] && kill "$DROP_PID" 2>/dev/null
-  rm -f "$BOOT_SENTINEL" 2>/dev/null
+  # EVERY command here must be failure-proof. This runs under `set -e`, and a
+  # bare `[ -n "$X" ] && cmd` aborts the whole function when the test is false
+  # OR the command fails -- so the `rm` below never ran.
+  #
+  # Measured 2026-09-20, the boot that proved it: the reclaim subshell is
+  # already dead by this point (the wait loop kills it on success), so `kill`
+  # returned non-zero, the function exited early, and the sentinel SURVIVED the
+  # boot -- leaving the watchdog held off until SENTINEL_MAX_AGE expired.
+  # Bounded, but wrong. Use `if`, and `|| true` on anything that can fail.
+  if [ -n "${DROP_PID:-}" ]; then
+    kill "$DROP_PID" 2>/dev/null || true
+  fi
+  rm -f "$BOOT_SENTINEL" 2>/dev/null || true
   return 0
 }
 trap cleanup_on_exit EXIT
