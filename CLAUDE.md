@@ -19,7 +19,7 @@ same facts were restated in two places and drifted apart.
 | find out why a session re-prefilled, or measure the cache | `docs/local/PREFIX-CACHE.md` |
 | choose a thinking tier or effort level | `docs/local/THINKING-AND-EFFORT.md` |
 | pull from upstream, or judge an upstream change | `docs/local/UPSTREAM.md` |
-| find a tool in the untracked `local-ops/` tree | `docs/local/TOOLING.md` |
+| find a tool in `local-ops/` | `docs/local/TOOLING.md` |
 | know the current config, KV pool, node versions | `docs/local/status/CONFIG.md` |
 | compare this boot to the last | `docs/local/status/BOOT-METRICS.md` |
 | recognise a failure we have already had | `docs/local/status/INCIDENTS.md` |
@@ -42,7 +42,11 @@ bash scripts/regen-local-patches.sh          # patches/pristine/ + patches/*.py 
 bash scripts/regen-local-patches.sh --check  # non-zero if any diff is stale
 ```
 
-`local-ops/` stays **entirely untracked** by policy; `docs/local/TOOLING.md` is its tracked index.
+**`local-ops/` tracks its scripts, never its output.** `.gitignore` denies everything under it and
+then allows `*.py`, `*.sh`, `*.md` and `requirements.txt` back. Deny-by-default is deliberate: a new
+capture or log format is ignored automatically, while a new script has to be added on purpose.
+**Prompt captures contain full conversations — if you add a format, check it is ignored before you
+commit.** See `docs/local/TOOLING.md`.
 
 ## Working agreement — update these docs as part of the work, not after it
 

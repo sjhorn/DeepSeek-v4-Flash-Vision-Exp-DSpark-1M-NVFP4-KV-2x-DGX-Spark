@@ -1,0 +1,3 @@
+# Allow the DSpark start script to reclaim page cache during model load.
+# Scoped to exactly one command; no other privileges granted.
+shorn ALL=(root) NOPASSWD: /usr/sbin/sysctl -qw vm.drop_caches=3, /usr/sbin/sysctl -w vm.drop_caches=3

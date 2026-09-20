@@ -16,7 +16,7 @@ unedited.
 | find out why a session re-prefilled, or measure the cache | [`PREFIX-CACHE.md`](PREFIX-CACHE.md) |
 | choose a thinking tier or an effort level | [`THINKING-AND-EFFORT.md`](THINKING-AND-EFFORT.md) |
 | pull from upstream, or judge an upstream change | [`UPSTREAM.md`](UPSTREAM.md) |
-| find a tool in the untracked `local-ops/` tree | [`TOOLING.md`](TOOLING.md) |
+| find a tool in `local-ops/` | [`TOOLING.md`](TOOLING.md) |
 | know the current config, KV pool, or node versions | [`status/CONFIG.md`](status/CONFIG.md) |
 | compare this boot to the last one | [`status/BOOT-METRICS.md`](status/BOOT-METRICS.md) |
 | recognise a failure we have already had | [`status/INCIDENTS.md`](status/INCIDENTS.md) |
@@ -55,7 +55,7 @@ Since 2026-09-20 it is a real branch:
 `branch.local/main.pushRemote` is set to `no-push`: `origin` is upstream's GitHub repo and
 `git remote -v` shows the **same URL for push**. This branch must never be pushed there.
 
-`local-ops/` stays entirely untracked by policy — see [`TOOLING.md`](TOOLING.md).
+`local-ops/` tracks its **scripts** and ignores everything they produce — see [`TOOLING.md`](TOOLING.md).
 
 ## Open proposals
 

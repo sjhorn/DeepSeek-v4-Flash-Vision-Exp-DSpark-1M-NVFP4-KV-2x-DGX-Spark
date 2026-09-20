@@ -1,14 +1,24 @@
-# TOOLING.md — the untracked `local-ops/` tree
+# TOOLING.md — the `local-ops/` tree
 
-**`local-ops/` is deliberately untracked and stays that way.** `.gitignore` carries `/local-ops/`.
-It holds captures of real prompts, API keys in some configs, benchmark outputs, and a rollback
-snapshot of image files — none of which belong in a repo whose `origin` is a public upstream.
+**The scripts are tracked; everything they produce is not.** Changed 2026-09-20 — it used to be
+blanket-ignored, which is how the only copy of `verify-server.py` came to live on one laptop.
 
-It lives *inside* the repo rather than in `/tmp` so it survives reboots and `/tmp` wipes. This
-file is the tracked index of it, so the tooling is discoverable even though the code is not
-committed. `local-ops/README.md` has the per-script detail.
+`.gitignore` **denies everything** under `local-ops/` and then allows back exactly `*.py`, `*.sh`,
+`*.md` and `requirements.txt`. The direction matters: deny-by-default means a new capture or log
+format is ignored automatically, where an allow-by-default list fails open the first time something
+writes a format nobody thought to list.
 
-> **Captures contain full prompts. Treat them as sensitive and delete them after use.**
+| | |
+|---|---|
+| tracked | 60 files, 444 KB of tooling and write-ups |
+| ignored | the 54 MB of `toolsearch-matrix/` captures, every `*.log` / `*.jsonl` / `*.json` / `*.tsv` / `*.tgz`, and three directories of **data that happens to be `.py`/`.md`** — `baseline-20260914/` and `xsess/image-src/` (copies of vLLM source, superseded by the tracked `patches/pristine/`) and `rollback/` (head-only copies of our own scripts) |
+
+> **Captures contain full prompts and are sensitive. If you add a new output format, confirm
+> `git check-ignore` catches it BEFORE you commit** — the allowlist protects you only for formats
+> it does not name, and `origin` is a public upstream even though this branch is never pushed.
+
+`local-ops/` lives *inside* the repo rather than in `/tmp` so it survives reboots and `/tmp` wipes.
+`local-ops/README.md` has the per-script detail.
 
 ## Prefix-cache instruments
 
@@ -46,7 +56,14 @@ committed. `local-ops/README.md` has the per-script detail.
 | `local-ops/oomguard.sh`, `kvpressure.py`, `sweep.sh`, `loadtest.sh` | Pressure and sweep harnesses; results written alongside them. |
 | `local-ops/hmmt-effort-20260916/` | The HMMT effort benchmark harness, problem set and per-problem JSON. |
 
-## The rule
+## scripts/ vs local-ops/
 
-Tracked tooling goes in `scripts/`. Anything that captures traffic, holds a key, or produces bulk
-results goes in `local-ops/` and gets a row here instead.
+Both are tracked now, so the split is about **audience**, not visibility:
+
+| | |
+|---|---|
+| `scripts/` | things you run as part of operating the cluster, and that a fail-closed check depends on — `check-patch4.sh`, `check-local-patches.sh`, `regen-local-patches.sh` |
+| `local-ops/` | investigation and measurement tooling: probes, harnesses, replays, benchmark drivers. Run when answering a question, not on every deploy |
+
+Anything that **captures traffic or produces bulk results** writes into `local-ops/` and stays out
+of git by the allowlist above — regardless of which directory the script itself lives in.

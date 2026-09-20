@@ -138,7 +138,7 @@ Everything below is ours, not upstream's. Upstream has never touched
 | `scripts/check-local-patches.sh` | yes | fail-closed check that every patch is in the file the container imports, on every node |
 | `.env.dspark`, `.env.dspark.text-0731`, `.env.dspark.vision-exp` | **NO — head-only on purpose** | they carry `SERPER_API_KEY`. `.gitignore` covers `.env.dspark.*` while keeping `.env.dspark.example`. Never paste the key into a tracked file, a commit message, or any doc |
 | `~/vision-stage/` | no, and **deliberately not synced** | derived from the image each node runs, so it is regenerated per node. The start script preflights it on both sides |
-| `local-ops/` | **NO — untracked by policy** | index: [`TOOLING.md`](TOOLING.md) |
+| `local-ops/` | **scripts yes, output never** | index: [`TOOLING.md`](TOOLING.md) |
 
 ## Custom scripts
 

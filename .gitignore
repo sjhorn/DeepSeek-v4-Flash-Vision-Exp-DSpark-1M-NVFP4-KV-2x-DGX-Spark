@@ -13,4 +13,33 @@ __pycache__/
 *.log
 vllm-cache/
 /models/
-/local-ops/
+# --- local-ops/ : track the TOOLING, never what it captures -----------------
+# The scripts here are part of how this cluster is operated and debugged, so
+# they belong in the repo — keeping them out is what left the only copy of
+# verify-server.py on one laptop.
+#
+# What they PRODUCE stays out: prompt captures contain full conversations and
+# are sensitive, and the result sets are large (54 MB of toolsearch-matrix
+# captures alone, against 444 KB of actual tooling).
+#
+# DENY BY DEFAULT, then allow, and deliberately so: a new capture or log format
+# is ignored automatically, while a new script has to be added on purpose. The
+# reverse (ignore *.log, *.jsonl, ...) fails open the first time something
+# writes a format nobody listed.
+/local-ops/**
+!/local-ops/**/
+!/local-ops/**/*.py
+!/local-ops/**/*.sh
+!/local-ops/**/*.md
+!/local-ops/**/requirements.txt
+!/local-ops/dspark-dropcaches
+
+# ...except these, which are DATA that happens to be .py/.md:
+#   baseline-20260914/  unpatched vLLM source + a rollback snapshot. patches/
+#                       pristine/ is the tracked source of truth for that now,
+#                       and two files here are byte-identical to it.
+#   xsess/image-src/    more copies of vLLM source, pulled during an investigation.
+#   rollback/           head-only copies of our own scripts, by definition stale.
+/local-ops/baseline-20260914/
+/local-ops/xsess/image-src/
+/local-ops/rollback/
