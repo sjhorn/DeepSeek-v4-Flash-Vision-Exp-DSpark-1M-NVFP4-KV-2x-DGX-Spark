@@ -557,6 +557,23 @@ turns of a growing conversation destroys the prefix completely.
 So it is not volume — of prefill *or* of decode. It is decode **on a conversation that keeps
 extending**.
 
+### 8.1b A turn-count sweep that does NOT work — recorded so nobody repeats it
+
+Sweeping n = 1..7 turns at 50 decode tokens, each point starting from a confirmed-warm head, gives
+**ALIVE, ALIVE, ALIVE, DEAD, ALIVE, DEAD, ALIVE**. Non-monotonic, so it is not a threshold
+measurement.
+
+**The confound:** the replayed turn 0 *contains the head*, so every batch **re-creates** the very
+thing being measured, part-way through the dose. "n turns" is therefore not a clean dose of
+anything — what the final probe sees is whatever turns 1..n did to a head that turn 0 had just
+rewritten. Co-tenant traffic (this box regularly has one) can flip individual points too; the sweep
+did not record contention per point, which it should have.
+
+**Why §8.1 is not affected:** those runs compare `max_tokens=1` against `max_tokens=400` over the
+**same seven bodies in the same order** — identical re-creation pattern, decode the only variable.
+That comparison is sound; the dose-response curve is not established, and no turn threshold should
+be quoted from it.
+
 ### 8.2 What is now ruled out, with controls
 
 - **The client.** Plain `urllib` against `/v1/messages`, no Claude Code, no SSE, no aborts, no
