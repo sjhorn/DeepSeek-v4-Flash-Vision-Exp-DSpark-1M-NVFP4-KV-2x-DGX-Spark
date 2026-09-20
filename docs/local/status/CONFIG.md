@@ -26,14 +26,23 @@ Passwordless SSH is configured from head to worker via the RoCE IP (`192.168.0.1
 
 ## What is deployed
 
-- **Model:** `deepseek-ai/DeepSeek-V4-Flash-0731` (official 0731 release)
+- **Model: `deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`** (multimodal), with
+  `HF_OVERRIDES={"architectures":["DeepseekV4VForConditionalGeneration"]}`.
+  **CORRECTED 2026-09-20 — this said `DeepSeek-V4-Flash-0731`.** Verified against the running
+  engine's `non-default args`. Switch with `./switch-model.sh text|vision`
+  ([`../CLUSTER.md`](../CLUSTER.md))
+- **KV pool this boot: 2,510,051 tokens**, max concurrency 2.39x at 1,048,576
+  ([`BOOT-METRICS.md`](BOOT-METRICS.md)). Varies ~11% per boot — read the current boot's own figure
 - **Image:** `vllm-dspark-runtime:dspark-nvfp4-stage-c` (built on both nodes)
 - **`IMG-4`** (shared expert gate_up_proj fix for 0731) is baked into the image via `recipe/overlay/`
 - **Bind-mounted patches:** `API-0` (protocol) and `API-8`…`API-13` (serving, six patches in one
   file), plus `MNT-5` (inert), `MNT-6a`, `MNT-6b`, `MNT-7`. Full table with kill switches:
   [`../PATCH-REGISTRY.md`](../PATCH-REGISTRY.md). Verify with `scripts/check-local-patches.sh`
-- **Served model names (5, one engine):** `deepseek-v4-flash-dspark` plus `-nothink`,
-  `-think-low`, `-think-high`, `-think-max` — see "Patch 9" below
+- **Served model names: 12 on one engine** — **CORRECTED 2026-09-20, this said 5.**
+  `deepseek-v4-flash-dspark`, plus `-nothink` / `-think-low` / `-think-high` / `-think-max`, plus
+  the seven vendor `claude-*` ids. Read the live list from `SERVED_MODEL_ALIASES` in the compose or
+  from `curl /v1/models` (verified 12 on 2026-09-20). What each tier maps to:
+  [`../THINKING-AND-EFFORT.md`](../THINKING-AND-EFFORT.md)
 - **Config:** `.env.dspark` on the head at `/home/shorn/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark/.env.dspark`
 - **Repo path (both nodes):** `/home/shorn/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark`
 - **HF cache (both nodes):** `/home/shorn/.cache/huggingface`

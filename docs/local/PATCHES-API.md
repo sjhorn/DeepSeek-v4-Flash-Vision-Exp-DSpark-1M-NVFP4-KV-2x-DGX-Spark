@@ -67,6 +67,9 @@ the end marker, while 0731 runs a CoT anyway.
 
 ## API-9 — per-tier model aliases (2026-09-18)
 
+Four sub-sections follow: the client's stated intent (`API-9d`), the auto-mode permission
+classifier, the vendor-name routing revision, and the response-side model echo (`API-9b`).
+
 One engine now answers to five names (`--served-model-name` takes a list; `SERVED_MODEL_ALIASES`
 in the compose). `thinking_kwargs_for_model()` in `patches/anthropic_serving_inline_system.py`
 maps the name suffix to `chat_template_kwargs`, so each Claude Code model tier
@@ -91,50 +94,9 @@ multi-model use needs the env block in [`THINKING-AND-EFFORT.md`](THINKING-AND-E
 "Model aliases" set by hand, and
 **`CLAUDE_CODE_EXTRA_BODY` must be dropped** — its `model` key overrides every tier variable.
 
-<a id="api-11"></a>
-<a id="api-11a"></a>
-<a id="api-11b"></a>
-
-## API-11 (11a + 11b) — the prefix-cache killer: per-turn system messages (2026-09-18)
-
-**Symptom.** Turns taking 100s+ with large prefills, apparently on an unchanged prefix. KV at 52%,
-`Waiting: 0`, no preemptions — not pool pressure.
-
-**Measured first, with `local-ops/prefix-diff.py`** over 7 consecutive real captured turns: 6
-distinct system prompts out of 7, and the ONLY differing bytes were
-
-```
-<total_tokens>14979913 tokens left</total_tokens>
-<total_tokens>14979079 tokens left</total_tokens>   (one per turn, accumulating)
-```
-
-Claude Code sends a fresh `role:"system"` message **every turn** carrying a live budget counter.
-Our inline-system merge (vllm#44283) hoisted **all** of them into the single system block at
-position 0, so every turn rewrote the prompt HEAD. Divergence landed ~11,544 chars into a ~12,600
-char system prompt, so the cache matched ~3,200 tokens and the entire conversation behind it was
-re-prefilled every turn. A cold 54K prefill measured **194s** — that is the 100s+.
-
-Ruled out first, each by measurement: classifier eviction (same 40K prefix still hit **99.8%**
-after interleaved 25.8K classifier calls), KV exhaustion, the billing header (own block, already
-skipped), and `normalize_system_prompt` (deterministic).
-
-**Why relocation could not fix it.** `normalize_system_prompt` moves dynamic chunks to the end of
-the *system prompt* — but the system prompt precedes every message, so per-request content must be
-**removed**, not moved.
-
-- **11a** strips `<total_tokens>…</total_tokens>`. A client-side display value, meaningless to the
-  model.
-- **11b** hoists only the **leading run** of system messages. Later ones are per-turn reminders and
-  are folded into the following user turn, so new content lands at the END of the prompt. Emitting
-  a bare mid-conversation `role:"system"` was rejected as an option — the deepseek_v4 renderer is
-  not known to handle it — and standalone user turns would change the turn structure.
-
-**Smoke test on the real captures: 6 distinct system prompts → 1.** Strip is idempotent; boundary
-detection verified; 16 per-turn system messages folded rather than hoisted.
-
 <a id="api-9d"></a>
 
-## API-9d — honour the client's stated thinking intent
+### API-9d — honour the client's stated thinking intent
 
 > **CORRECTED 2026-09-20: this is LIVE.** The heading said "STAGED, not deployed" and the body
 > below still reads that way — it was written 2026-09-18 and never revisited. Verified in the
@@ -158,7 +120,7 @@ says `disabled`. Only `disabled` is honoured — `adaptive` means "you decide", 
 model-name ladder is for. The system-prompt marker check stays as fallback, since it is keyed on
 English text Anthropic could reword. Five unit cases pass.
 
-### API-9: the auto-mode classifier, verified end to end (2026-09-18)
+### API-9 — the auto-mode classifier, verified end to end (2026-09-18)
 
 Replayed the **real captured classifier body** (25,788 prompt tokens) against the live server:
 
@@ -191,6 +153,50 @@ Verdict stability on the benign case: 16/16 ALLOW; severities 0-22 at default te
 > **Patch 5 newly relevant**: with thinking armed, a CoT restating `</severity>` would decapitate
 > generation and return null content. Both mitigations now protect the same request — do not relax
 > one assuming the other is redundant.
+
+### API-9 rev 2 — vendor-name routing + classifier exemption (2026-09-18)
+
+Served names grew from 5 to 11: the four `deepseek-…-think-*` aliases plus `claude-haiku-4-5`,
+`claude-haiku-4-5-20251001`, `claude-sonnet-5`, `claude-sonnet-4-6`, `claude-opus-5`,
+`claude-opus-4-6`, `claude-fable-5`. Routing is now suffix rules then vendor **prefix** rules, so
+a future Claude id lands correctly with no code change.
+
+Ladder: haiku off · sonnet `low` · opus `high` · fable `max`. `max` is not a family default (it
+measured worse than high); fable is the deliberate escalation lane. `low` is untested for quality —
+watch `stop_reason` for runaways on sonnet-tier turns.
+
+**Why vendor names.** Captured the auto-mode permission classifier with `local-ops/prompt-tap.py`:
+it fires on every tool call, hardcodes `claude-sonnet-5`, and sends ~33,255 tokens (114,476-char
+system prompt, one 114,158-char static block) for a 64-token verdict. Unserved, that 404'd and
+Claude Code retried on the session model — a wasted ~120KB round trip per classification, and with
+a `-think-*` default, a reasoning pass before every permission decision. That was the reported
+"auto mode stalls".
+
+Fixes: serve `claude-sonnet-5` (no 404), and force `{"thinking": false}` when a request is
+**shaped** like the classifier (no tools + `"You are a security monitor for autonomous AI coding
+agents"` in the system prompt) — name-independent, so it survives Anthropic changing the id.
+Precedence: explicit kwargs → classifier → name rules → server default. Kill switches
+`MODEL_ALIAS_THINKING=0`, `CLASSIFIER_NOTHINK=0`.
+
+The classifier prompt itself is well constructed — static block first, volatile transcript last,
+byte-identical across calls — so vLLM's prefix cache absorbs it after the first call.
+
+<a id="api-9b"></a>
+
+### API-9b — echo the requested model alias (2026-09-18)
+
+Observed: a request naming `deepseek-v4-flash-dspark-think-max` returned
+`model: deepseek-v4-flash-dspark`, on **both** streaming and non-streaming paths, for every alias.
+Cause is upstream, not Patch 9 — vLLM resolves served aliases to `served_model_names[0]`, so the
+`ChatCompletionResponse.model` our converters copied was always the base name. Effect: the proxy
+access log and Claude Code's turn record both attribute every alias to the base model, defeating
+per-tier usage tracking.
+
+Fix: `requested_model` parameter on `messages_full_converter` and `message_stream_converter`,
+threaded through `_full_response_with_tool_blocks` and `_stream_with_tool_blocks`; six call sites
+updated. Falls back to the resolved name when not supplied, so a missed call site degrades to
+today's behaviour instead of raising. Verified by AST sweep that no call site lacks the argument
+and that every `request.model` reference sits inside `create_messages`.
 
 <a id="api-10b"></a>
 
@@ -265,49 +271,46 @@ cover valid, malformed, client-side, mixed, non-object and `None` arguments.
 the tool-call parser and the interleaved-thinking beta as alternatives. The logged `model=` field
 distinguishes them.
 
-### API-9 rev 2 — vendor-name routing + classifier exemption (2026-09-18)
+<a id="api-11"></a>
+<a id="api-11a"></a>
+<a id="api-11b"></a>
 
-Served names grew from 5 to 11: the four `deepseek-…-think-*` aliases plus `claude-haiku-4-5`,
-`claude-haiku-4-5-20251001`, `claude-sonnet-5`, `claude-sonnet-4-6`, `claude-opus-5`,
-`claude-opus-4-6`, `claude-fable-5`. Routing is now suffix rules then vendor **prefix** rules, so
-a future Claude id lands correctly with no code change.
+## API-11 (11a + 11b) — the prefix-cache killer: per-turn system messages (2026-09-18)
 
-Ladder: haiku off · sonnet `low` · opus `high` · fable `max`. `max` is not a family default (it
-measured worse than high); fable is the deliberate escalation lane. `low` is untested for quality —
-watch `stop_reason` for runaways on sonnet-tier turns.
+**Symptom.** Turns taking 100s+ with large prefills, apparently on an unchanged prefix. KV at 52%,
+`Waiting: 0`, no preemptions — not pool pressure.
 
-**Why vendor names.** Captured the auto-mode permission classifier with `local-ops/prompt-tap.py`:
-it fires on every tool call, hardcodes `claude-sonnet-5`, and sends ~33,255 tokens (114,476-char
-system prompt, one 114,158-char static block) for a 64-token verdict. Unserved, that 404'd and
-Claude Code retried on the session model — a wasted ~120KB round trip per classification, and with
-a `-think-*` default, a reasoning pass before every permission decision. That was the reported
-"auto mode stalls".
+**Measured first, with `local-ops/prefix-diff.py`** over 7 consecutive real captured turns: 6
+distinct system prompts out of 7, and the ONLY differing bytes were
 
-Fixes: serve `claude-sonnet-5` (no 404), and force `{"thinking": false}` when a request is
-**shaped** like the classifier (no tools + `"You are a security monitor for autonomous AI coding
-agents"` in the system prompt) — name-independent, so it survives Anthropic changing the id.
-Precedence: explicit kwargs → classifier → name rules → server default. Kill switches
-`MODEL_ALIAS_THINKING=0`, `CLASSIFIER_NOTHINK=0`.
+```
+<total_tokens>14979913 tokens left</total_tokens>
+<total_tokens>14979079 tokens left</total_tokens>   (one per turn, accumulating)
+```
 
-The classifier prompt itself is well constructed — static block first, volatile transcript last,
-byte-identical across calls — so vLLM's prefix cache absorbs it after the first call.
+Claude Code sends a fresh `role:"system"` message **every turn** carrying a live budget counter.
+Our inline-system merge (vllm#44283) hoisted **all** of them into the single system block at
+position 0, so every turn rewrote the prompt HEAD. Divergence landed ~11,544 chars into a ~12,600
+char system prompt, so the cache matched ~3,200 tokens and the entire conversation behind it was
+re-prefilled every turn. A cold 54K prefill measured **194s** — that is the 100s+.
 
-<a id="api-9b"></a>
+Ruled out first, each by measurement: classifier eviction (same 40K prefix still hit **99.8%**
+after interleaved 25.8K classifier calls), KV exhaustion, the billing header (own block, already
+skipped), and `normalize_system_prompt` (deterministic).
 
-### API-9b — echo the requested model alias (2026-09-18)
+**Why relocation could not fix it.** `normalize_system_prompt` moves dynamic chunks to the end of
+the *system prompt* — but the system prompt precedes every message, so per-request content must be
+**removed**, not moved.
 
-Observed: a request naming `deepseek-v4-flash-dspark-think-max` returned
-`model: deepseek-v4-flash-dspark`, on **both** streaming and non-streaming paths, for every alias.
-Cause is upstream, not Patch 9 — vLLM resolves served aliases to `served_model_names[0]`, so the
-`ChatCompletionResponse.model` our converters copied was always the base name. Effect: the proxy
-access log and Claude Code's turn record both attribute every alias to the base model, defeating
-per-tier usage tracking.
+- **11a** strips `<total_tokens>…</total_tokens>`. A client-side display value, meaningless to the
+  model.
+- **11b** hoists only the **leading run** of system messages. Later ones are per-turn reminders and
+  are folded into the following user turn, so new content lands at the END of the prompt. Emitting
+  a bare mid-conversation `role:"system"` was rejected as an option — the deepseek_v4 renderer is
+  not known to handle it — and standalone user turns would change the turn structure.
 
-Fix: `requested_model` parameter on `messages_full_converter` and `message_stream_converter`,
-threaded through `_full_response_with_tool_blocks` and `_stream_with_tool_blocks`; six call sites
-updated. Falls back to the resolved name when not supplied, so a missed call site degrades to
-today's behaviour instead of raising. Verified by AST sweep that no call site lacks the argument
-and that every `request.model` reference sits inside `create_messages`.
+**Smoke test on the real captures: 6 distinct system prompts → 1.** Strip is idempotent; boundary
+detection verified; 16 per-turn system messages folded rather than hoisted.
 
 ## Leaked chain-of-thought, and API-8 — the full analysis (2026-09-16)
 

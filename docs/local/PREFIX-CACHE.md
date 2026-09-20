@@ -61,7 +61,7 @@ retained tokens**, not percentages — the denominator moves between boots.
 ## Prefix-cache stability — the client settings that decide it (measured 2026-09-19)
 
 Patch 11 fixed the two server-side head-movers. Everything left is **client-side**, and one setting
-carries almost all of it. The full evidence, tables and caveats follow further down this file
+carries almost all of it. The full evidence, tables and caveats are in the next section
 ("Prefix-cache stability measured end to end"); this is the operational summary.
 
 **A moved prompt head costs minutes.** A cold 54K prefill measured 194s where the same prompt warm
@@ -275,7 +275,7 @@ switches, then decide. Further prerequisites if it goes ahead:
 - Deploying it invalidates every cached head exactly once.
 - It diverges from the reference encoder, so any upstream parity bench shifts with it.
 
-### Patch 12's BLIND SPOT: the effort prefix is injected downstream of it (2026-09-19)
+### API-12's BLIND SPOT: the effort prefix is injected downstream of it (2026-09-19)
 
 **`PREFIX_WATCH` hashes cannot see a tier switch.** Patch 12 hashes `openai_messages` at the end of
 `_convert_anthropic_to_openai_request` (`anthropic_serving_inline_system.py:908`). The
@@ -315,7 +315,7 @@ Two consequences worth acting on:
 Until then the only live witness is `prompt-tap.py`, which sees `body["model"]` — and only for a
 session launched through it.
 
-### The tripwire (Patch 12, live since 2026-09-19)
+### The tripwire (`API-12`, live since 2026-09-19)
 
 The server logs one line per request — `PREFIX_WATCH head=… tools=… sys=… user0=… len=…`, hashing
 only slices, never the whole prompt. Watch it:
@@ -356,126 +356,7 @@ Three traps worth knowing before reading any number:
   means the blocks were **evicted**, not invalidated — a pool-pressure problem, not a prompt problem.
   Reported as `[EVICTION?]`.
 
-## Cross-session prefix reuse — real sessions DO pay a full cold prefill (2026-09-19)
-
-**Every new Claude Code session on this cluster throws away ~26s of prefill.** Measured on real
-headless sessions, n=3, three independent cold heads, **0.0% every time**:
-
-| run | session A turn 0 | session B turn 0 |
-| --- | --- | --- |
-| xsess | 0.0% / 26.3s | **0.0% / 31.6s** |
-| rep1 | 0.0% / 28.6s | **0.0% / 26.1s** |
-| rep2 | 0.0% / 25.0s | **0.0% / 25.9s** |
-
-Within each rep, A and B carry an **identical `system` hash and conversation key**, and their
-turn-0 prompts share 99.4-99.6% of the rendered bytes (raw byte diff: first divergence at char
-113,759 of 114,169). So the head is shared and the reuse simply does not happen.
-
-> **CORRECTION.** An earlier version of this section said "there is no cross-session reuse defect —
-> it already works at 99.7%". That was **wrong, and wrong in an instructive way**: every 99.7%
-> measurement came from *synthetic probes*, and synthetic probes do not behave like real sessions
-> here. The lookup findings below still stand — they rest on their own controls — but the
-> generalisation from probe to session did not.
-
-### The core observation
-
-**A head written by a real multi-turn session is unretrievable 2 seconds after that session ends.**
-A head written by a single synthetic request survives 5+ minutes.
-
-| head written by | probe 2s later | survives |
-| --- | --- | --- |
-| a real multi-turn session | **0.0% hit, 22.77s (cold), clean delta** | no |
-| one synthetic request (`max_tokens=4`) | 99.7%, 0.69s | **5+ min**, through a 777K-token burst |
-
-During the session the head *is* retrievable — turns 1-6 hit 67-99%. It works while the session
-holds it and dies when the session lets go.
-
-> **Read the SECONDS, not the hit%.** This cost hours. Two probes that appeared to show "the head
-> is alive" were actually **cold prefills that re-created it** (22.31s and 22.48s, both blended).
-> Every 99.7% reading after them was measuring the probe's own work. A warm ~42K head answers in
-> **~0.7s**; anything near 20s+ is a miss regardless of what the ratio says.
-
-### What has been ELIMINATED, each with a clean control
-
-Do not re-test these without new evidence:
-
-| suspect | how it was cleared |
-| --- | --- |
-| The "extent rule" (match the whole extent or get 0) | **Disproven.** Lookup is monotone, `floor(shared/256)*256`; 0 of 26 exact-token points returned zero, two seeds, three prompt sizes. |
-| Prompt bytes / a moved head | Raw byte diff 99.64% shared; Patch 12 fingerprints identical across both live sessions (`head=942f33360604 tools=077941266e1a sys=5e46e83cd5d3 user0=1bf734cbb2a0`). |
-| Session B's actual body | Replayed onto A's head: **99.7%, 3/3 clean**. |
-| `max_tokens` (4 vs 32000), `stream` | 2x2 matrix, all four shapes **99.7%**, clean. |
-| Transport (direct tunnel vs tap→mTLS→proxy) | Same body both paths, **99.7%** both, clean. |
-| Session growth to 97K tokens | Head retrievable **before and after** growth, 99.7% both. |
-| Generation / decode | A single request generating 388 tokens: head survived at **99.4%, 0.69s**. |
-| Time / pressure eviction | Probe-written head survived **5 min** including a 777K-token burst. |
-| Patch 6, `SWA_RECYCLE`, `PROTECTED_FRACTION` | Offline A/B, four cells, identical row for row — and a grow-then-free session sim does **not** reproduce it in any arm. |
-| vllm#42948 hybrid cascade | Does not reproduce; this fork already carries repairs for the neighbouring 0%-hit modes. **No upstream report filed.** |
-| **Claude Code moving the head** | **Innocent.** A real captured session (inline `system` messages in the messages array, the Patch 1 path) is a **strict prefix at every turn**, with `system` and `tools` hashes stable throughout. Patch 1's inline-system merge is idempotent. |
-| **An aborted / severed request** | **Innocent.** Severing a streaming request mid-flight left the head at 99.7%, clean. |
-| **The `?beta=true` path, `anthropic-beta`, the full live header set** | **Innocent (2026-09-19, A2).** Four arms direct to the engine — control, beta path, beta header, full captured headers — all **99.6% / ~0.76s / clean**. `prompt-caching-scope-2026-01-05` does nothing here. |
-| **A per-session `cache_salt`** | **Disproven from outside.** No client-reachable path sets one; if it did, the beta-header and full-live arms above would have read 0%. |
-| **Being a "real session" as such** | **Innocent (2026-09-19, A3).** A single-turn real `claude -p` session (no tools) leaves a head that is **ALIVE at +2s: 99.6%, 0.57s, n=2**. Real-client, beta path, `cache_control`, `context_management`, `thinking:enabled`, per-session `metadata.session_id` and the live streaming shape are all exercised by that session and are all out. |
-
-### What is NOT established
-
-**The mechanism.** It is something about a real multi-turn session's lifecycle that the offline
-harness does not model — it reproduces neither stock, with Patch 6, nor with recycling disabled.
-Candidates not yet separated: chunked prefill across turns, async scheduling, spec-decode
-rollback, or preemption under the co-tenant's ~140K-token requests.
-
-**Narrowed 2026-09-19 (Phase A):** it is not "a real session" — it is **multi-turn**. A one-prompt,
-no-tool real session's head survives at +2s (99.6%, 0.57s, n=2), where a six-turn one is gone
-(0.0%, 22.77s). What is left is what only multiple turns do: chunked prefill across turns,
-spec-decode rollback accumulated over turns, or the free/allocate churn of repeatedly extending one
-conversation's block chain.
-
-> **Outstanding control.** The paired multi-turn run on the *same sitting* was stopped at the user's
-> request — our probes were evicting a co-tenant session's cache. The "dead" figure is same-boot but
-> earlier. Re-run it before building on A3:
-> `bash local-ops/xsess/death-probe.sh 2 local-ops/toolsearch-matrix/workload-a.txt a3multi`
-
-Whoever picks this up, in order:
-
-1. **The multi-turn positive control above**, back-to-back with a trivial run. Cheap, no restart.
-2. **A turn-count staircase** — 1, 2, 3, 6 turns, one probe each — to find where the head starts
-   dying. Also cheap and restart-free, and it would name the threshold directly.
-3. **Engine-side instrumentation.** External probing is exhausted: the request is
-   indistinguishable from a synthetic one on every axis, yet behaves differently. The scheduler
-   already carries a `kv_cache_eviction_events` channel (visible as `kv_cache_eviction_events=[]`
-   in `SchedulerStats`) and there is an `enable_kv_cache_events` config. Turning that on would
-   name the blocks and the reason directly. **It needs a restart, so ask first.**
-
-### Tooling
-
-`local-ops/xsess/` — `FINDINGS.md` (full write-up), `extent-probe.py` (exact-token staircase, uses
-`/v1/completions` with a token-id array so divergence is placed to the token), `xsess-probe.py`,
-`survival-probe.py`, `growth-probe.py`, `shape-probe.py`, `transport-probe.py`, `gen-probe.py`,
-`gap-probe.py`, `death-probe.sh` (now `[delay] [workload] [tag]`, so a trivial single-turn workload can be used), `clean-reps.sh`, and `transport-probe.py` — rebuilt 2026-09-19 as the **four-arm beta probe** (control / `?beta=true` / `anthropic-beta` / full live headers, all direct to the engine), results in `beta-arms.json`. `local-ops/kvsim/` — offline container
-reproduction, no GPU, seconds.
-
-### Measurement traps that invalidated work here
-
-- **Never retry a cache measurement with the same request.** The first attempt cached it; the
-  retry reads its own footprint back at ~100%. Produced a 12,288-hit reading on an 11,000-token
-  shared prefix. Regenerate a fresh request per attempt (perturb only the divergent tail).
-- **Read latency alongside hit%** — see the boxed warning above.
-- **A probe that misses REBUILDS what it was measuring.** You get one cold/warm datum per session;
-  every later probe hits regardless. Hence one run per time-point in `death-probe.sh`.
-- **`vllm:gpu_cache_usage_perc` reads 0.0 even under load** on this build, like
-  `vllm:num_requests_running`. Use `vllm:prompt_tokens_total` deltas.
-- **Blended deltas are everywhere** — this cluster's co-tenant runs 285-315K-char prompts; blend
-  factors of x4-x9 were routine. `queries == input_tokens` or discard the row.
-
-### The one-block eagle pop (real, correct, not worth touching)
-
-When a match would consume the cached request's entire extent, exactly one block (256 tokens) is
-dropped at `single_type_kv_cache_manager.py:597` —
-`if use_eagle and computed_blocks[0]: computed.pop()` — reached because MTP
-(`num_speculative_tokens=5`) makes `use_eagle` true. Confirmed by A/B: eagle off is exactly
-monotone, eagle on is uniformly -256. Leave it; 256 tokens is 0.7% of a 36K head.
-
-### Prefix-cache stability measured end to end — the remaining mover is a CLIENT plugin (2026-09-19)
+## Prefix-cache stability measured end to end — the remaining mover is a CLIENT plugin (2026-09-19)
 
 Patch 11 closed the two server-side head-movers. This pass measured what was left, against the
 engine's own accounting rather than against a model of the prompt.
@@ -769,3 +650,123 @@ seconds, and every re-advertise is logged as a `PATCH 13:` line.
   noise either way. The 2.1x turn cost is the robust half of that result.
 - **Whether the guardrail catches a move nobody triggered on purpose.** It was verified against a
   deliberate tier switch and a clean session. Its value in the wild is still to be seen.
+
+
+## Cross-session prefix reuse — real sessions DO pay a full cold prefill (2026-09-19)
+
+**Every new Claude Code session on this cluster throws away ~26s of prefill.** Measured on real
+headless sessions, n=3, three independent cold heads, **0.0% every time**:
+
+| run | session A turn 0 | session B turn 0 |
+| --- | --- | --- |
+| xsess | 0.0% / 26.3s | **0.0% / 31.6s** |
+| rep1 | 0.0% / 28.6s | **0.0% / 26.1s** |
+| rep2 | 0.0% / 25.0s | **0.0% / 25.9s** |
+
+Within each rep, A and B carry an **identical `system` hash and conversation key**, and their
+turn-0 prompts share 99.4-99.6% of the rendered bytes (raw byte diff: first divergence at char
+113,759 of 114,169). So the head is shared and the reuse simply does not happen.
+
+> **CORRECTION.** An earlier version of this section said "there is no cross-session reuse defect —
+> it already works at 99.7%". That was **wrong, and wrong in an instructive way**: every 99.7%
+> measurement came from *synthetic probes*, and synthetic probes do not behave like real sessions
+> here. The lookup findings below still stand — they rest on their own controls — but the
+> generalisation from probe to session did not.
+
+### The core observation
+
+**A head written by a real multi-turn session is unretrievable 2 seconds after that session ends.**
+A head written by a single synthetic request survives 5+ minutes.
+
+| head written by | probe 2s later | survives |
+| --- | --- | --- |
+| a real multi-turn session | **0.0% hit, 22.77s (cold), clean delta** | no |
+| one synthetic request (`max_tokens=4`) | 99.7%, 0.69s | **5+ min**, through a 777K-token burst |
+
+During the session the head *is* retrievable — turns 1-6 hit 67-99%. It works while the session
+holds it and dies when the session lets go.
+
+> **Read the SECONDS, not the hit%.** This cost hours. Two probes that appeared to show "the head
+> is alive" were actually **cold prefills that re-created it** (22.31s and 22.48s, both blended).
+> Every 99.7% reading after them was measuring the probe's own work. A warm ~42K head answers in
+> **~0.7s**; anything near 20s+ is a miss regardless of what the ratio says.
+
+### What has been ELIMINATED, each with a clean control
+
+Do not re-test these without new evidence:
+
+| suspect | how it was cleared |
+| --- | --- |
+| The "extent rule" (match the whole extent or get 0) | **Disproven.** Lookup is monotone, `floor(shared/256)*256`; 0 of 26 exact-token points returned zero, two seeds, three prompt sizes. |
+| Prompt bytes / a moved head | Raw byte diff 99.64% shared; Patch 12 fingerprints identical across both live sessions (`head=942f33360604 tools=077941266e1a sys=5e46e83cd5d3 user0=1bf734cbb2a0`). |
+| Session B's actual body | Replayed onto A's head: **99.7%, 3/3 clean**. |
+| `max_tokens` (4 vs 32000), `stream` | 2x2 matrix, all four shapes **99.7%**, clean. |
+| Transport (direct tunnel vs tap→mTLS→proxy) | Same body both paths, **99.7%** both, clean. |
+| Session growth to 97K tokens | Head retrievable **before and after** growth, 99.7% both. |
+| Generation / decode | A single request generating 388 tokens: head survived at **99.4%, 0.69s**. |
+| Time / pressure eviction | Probe-written head survived **5 min** including a 777K-token burst. |
+| Patch 6, `SWA_RECYCLE`, `PROTECTED_FRACTION` | Offline A/B, four cells, identical row for row — and a grow-then-free session sim does **not** reproduce it in any arm. |
+| vllm#42948 hybrid cascade | Does not reproduce; this fork already carries repairs for the neighbouring 0%-hit modes. **No upstream report filed.** |
+| **Claude Code moving the head** | **Innocent.** A real captured session (inline `system` messages in the messages array, the Patch 1 path) is a **strict prefix at every turn**, with `system` and `tools` hashes stable throughout. Patch 1's inline-system merge is idempotent. |
+| **An aborted / severed request** | **Innocent.** Severing a streaming request mid-flight left the head at 99.7%, clean. |
+| **The `?beta=true` path, `anthropic-beta`, the full live header set** | **Innocent (2026-09-19, A2).** Four arms direct to the engine — control, beta path, beta header, full captured headers — all **99.6% / ~0.76s / clean**. `prompt-caching-scope-2026-01-05` does nothing here. |
+| **A per-session `cache_salt`** | **Disproven from outside.** No client-reachable path sets one; if it did, the beta-header and full-live arms above would have read 0%. |
+| **Being a "real session" as such** | **Innocent (2026-09-19, A3).** A single-turn real `claude -p` session (no tools) leaves a head that is **ALIVE at +2s: 99.6%, 0.57s, n=2**. Real-client, beta path, `cache_control`, `context_management`, `thinking:enabled`, per-session `metadata.session_id` and the live streaming shape are all exercised by that session and are all out. |
+
+### What is NOT established
+
+**The mechanism.** It is something about a real multi-turn session's lifecycle that the offline
+harness does not model — it reproduces neither stock, with Patch 6, nor with recycling disabled.
+Candidates not yet separated: chunked prefill across turns, async scheduling, spec-decode
+rollback, or preemption under the co-tenant's ~140K-token requests.
+
+**Narrowed 2026-09-19 (Phase A):** it is not "a real session" — it is **multi-turn**. A one-prompt,
+no-tool real session's head survives at +2s (99.6%, 0.57s, n=2), where a six-turn one is gone
+(0.0%, 22.77s). What is left is what only multiple turns do: chunked prefill across turns,
+spec-decode rollback accumulated over turns, or the free/allocate churn of repeatedly extending one
+conversation's block chain.
+
+> **Outstanding control.** The paired multi-turn run on the *same sitting* was stopped at the user's
+> request — our probes were evicting a co-tenant session's cache. The "dead" figure is same-boot but
+> earlier. Re-run it before building on A3:
+> `bash local-ops/xsess/death-probe.sh 2 local-ops/toolsearch-matrix/workload-a.txt a3multi`
+
+Whoever picks this up, in order:
+
+1. **The multi-turn positive control above**, back-to-back with a trivial run. Cheap, no restart.
+2. **A turn-count staircase** — 1, 2, 3, 6 turns, one probe each — to find where the head starts
+   dying. Also cheap and restart-free, and it would name the threshold directly.
+3. **Engine-side instrumentation.** External probing is exhausted: the request is
+   indistinguishable from a synthetic one on every axis, yet behaves differently. The scheduler
+   already carries a `kv_cache_eviction_events` channel (visible as `kv_cache_eviction_events=[]`
+   in `SchedulerStats`) and there is an `enable_kv_cache_events` config. Turning that on would
+   name the blocks and the reason directly. **It needs a restart, so ask first.**
+
+### Tooling
+
+`local-ops/xsess/` — `FINDINGS.md` (full write-up), `extent-probe.py` (exact-token staircase, uses
+`/v1/completions` with a token-id array so divergence is placed to the token), `xsess-probe.py`,
+`survival-probe.py`, `growth-probe.py`, `shape-probe.py`, `transport-probe.py`, `gen-probe.py`,
+`gap-probe.py`, `death-probe.sh` (now `[delay] [workload] [tag]`, so a trivial single-turn workload can be used), `clean-reps.sh`, and `transport-probe.py` — rebuilt 2026-09-19 as the **four-arm beta probe** (control / `?beta=true` / `anthropic-beta` / full live headers, all direct to the engine), results in `beta-arms.json`. `local-ops/kvsim/` — offline container
+reproduction, no GPU, seconds.
+
+### Measurement traps that invalidated work here
+
+- **Never retry a cache measurement with the same request.** The first attempt cached it; the
+  retry reads its own footprint back at ~100%. Produced a 12,288-hit reading on an 11,000-token
+  shared prefix. Regenerate a fresh request per attempt (perturb only the divergent tail).
+- **Read latency alongside hit%** — see the boxed warning above.
+- **A probe that misses REBUILDS what it was measuring.** You get one cold/warm datum per session;
+  every later probe hits regardless. Hence one run per time-point in `death-probe.sh`.
+- **`vllm:gpu_cache_usage_perc` reads 0.0 even under load** on this build, like
+  `vllm:num_requests_running`. Use `vllm:prompt_tokens_total` deltas.
+- **Blended deltas are everywhere** — this cluster's co-tenant runs 285-315K-char prompts; blend
+  factors of x4-x9 were routine. `queries == input_tokens` or discard the row.
+
+### The one-block eagle pop (real, correct, not worth touching)
+
+When a match would consume the cached request's entire extent, exactly one block (256 tokens) is
+dropped at `single_type_kv_cache_manager.py:597` —
+`if use_eagle and computed_blocks[0]: computed.pop()` — reached because MTP
+(`num_speculative_tokens=5`) makes `use_eagle` true. Confirmed by A/B: eagle off is exactly
+monotone, eagle on is uniformly -256. Leave it; 256 tokens is 0.7% of a 36K head.

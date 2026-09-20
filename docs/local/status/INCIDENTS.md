@@ -10,6 +10,53 @@ The boot-metrics section for the recovery boot after the watchdog incident lives
 > Moved verbatim from `STATUS.md` during the 2026-09-20 doc split.
 
 ## Incidents
+### A cold boot reached 7 of 8 watchdog failures — 60s of margin (2026-09-20)
+
+**Symptom.** None visible. The cluster booted and served normally. This was found in
+`watchdog.log` while recording the boot, not from any alert.
+
+**What happened.** Host timestamps are CEST (UTC+2); the engine logs UTC. Aligned:
+
+| local (CEST) | UTC | event |
+|---|---|---|
+| 10:57:51 | 08:57:51 | watchdog poll fails — **1/8** |
+| 10:58:04 | 08:58:04 | container starts (worker 08:58:03) |
+| 11:03:32 | 09:03:32 | KV cache sized, 2,510,051 tokens |
+| 11:03:51 | 09:03:51 | **7/8** |
+| 11:04:51 | 09:04:51 | API answers → `API recovered (was at 7/8 failures)` |
+
+**A 407s cold boot against a 480s threshold left exactly one poll of margin.** Had weight load run
+60 seconds slower — well inside the documented 250–600s range — the watchdog would have issued
+`stop` into a healthy boot, which is the signature that boot-looped the cluster for two hours on
+2026-09-19.
+
+**An earlier episode the same morning reached 6/8** (09:48:50–09:54:50 CEST), ending exactly when
+`/tmp/start.log` records `Minimal chat request succeeded`. So there were two boots on 2026-09-20 and
+**both ran with a live watchdog counting against them.**
+
+**Root cause is not the threshold; it is that the watchdog cannot tell "dead" from "not up yet",
+and nothing tells it a boot is in progress.** The 2026-09-19 fix raised `FAIL_THRESHOLD` 3 → 8,
+which buys 480s — but a cold boot is 250–600s, so the two windows still overlap at the top of the
+range. The manual-restart checklist exists precisely because of this, and it was not followed here:
+the watchdog was never stopped (`pgrep` confirms one instance, PID 59439, running throughout).
+
+**Signature.** `grep "API recovered (was at" watchdog.log` — any recovery at 6/8 or higher is a
+near miss. At 8/8 there is no log line saying "I restarted a healthy boot"; you see a `stop` in the
+middle of a weight load instead.
+
+**Not fixed. Three options, none taken yet — each needs a decision, and the first two need a restart:**
+
+1. **A boot sentinel.** The start script touches a file; the watchdog skips polling while it exists
+   and it is newer than ~15 minutes. Removes the overlap entirely rather than widening it.
+   Cheapest correct fix, and it needs no threshold guess.
+2. **Raise `FAIL_THRESHOLD` to 12** (~720s). One line, but it also slows genuine death detection by
+   four minutes, and it only moves the overlap rather than removing it.
+3. **Nothing** — accept that a manual restart must stop the watchdog first, and rely on the
+   checklist being followed. It was not followed today.
+
+> **Do not read "the watchdog has never fired wrongly since the fix" as evidence the fix is
+> sufficient.** It came within one poll on 2026-09-20 and nobody noticed until the log was read.
+
 ### Four concurrent watchdogs boot-looped the cluster for two hours (2026-09-19)
 
 **Symptom.** After an engine death at 14:01 the cluster never came back. `/v1/models` refused
@@ -212,7 +259,7 @@ if ignored; it has been added to the harness for the full run.
 **Not adopted. No patch written, no restart taken.** Next step if pursued: full 12-problem run with
 `--arms off,low,high-front,high-tail`, ~55-100 min of decode contention.
 
-### Tier switches are invisible to Patch 12 — and cost a 100% re-prefill (2026-09-19)
+### Tier switches are invisible to `API-12` — and cost a 100% re-prefill (2026-09-19)
 
 Prompted by the user switching a live session from auto to manual (opus only, no sonnet) and
 asking whether the model name in the prompt was the cause. **The mechanism is real, and it is

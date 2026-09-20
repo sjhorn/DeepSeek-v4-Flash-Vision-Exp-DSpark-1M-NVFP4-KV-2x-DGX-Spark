@@ -192,7 +192,8 @@ created *during* weight load, so it must be reclaimed across that window.
 **Requires passwordless sudo on both nodes** for exactly one command. Without it the script prints
 `Startup cache reclaim: SKIPPED` and continues:
 
-The rule ships in `local-ops/dspark-dropcaches` (see below). Install on **both** nodes:
+The rule ships in `local-ops/dspark-dropcaches` ([`TOOLING.md`](TOOLING.md)). Install on **both**
+nodes:
 
 ```bash
 sudo install -m 0440 -o root -g root \

@@ -11,14 +11,58 @@ boot log, what changed, and which start script was used. That is the working agr
 
 > Moved verbatim from `STATUS.md` during the 2026-09-20 doc split.
 
-## Boot metrics (2026-08-22 config: seqs 4, gpu_mem 0.87, cudagraph profiling on)
+
+## Boot metrics (2026-09-20 08:58Z boot: Vision-Exp, no config change)
+
+**Recorded retroactively on 2026-09-20 from the container and engine logs.** This restart was not
+taken by the session that wrote this entry, so *what it deployed and who initiated it are not
+determinable from the logs available* — only that `start-deepseek-v4-flash-dspark.sh` ran it (not
+`start-cluster.sh`; see the watchdog note below). Recorded anyway because an unrecorded boot is the
+gap the working agreement exists to close.
+
+| | |
+|---|---|
+| started | head 08:58:04Z, worker 08:58:03Z, `RestartCount=0` both |
+| API answering | 09:04:51Z — **407s cold boot** |
+| **GPU KV cache size** | **2,510,051 tokens** |
+| max concurrency @ 1,048,576 | **2.39x** |
+| init engine (profile, KV, warmup) | 67.68s (compilation 2.61s) |
+| protected prompt block cap | 1,691 blocks/group — pool 16,912 blocks, 5 managers, fraction 0.50, legacy caps 8,192 / 32,768 / 524,288 |
+| model | `deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`, `hf_overrides.architectures=['DeepseekV4VForConditionalGeneration']` |
+| config | `max_model_len` 1,048,576, `max_num_seqs` 12, `gpu_memory_utilization` 0.86, `num_speculative_tokens` 5 |
+
+KV pool is within 0.04% of the 2026-09-14 boot's 2,510,942 — no regression.
+
+The start script's own log shows the 2026-09-18 vision auto-detection working in production, which
+had not been observed on a boot anyone recorded:
 
 ```
-GPU KV cache size: 3,203,908 tokens
-Maximum concurrency for 1,048,576 tokens per request: 3.06x
-max_cudagraph_capture_size: 24
-MoE backend: B12X Mxfp4
+Vision-Exp mode: overlaying docker-compose.vision-exp.yml
+Vision stage files present on both nodes.
+Startup cache reclaim: active on both nodes (stops when API is ready).
 ```
+
+> **This boot came within ONE watchdog poll of being torn down.** See
+> [`INCIDENTS.md`](INCIDENTS.md) — "A cold boot reached 7 of 8 watchdog failures".
+
+> **The `MNT-6a` cap still logs as `Patch 5:` on this boot** — expected. The relabel landed in
+> `patches/patch6-single_type_kv_cache_manager.py` on 2026-09-20, and the running process holds the
+> copy it imported at 08:58Z. It will read `MNT-6a:` from the next restart onward. This is a useful
+> incidental proof that a bind-mounted edit does **not** reach a running engine.
+
+## Boot metrics (2026-09-19 16:04 boot: recovery after the watchdog boot-loop)
+
+
+| item | value |
+| --- | --- |
+| Started | 16:04:41 local, API 200 at **16:10:42** (~6 min once the watchdogs were gone) |
+| GPU KV cache size | **2,510,942 tokens** |
+| Maximum concurrency @ 1,048,576 | **2.39x** |
+| init engine (profile, kv cache, warmup) | 68.54 s (compilation 2.57 s) |
+| What changed | **nothing** — same image, config and patches; this was a recovery, not a deploy |
+| Start used | `start-deepseek-v4-flash-dspark.sh`, invoked by a watchdog |
+| Post-boot verification | `verify-server.py` **14/14**, smoke **6/6**, `check-patch4.sh` **OK**, **0 × 5xx**, watchdog count **1** |
+
 
 ## Boot metrics (2026-09-19 14:57 boot: Patch 13 sticky tool set)
 
@@ -83,7 +127,7 @@ API up at 13:10:26 (27 samples); RestartCount 0 both nodes; 12 model ids served
 
 Verified after boot: vendor ladder resolves correctly — haiku/sonnet +0 prompt tokens, opus +79,
 fable +92, each echoing its own name; classifier exemption proven by **thinking blocks**, not
-token counts (see below); local `-think-*` aliases unchanged; Patch 8 strip correct; smoke 6/6;
+token counts (detail: [`../PATCHES-API.md#api-9`](../PATCHES-API.md#api-9)); local `-think-*` aliases unchanged; Patch 8 strip correct; smoke 6/6;
 Patch 4 present; watchdog restarted 13:12:22.
 
 **How the classifier exemption was actually proven.** `thinking:true+low` and `thinking:false`
@@ -144,15 +188,16 @@ exactly `sysctl -qw vm.drop_caches=3`). **GPU clocks were therefore not re-pinne
 until a node reboots, since the pin from the previous `start-cluster.sh` survives while the host
 is up, but the next start should be `start-cluster.sh` run interactively.
 
-## Boot metrics (2026-09-19 16:04 boot: recovery after the watchdog boot-loop)
+## Reference: the 2026-08-22 config (seqs 4, gpu_mem 0.87, cudagraph profiling on)
 
+```
+GPU KV cache size: 3,203,908 tokens
+Maximum concurrency for 1,048,576 tokens per request: 3.06x
+max_cudagraph_capture_size: 24
+MoE backend: B12X Mxfp4
+```
 
-| item | value |
-| --- | --- |
-| Started | 16:04:41 local, API 200 at **16:10:42** (~6 min once the watchdogs were gone) |
-| GPU KV cache size | **2,510,942 tokens** |
-| Maximum concurrency @ 1,048,576 | **2.39x** |
-| init engine (profile, kv cache, warmup) | 68.54 s (compilation 2.57 s) |
-| What changed | **nothing** — same image, config and patches; this was a recovery, not a deploy |
-| Start used | `start-deepseek-v4-flash-dspark.sh`, invoked by a watchdog |
-| Post-boot verification | `verify-server.py` **14/14**, smoke **6/6**, `check-patch4.sh` **OK**, **0 × 5xx**, watchdog count **1** |
+Kept for comparison only — **this is a different configuration, not a boot of the current one.**
+Its 3.2M KV pool is not a target the present config should be measured against: `max_num_seqs` was
+4 (now 12) and `gpu_memory_utilization` 0.87 (now 0.86, and [capped there for two documented
+reasons](INCIDENTS.md)).

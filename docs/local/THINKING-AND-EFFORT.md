@@ -99,7 +99,7 @@ win comes from hard problems where the off arm rambles to the cap.
 **Artifacts:** `local-ops/hmmt-effort-20260916/` — harness, problem set, per-problem JSON, both the
 12k and 24k logs.
 
-## Model aliases — per-tier thinking (Patch 9, rev 2026-09-18)
+## Model aliases — per-tier thinking (`API-9`, rev 2026-09-18)
 
 One engine, eleven served names. `--served-model-name` takes a list, so aliases cost nothing —
 same weights, same KV pool, just labels. Patch 9 routes the name to `chat_template_kwargs`.
@@ -176,7 +176,7 @@ reads a `models` array from the profile, multi-model use needs the tier variable
 **Switching mid-session costs a full re-prefill** — the effort prefix sits at message index 0, so
 changing effort rewrites the prompt head and invalidates the conversation's prefix cache.
 
-### Reasoning effort measured — use `high`, not `max` (2026-09-16)
+## Reasoning effort measured — use `high`, not `max` (2026-09-16)
 
 Tested per-request via `chat_template_kwargs` against the running server; **no restart or config
 change was needed**, and none was made. The deployed default remains `{"thinking":false}`.
