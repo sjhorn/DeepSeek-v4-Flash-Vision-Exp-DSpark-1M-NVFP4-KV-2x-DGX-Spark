@@ -1,0 +1,15 @@
+# Vision-Exp overlay — use with:
+#   docker compose -f docker-compose.dspark.yml -f docker-compose.vision-exp.yml up -d
+#
+# Adds the 4 vision port bind-mounts on top of the base compose.
+# Requires the patched files staged at /var/tmp/ on BOTH nodes (see vision-exp/README.md).
+# Also adds --hf-overrides to select the multimodal architecture alias.
+
+services:
+  vllm-dspark:
+    volumes:
+      # Vision-Exp port files (must be staged on both nodes at ~/vision-stage/)
+      - ${HOME}/vision-stage/ds4v_model.py:/opt/env/lib/python3.12/site-packages/vllm/models/deepseek_v4/nvidia/model.py:ro
+      - ${HOME}/vision-stage/ds4v_vision.py:/opt/env/lib/python3.12/site-packages/vllm/models/deepseek_v4/nvidia/ds4v_vision.py:ro
+      - ${HOME}/vision-stage/ds4v_mm.py:/opt/env/lib/python3.12/site-packages/vllm/models/deepseek_v4/nvidia/ds4v_mm.py:ro
+      - ${HOME}/vision-stage/ds4v_registry.py:/opt/env/lib/python3.12/site-packages/vllm/model_executor/models/registry.py:ro
