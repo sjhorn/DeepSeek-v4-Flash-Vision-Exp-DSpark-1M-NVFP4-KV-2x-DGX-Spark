@@ -74,7 +74,12 @@ takes 250-600s, so a running watchdog will tear the cluster down mid-boot. Alway
 
 ```bash
 pkill -fx "bash ./watchdog-dspark.sh"           # see the pgrep warning below
-pgrep -cfx "bash ./watchdog-dspark.sh"          # MUST print 0 before going on
+pgrep -cfx "bash ./watchdog-dspark.sh"          # necessary, but NOT sufficient:
+flock -n /tmp/dspark-watchdog.lock true         # the real condition -- must succeed.
+# pgrep can read 0 while the dying process (or a `sleep` child that inherited fd 9)
+# still holds the lock, so the next watchdog exits on "already holds" and you are
+# left with NONE. See INCIDENTS.md "Restarting the watchdog left the cluster with
+# ZERO watchdogs".
 ./stop-deepseek-v4-flash-dspark.sh
 setsid nohup ./start-deepseek-v4-flash-dspark.sh > /tmp/start.log 2>&1 < /dev/null &
 setsid nohup ./local-ops/bootmon.sh > /dev/null 2>&1 < /dev/null &   # loop detection

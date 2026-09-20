@@ -10,6 +10,52 @@ The boot-metrics section for the recovery boot after the watchdog incident lives
 > Moved verbatim from `STATUS.md` during the 2026-09-20 doc split.
 
 ## Incidents
+### Restarting the watchdog left the cluster with ZERO watchdogs (2026-09-20)
+
+**Hit while deploying the boot sentinel below.** `pkill` the old watchdog, confirm `pgrep` reads 0,
+start a new one — and the new one exited immediately with
+`another watchdog already holds /tmp/dspark-watchdog.lock`. Net result: **no watchdog at all**, and
+the message looks exactly like the singleton working correctly.
+
+```
+before: 1 watchdog(s)
+after kill: 0 — starting one
+now running: 0  (MUST be 1)
+[15:37:37] another watchdog already holds /tmp/dspark-watchdog.lock -- exiting
+```
+
+**Root cause: `pgrep` and the lock do not go out at the same time.** The lock lives on fd 9, held
+for the life of the process (`exec 9>$LOCK_FILE; flock -n 9`). Between SIGTERM and the fd actually
+closing, `pgrep -cfx` already reads 0 while the flock is still held — and any child that inherited
+fd 9 (the `sleep` in the poll loop) holds it too, and `pgrep -fx "bash ./watchdog-dspark.sh"` never
+matches a `sleep`. Checked 40s later: nothing held the lock, confirming a teardown race rather than
+a leak.
+
+**This is a worse failure than the one being fixed.** A watchdog that restarts a healthy boot is
+loud and recoverable. A cluster silently running with no supervisor is neither — nobody finds out
+until an engine death goes unattended.
+
+**Fix: wait for the LOCK, not for the process table.** The readiness condition is "can I take it",
+which is exactly what the next instance will ask:
+
+```bash
+pkill -fx "bash ./watchdog-dspark.sh"
+for i in $(seq 1 30); do flock -n /tmp/dspark-watchdog.lock true 2>/dev/null && break; sleep 1; done
+flock -n /tmp/dspark-watchdog.lock true || { echo "ABORT: still held"; exit 1; }
+setsid nohup ./watchdog-dspark.sh >> watchdog.log 2>&1 < /dev/null &
+sleep 4; pgrep -cfx "bash ./watchdog-dspark.sh"      # MUST print 1
+```
+
+It took 1s on the retry. **Always assert the count is 1 afterwards** — this is the whole reason the
+failure was caught rather than shipped.
+
+**Signature.** `another watchdog already holds` in `watchdog.log` **immediately followed by no
+further lines**. The same message during normal operation (a genuine second instance being refused)
+is followed by the first instance continuing to log polls.
+
+> The restart checklist in [`../CLUSTER.md`](../CLUSTER.md) says to confirm `pgrep` prints 0 before
+> starting. **That check is necessary but not sufficient**, and this is why.
+
 ### A cold boot reached 7 of 8 watchdog failures — 60s of margin (2026-09-20)
 
 **Symptom.** None visible. The cluster booted and served normally. This was found in
@@ -44,18 +90,38 @@ the watchdog was never stopped (`pgrep` confirms one instance, PID 59439, runnin
 near miss. At 8/8 there is no log line saying "I restarted a healthy boot"; you see a `stop` in the
 middle of a weight load instead.
 
-**Not fixed. Three options, none taken yet — each needs a decision, and the first two need a restart:**
+**FIXED the same day — boot sentinel, deployed and verified live 2026-09-20 15:38Z.**
 
-1. **A boot sentinel.** The start script touches a file; the watchdog skips polling while it exists
-   and it is newer than ~15 minutes. Removes the overlap entirely rather than widening it.
-   Cheapest correct fix, and it needs no threshold guess.
-2. **Raise `FAIL_THRESHOLD` to 12** (~720s). One line, but it also slows genuine death detection by
-   four minutes, and it only moves the overlap rather than removing it.
-3. **Nothing** — accept that a manual restart must stop the watchdog first, and rely on the
-   checklist being followed. It was not followed today.
+The start script now states its intent instead of the watchdog inferring it. It creates
+`/tmp/dspark-booting` after every preflight and before the first compose call, refreshes the mtime
+on each wait iteration, and removes it via its EXIT trap. The watchdog skips the poll **and resets
+its failure count** while that file is present and fresher than `SENTINEL_MAX_AGE` (900s).
 
-> **Do not read "the watchdog has never fired wrongly since the fix" as evidence the fix is
-> sufficient.** It came within one poll on 2026-09-20 and nobody noticed until the log was read.
+**The count reset is the load-bearing half:** a manual restart's `stop` runs *before* the start
+script creates the file, so failures accumulate first and must be discarded, not merely paused.
+
+Verified on the running watchdog, not just in a sandbox:
+
+```
+[15:39:15] boot in progress (/tmp/dspark-booting, 45s old) -- holding off, failure count reset
+[15:40:15] boot sentinel gone -- resuming normal polling
+```
+
+Sandbox matrix beforehand (dummy stop/start scripts, so a threshold hit could not touch the real
+cluster): no sentinel → 9 failed polls and the threshold trips; fresh → 0 polls, never trips;
+stale 2h → correctly ignored; **appearing mid-count → 3/4 then reset**, which is the manual-restart
+case. Sentinel lifecycle: removed on exit 0, exit 1, `set -e` and SIGTERM; left only on SIGKILL,
+which is exactly what `SENTINEL_MAX_AGE` bounds. A preflight failure leaves no sentinel at all.
+
+**`FAIL_THRESHOLD` was deliberately NOT raised.** It is a guess against a 250-600s boot, so raising
+it only moves the overlap and delays genuine death detection by four minutes.
+
+**Rollback:** `/tmp/watchdog-dspark.sh.pre-sentinel` and
+`/tmp/start-deepseek-v4-flash-dspark.sh.pre-sentinel` on the head, or set
+`BOOT_SENTINEL=/nonexistent` to disable the hold-off without reverting anything.
+
+> **Do not read "the watchdog has never fired wrongly" as evidence a threshold is sufficient.** It
+> came within one poll on 2026-09-20 and nobody noticed until the log was read.
 
 ### Four concurrent watchdogs boot-looped the cluster for two hours (2026-09-19)
 

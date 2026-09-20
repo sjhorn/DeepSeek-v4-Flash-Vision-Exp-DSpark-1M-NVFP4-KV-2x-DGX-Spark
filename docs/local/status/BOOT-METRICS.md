@@ -42,8 +42,10 @@ Vision stage files present on both nodes.
 Startup cache reclaim: active on both nodes (stops when API is ready).
 ```
 
-> **This boot came within ONE watchdog poll of being torn down.** See
-> [`INCIDENTS.md`](INCIDENTS.md) — "A cold boot reached 7 of 8 watchdog failures".
+> **This boot came within ONE watchdog poll of being torn down** — see
+> [`INCIDENTS.md`](INCIDENTS.md), "A cold boot reached 7 of 8 watchdog failures". **Fixed the same
+> day:** the start script now writes a boot sentinel the watchdog honours, so a future boot of any
+> duration cannot be interrupted by a watchdog that did not start it.
 
 > **The `MNT-6a` cap still logs as `Patch 5:` on this boot** — expected. The relabel landed in
 > `patches/patch6-single_type_kv_cache_manager.py` on 2026-09-20, and the running process holds the
