@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import json
 import os
+import time
 from abc import ABC, abstractmethod
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Sequence
 
 from vllm.logger import init_logger
@@ -50,6 +52,85 @@ _PROTECTED_FRACTION_ENV = "VLLM_PROTECTED_PROMPT_BLOCKS_FRACTION"
 # conversation). VLLM_SWA_RECYCLE_SKIPPED_BLOCKS=0 disables it.
 _RECYCLE_ENV = "VLLM_SWA_RECYCLE_SKIPPED_BLOCKS"
 _RECYCLE_ENABLED = os.environ.get(_RECYCLE_ENV, "1").strip() not in ("0", "false", "False", "")
+
+# ---------------------------------------------------------------------------
+# MNT-8 / MNT-9 runtime flags — readable WITHOUT a restart.
+#
+# Container env vars cannot be changed on a running engine, so an env-gated
+# experiment costs one 250-600s cold boot per arm, with every session on the
+# cluster interrupted.  These two flags are therefore read from a small JSON
+# file on a bind-mounted directory instead, re-stat'ed at most once a second:
+#
+#   {"free_queue_prepend_uncached": 1, "pin_static_head": 0}
+#
+# An env var of the same name (upper-cased, VLLM_-prefixed) always WINS, so a
+# boot can still pin an arm; the file only moves flags that are unset in env.
+# Missing file / bad JSON / unreadable => every flag falls back to its default,
+# which is OFF for both mechanisms.  A flag flip takes effect on the next
+# request; it does NOT retroactively re-order blocks already freed.
+# See CACHE_TEST.md.
+_FLAGS_PATH = os.environ.get("VLLM_KV_FLAGS_FILE", "/etc/vllm-kv-flags/flags.json")
+_FLAGS_TTL_S = 1.0
+_flags_cache: dict = {}
+_flags_checked_at: float = -1.0
+
+
+def _flags() -> dict:
+    global _flags_cache, _flags_checked_at
+    now = time.monotonic()
+    if now - _flags_checked_at < _FLAGS_TTL_S:
+        return _flags_cache
+    _flags_checked_at = now
+    try:
+        with open(_FLAGS_PATH) as fh:
+            loaded = json.load(fh)
+        _flags_cache = loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        _flags_cache = {}
+    return _flags_cache
+
+
+def _flag(name: str, default):
+    """`name` is the lower_snake key in the flags file; the env override is
+    VLLM_<NAME>."""
+    raw = os.environ.get("VLLM_" + name.upper())
+    if raw is None:
+        raw = _flags().get(name)
+    if raw is None:
+        return default
+    if isinstance(default, bool):
+        return str(raw).strip().lower() not in ("0", "false", "no", "")
+    try:
+        return type(default)(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+# MNT-8 (vllm#43447, ported 2026-09-20): free a request's blocks in two groups —
+# uncached scratch pages to the FRONT of the free queue, cached prefix blocks to
+# the back.  Stock frees both to the back, so every turn of a conversation
+# buries worthless pages behind live prefix entries and the allocator evicts the
+# prefixes first.  MNT-6b already covers the in-request path; this is the
+# end-of-request half it does not reach.  Flag: free_queue_prepend_uncached.
+_FLAG_PREPEND = "free_queue_prepend_uncached"
+
+# MNT-9 (2026-09-20): pin the STATIC HEAD (tools + system prompt) so it survives
+# for the life of the process, instead of the whole prompt prefix surviving
+# transiently.  The pin primitive is MNT-6a's (_protect_prompt_blocks/touch);
+# what differs is the boundary and the release policy:
+#   - boundary B = first <|User|> token, minus slack, floored to the hit
+#     alignment.  Verified on this build: the template renders tools, then the
+#     system prompt, then the first user turn (CACHE_TEST.md 3a.1).
+#   - release is LRU over WHOLE HEADS, ordered by last reuse, in a budget
+#     RESERVED from MNT-6a's — sharing MNT-6a's FIFO queue would let one long
+#     conversation's body evict every other agent's head, which is the failure
+#     being fixed.
+# Flag: pin_static_head.  Budget: head_pin_fraction (of the pool, per manager).
+_FLAG_PIN_HEAD = "pin_static_head"
+_HEAD_BOUNDARY_TOKEN_ID = int(os.environ.get("VLLM_HEAD_BOUNDARY_TOKEN_ID", "128803"))
+_HEAD_SCAN_LIMIT = 65536  # the head is ~12.6K tokens; never scan a 1M prompt
+_HEAD_SLACK_TOKENS = 64
+_HEAD_MIN_TOKENS = 512  # below this there is nothing worth pinning
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -117,6 +198,13 @@ class SingleTypeKVCacheManager(ABC):
         # request (ref_cnt kept), reused for its next allocations.
         self._recycled_blocks: dict[str, list[KVCacheBlock]] = defaultdict(list)
         self._recycle_logged = False
+        # MNT-9: head pins, keyed by the BlockHash of the head's first block,
+        # in LRU order of last reuse.  Kept OUT of _protected_prompt_block_ids
+        # so MNT-6a's FIFO trim cannot take them.
+        self._head_pins: "OrderedDict[object, dict]" = OrderedDict()
+        self._pinned_head_block_ids: set[int] = set()
+        self._head_boundary: dict[str, int] = {}
+        self._head_pin_logged = False
 
     @classmethod
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
@@ -323,6 +411,152 @@ class SingleTypeKVCacheManager(ABC):
         self.new_block_ids = []
         return ids
 
+    def _free_split(self, blocks: Sequence[KVCacheBlock]) -> None:
+        """MNT-8: free `blocks`, uncached ones to the FRONT of the free queue.
+
+        Order within each group is preserved, so the caller's eviction priority
+        still holds.  With the flag off this is exactly `free_blocks(blocks)`.
+        """
+        blocks = list(blocks)
+        if not blocks:
+            return
+        if not _flag(_FLAG_PREPEND, False):
+            self.block_pool.free_blocks(blocks)
+            return
+        cached = [b for b in blocks if b.block_hash is not None]
+        uncached = [b for b in blocks if b.block_hash is None]
+        if cached:
+            self.block_pool.free_blocks(cached)
+        if uncached:
+            # No prefix-cache value: reuse these before evicting anything.
+            self.block_pool.free_blocks(uncached, prepend=True)
+
+    # ---- MNT-9: static-head pinning -------------------------------------
+    def _static_head_boundary(self, request: Request) -> int:
+        """B, in tokens: where the static head (tools + system) ends.
+
+        The first <|User|> token is the end of everything a second session with
+        a different body can still share.  Memoised per request — cache_blocks
+        runs every scheduler step.
+        """
+        rid = request.request_id
+        cached = self._head_boundary.get(rid)
+        if cached is not None:
+            return cached
+        boundary = 0
+        token_ids = request.prompt_token_ids
+        if token_ids:
+            limit = min(len(token_ids), _HEAD_SCAN_LIMIT)
+            for i in range(limit):
+                if token_ids[i] == _HEAD_BOUNDARY_TOKEN_ID:
+                    boundary = i
+                    break
+        if boundary:
+            boundary = max(0, boundary - _HEAD_SLACK_TOKENS)
+            align = max(1, self.cache_alignment_tokens)
+            boundary = boundary // align * align
+            if boundary < _HEAD_MIN_TOKENS:
+                boundary = 0
+        self._head_boundary[rid] = boundary
+        return boundary
+
+    def _head_pin_candidates(
+        self, blocks: list[KVCacheBlock], boundary_blocks: int
+    ) -> list[KVCacheBlock]:
+        """Which blocks of [0, B) THIS group must hold for a hit at B.
+
+        Full attention needs the whole prefix; a sliding-window group only ever
+        matches the contiguous run ending at the boundary, so pinning the rest
+        would spend the budget on blocks no lookup can use.
+        """
+        window = getattr(self, "sliding_window", None)
+        if window is None:
+            return blocks[:boundary_blocks]
+        need = cdiv(window - 1, self.block_size) + 1
+        return blocks[max(0, boundary_blocks - need) : boundary_blocks]
+
+    def _max_head_pin_blocks(self) -> int:
+        fraction = _flag("head_pin_fraction", 0.05)
+        if fraction <= 0:
+            return 0
+        num_managers = max(1, SingleTypeKVCacheManager._num_managers)
+        return int(self.block_pool.num_gpu_blocks * fraction / num_managers)
+
+    def _maybe_pin_static_head(self, request: Request, num_full_blocks: int) -> None:
+        if not self.enable_caching or not _flag(_FLAG_PIN_HEAD, False):
+            return
+        boundary = self._static_head_boundary(request)
+        if not boundary:
+            return
+        boundary_blocks = boundary // self.block_size
+        if boundary_blocks <= 0 or num_full_blocks < boundary_blocks:
+            return  # prefill has not crossed B yet
+        blocks = self.req_to_blocks.get(request.request_id)
+        if not blocks:
+            return
+        candidates = [
+            blk
+            for blk in self._head_pin_candidates(blocks, boundary_blocks)
+            if not blk.is_null and blk.block_hash is not None
+        ]
+        if not candidates:
+            return
+
+        key = candidates[0].block_hash
+        entry = self._head_pins.get(key)
+        if entry is None:
+            entry = {"ids": set(), "hits": 0, "tokens": boundary}
+            self._head_pins[key] = entry
+        else:
+            # Re-pinning a head we already hold means a LATER request matched
+            # it. That is the only reuse signal available here, and it is what
+            # orders the LRU: heads nothing comes back for age out first.
+            entry["hits"] += 1
+            self._head_pins.move_to_end(key)
+
+        fresh = [
+            blk for blk in candidates if blk.block_id not in self._pinned_head_block_ids
+        ]
+        if fresh:
+            self.block_pool.touch(fresh)
+            for blk in fresh:
+                self._pinned_head_block_ids.add(blk.block_id)
+                entry["ids"].add(blk.block_id)
+            if not self._head_pin_logged:
+                self._head_pin_logged = True
+                logger.info(
+                    "MNT-9: KV group %d pinned a static head at B=%d tokens "
+                    "(%d blocks, cap %d blocks, request %s)",
+                    self.kv_cache_group_id, boundary, len(fresh),
+                    self._max_head_pin_blocks(), request.request_id,
+                )
+        self._trim_head_pins()
+
+    def _trim_head_pins(self) -> None:
+        cap = self._max_head_pin_blocks()
+        while self._head_pins and len(self._pinned_head_block_ids) > cap:
+            _key, entry = self._head_pins.popitem(last=False)  # least recently reused
+            self._release_head_pin(entry)
+
+    def _release_head_pin(self, entry: dict) -> None:
+        blocks: list[KVCacheBlock] = []
+        for block_id in entry["ids"]:
+            if block_id not in self._pinned_head_block_ids:
+                continue
+            self._pinned_head_block_ids.discard(block_id)
+            block = self.block_pool.blocks[block_id]
+            if block.ref_cnt > 0:
+                blocks.append(block)
+        entry["ids"].clear()
+        if blocks:
+            # Still cached and still worth something to someone: back of the
+            # queue, never the front.
+            self.block_pool.free_blocks(blocks)
+
+    def _head_pin_ref(self, block: KVCacheBlock) -> int:
+        """1 if this block carries an MNT-9 pin reference, else 0."""
+        return 1 if block.block_id in self._pinned_head_block_ids else 0
+
     def _max_protected_prompt_blocks(self) -> int | None:
         legacy: int | None = None
         if self.max_model_len is not None:
@@ -458,6 +692,7 @@ class SingleTypeKVCacheManager(ABC):
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
+        self._maybe_pin_static_head(request, num_full_blocks)
 
     def _cache_block_mask(
         self,
@@ -488,11 +723,16 @@ class SingleTypeKVCacheManager(ABC):
         # freed first.
         ordered_blocks = reversed(req_blocks)
 
-        self.block_pool.free_blocks(ordered_blocks)
+        # MNT-8: scratch pages to the front of the queue, cached blocks to the
+        # back.  Stock appends both, which is what buries a turn's worthless
+        # pages behind the prefixes the next allocation then evicts.
+        self._free_split(ordered_blocks)
         self.num_cached_block.pop(request_id, None)
+        self._head_boundary.pop(request_id, None)
         leftover = self._recycled_blocks.pop(request_id, None)
         if leftover:
-            self.block_pool.free_blocks(leftover)
+            # Uncached by construction — MNT-6b evicts before recycling.
+            self._free_split(leftover)
 
     @abstractmethod
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
@@ -601,7 +841,7 @@ class SingleTypeKVCacheManager(ABC):
             removed_blocks.append(blocks[i])
             blocks[i] = self._null_block
         if not _RECYCLE_ENABLED:
-            self.block_pool.free_blocks(removed_blocks)
+            self._free_split(removed_blocks)
             return
         to_free: list[KVCacheBlock] = []
         recycled = self._recycled_blocks[request_id]
@@ -614,7 +854,7 @@ class SingleTypeKVCacheManager(ABC):
             else:
                 to_free.append(blk)
         if to_free:
-            self.block_pool.free_blocks(to_free)
+            self._free_split(to_free)
         if not self._recycle_logged and recycled:
             self._recycle_logged = True
             logger.info(
@@ -695,7 +935,9 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         blocks = self.req_to_blocks[running_request_id]
         num_common_blocks = 0
         for block in blocks:
-            if block.ref_cnt == len(self.req_to_blocks):
+            # MNT-9 holds its own reference on pinned head blocks; discount it
+            # or every pinned block reads as "one more request than there is".
+            if block.ref_cnt - self._head_pin_ref(block) == len(self.req_to_blocks):
                 num_common_blocks += 1
             else:
                 break
@@ -758,6 +1000,7 @@ class MLAAttentionManager(FullAttentionManager):
             ref_cnt = block.ref_cnt
             if block.block_id in self._protected_prompt_block_ids:
                 ref_cnt -= 1
+            ref_cnt -= self._head_pin_ref(block)  # MNT-9's own reference
             if ref_cnt == expected_ref_cnt:
                 num_common_blocks += 1
             else:

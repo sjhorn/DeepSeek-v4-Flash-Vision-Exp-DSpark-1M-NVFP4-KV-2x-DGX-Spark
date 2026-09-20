@@ -72,6 +72,18 @@ services:
       # duplicate (hash, group) into a dict while lookups return only one, so the
       # stale copy holds an LRU slot forever. Remove this line to roll back.
       - ./patches/patch7-block_pool-dedupe.py:/opt/env/lib/python3.12/site-packages/vllm/v1/core/block_pool.py:ro
+      # Patch 8 / MNT-8 (ported from vllm#43447): adds FreeKVCacheBlockQueue.prepend_n
+      # so a request's UNCACHED scratch pages can go to the front of the free queue
+      # and be reused before any cached prefix block. Stock appends both, so every
+      # turn buries worthless pages behind live prefixes the allocator then evicts.
+      # Inert until the flags file turns it on. Remove this line to roll back.
+      - ./patches/patch8-kv_cache_utils.py:/opt/env/lib/python3.12/site-packages/vllm/v1/core/kv_cache_utils.py:ro
+      # MNT-8 / MNT-9 runtime flags, node-local and NOT part of the repo (like
+      # ~/vision-stage). Container env cannot change on a running engine, so an
+      # env-gated A/B costs one cold boot per arm; this file is re-read once a
+      # second instead. start-deepseek-v4-flash-dspark.sh creates it with both
+      # mechanisms OFF. Flip with local-ops/kv-flags.sh.
+      - /var/tmp/vllm-kv-flags:/etc/vllm-kv-flags:ro
       # Patch 5 (upstream patches/0005-suppress-stops-in-reasoning.patch): keeps
       # client stop strings dormant inside the reasoning segment, so a CoT that
       # restates a stop phrase cannot decapitate generation before </think> and

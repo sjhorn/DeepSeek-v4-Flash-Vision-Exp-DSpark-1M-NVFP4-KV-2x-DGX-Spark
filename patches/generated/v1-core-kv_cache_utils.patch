@@ -1,0 +1,41 @@
+--- a/vllm/v1/core/kv_cache_utils.py
++++ b/vllm/v1/core/kv_cache_utils.py
+@@ -326,6 +326,38 @@ class FreeKVCacheBlockQueue:
+ 
+         self.num_free_blocks += 1
+ 
++    def prepend_n(self, blocks: list[KVCacheBlock]) -> None:
++        """MNT-8: put a list of blocks at the FRONT of the free list, so they
++        are the next blocks handed out by ``popleft``/``popleft_n``.
++
++        Ported from vllm#43447.  Allocation pops from the head, so appending a
++        request's uncached scratch pages (the default) buries them behind every
++        cached prefix block in the queue and makes the allocator evict live
++        prefixes first.  Blocks with no prefix-cache value belong at the head.
++
++        Args:
++            blocks: The blocks to prepend.
++        """
++        if len(blocks) == 0:
++            return
++
++        first_block = self.fake_free_list_head.next_free_block
++        if first_block is None:
++            raise RuntimeError(
++                "next_free_block of fake_free_list_head should always exist"
++            )
++
++        prev_block: KVCacheBlock = self.fake_free_list_head
++        for block in blocks:
++            block.prev_free_block = prev_block
++            prev_block.next_free_block = block
++            prev_block = block
++
++        prev_block.next_free_block = first_block
++        first_block.prev_free_block = prev_block
++
++        self.num_free_blocks += len(blocks)
++
+     def append_n(self, blocks: list[KVCacheBlock]) -> None:
+         """Put a list of blocks back into the free list
+ 

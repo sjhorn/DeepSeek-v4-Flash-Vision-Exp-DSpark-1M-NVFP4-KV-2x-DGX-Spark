@@ -57,7 +57,7 @@ commit.** See `docs/local/TOOLING.md`.
 ```bash
 git push head local/main && git push worker local/main
 # then: both nodes must report the new commit and 0 dirty, and
-# scripts/check-local-patches.sh must be 17/17 on each.
+# scripts/check-local-patches.sh must be 20/20 on each.
 ```
 
 Both nodes are `receive.denyCurrentBranch = updateInstead`, so a push updates their **working
@@ -173,7 +173,9 @@ Two habits that have already paid for themselves here:
   `snap.firmware-updater.firmware-notifier.{timer,service}` (user units).
 - **Currently deployed: Vision-Exp**, `MAX_MODEL_LEN=1048576`, `MAX_NUM_SEQS=12`,
   `GPU_MEMORY_UTILIZATION=0.86`, `COMPILATION_CONFIG={"max_cudagraph_capture_size":72}`,
-  `PROTECTED_FRACTION=0.50`, `MTP_NUM_TOKENS=5`. Re-check with
+  `PROTECTED_FRACTION=0.50`, `MTP_NUM_TOKENS=5`. **`MNT-8`/`MNT-9` are mounted but OFF** —
+  they are gated on `/var/tmp/vllm-kv-flags/flags.json`, not on env, so an arm can be flipped
+  without a restart (`bash local-ops/kv-flags.sh`); see `CACHE_TEST.md`. Re-check with
   `docker logs <container> | grep 'non-default args'` rather than trusting this line;
   `docs/local/status/CONFIG.md` carries the change history.
 - **A bind mount to the wrong path fails SILENTLY** — the container starts, the API answers, the

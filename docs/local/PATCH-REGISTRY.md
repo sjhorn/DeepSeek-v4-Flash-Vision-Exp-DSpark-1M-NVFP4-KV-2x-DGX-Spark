@@ -16,6 +16,7 @@ would orphan that history.
 |---|---|---|---|
 | `IMG-` | baked into the runtime image | an image **rebuild** on both nodes | `recipe/overlay/` |
 | `MNT-` | bind-mounted whole file, one per target | remove the compose line, **restart** | `patches/*.py` |
+| *(flags)* | `MNT-8`/`MNT-9` only: a JSON file on a bind-mounted **directory**, re-read once a second | flip a flag, **no restart** | `/var/tmp/vllm-kv-flags/flags.json`, node-local |
 | `API-` | bind-mounted, **seven patches share one file** | per-patch env kill switch, **restart** | `patches/anthropic_*.py` |
 | `PLG-` | an **added** site-packages plugin, found by entry point | remove the compose lines, **restart** | `patches/prefill_plugin/` |
 
@@ -45,6 +46,8 @@ Verify with `bash scripts/check-patch4.sh <containers>`. `IMG-1..3` have no equi
 | `MNT-6a` | **"Patch 5"** — see below | `v1/core/single_type_kv_cache_manager.py` | `PROTECTED_FRACTION=<f>` (0.50 deployed; compose default 0.30) | ″ | bounds the prompt-block protection set. Retention ≈ protected cap + 5–7%: 0.30 → 280,690 tokens, 0.50 → 457,079 | [`PREFIX-CACHE.md`](PREFIX-CACHE.md) |
 | `MNT-6b` | Patch 6 | ″ (same file) | `SWA_RECYCLE=0` (on) | ″ | sliding-window groups recycle their own pages in-request instead of churning the shared LRU. **Investigated and exonerated** as a retention leak — do not disable it expecting better retention | [`PATCHES-KV.md`](PATCHES-KV.md) |
 | `MNT-7` | Patch 7 | `v1/core/block_pool.py` | none | ″ | commit-time same-content dedupe; **3.9x retention** (72,109 → 280,690 tokens), needle 5/5, no throughput cost. 14 lines, one hunk | [`PATCHES-KV.md`](PATCHES-KV.md) |
+| `MNT-8` | — | `v1/core/kv_cache_utils.py` **+** `block_pool.py` **+** `single_type_kv_cache_manager.py` | `free_queue_prepend_uncached` in the **flags file** (**off**) | remove the compose line | ported from vllm#43447: frees a request's **uncached** pages to the FRONT of the free queue and cached ones to the back. Stock appends both, so every turn buries scratch pages behind live prefixes the allocator then evicts. **Not yet measured** | [`../../CACHE_TEST.md`](../../CACHE_TEST.md) |
+| `MNT-9` | — | `v1/core/single_type_kv_cache_manager.py` | `pin_static_head` in the **flags file** (**off**) | ″ | pins the static head (tools + system, ending at the first `<｜User｜>`, token `128803`) in a budget **reserved** from `MNT-6a`'s, released LRU by reuse. `MNT-6a` pins the whole prompt prefix under a FIFO cap, so one long body evicts every other agent's head. **Not yet measured** | [`../../CACHE_TEST.md`](../../CACHE_TEST.md) |
 
 > **`MNT-6a` was the one genuine numbering error, fixed 2026-09-20.** The protected-block cap was
 > called "Patch 5" in prose *and* in its own `logger.info` label, while
@@ -93,6 +96,12 @@ file, matching the anchors below.
 ## Verifying the registry against reality
 
 ```bash
+# which MNT-8 / MNT-9 arm each node is running (no restart needed to change it)
+bash local-ops/kv-flags.sh
+
+# MNT-8 / MNT-9 ordering and refcount logic, against the real vLLM classes, no GPU
+HOST=spark-45ea bash local-ops/kv-mech-tests.sh
+
 # every bind-mounted patch is actually in the file the container imports, on BOTH nodes
 REMOTE=shorn@spark-45ea bash scripts/check-local-patches.sh <container>
 REMOTE=shorn@spark-da08 bash scripts/check-local-patches.sh <container>
@@ -107,7 +116,7 @@ bash scripts/regen-local-patches.sh --check
 python3 local-ops/verify-server.py
 ```
 
-`check-local-patches.sh` checks **17 rows** and asserts a distinctive **code** marker, never a comment, so a comment-only
+`check-local-patches.sh` checks **20 rows** and asserts a distinctive **code** marker, never a comment, so a comment-only
 edit cannot fake a pass. It checks every container you name, which is how head/worker drift shows
 up — the start script's `scp patches/*.py` glob fixes drift at start time, but nothing verified it
 afterwards.

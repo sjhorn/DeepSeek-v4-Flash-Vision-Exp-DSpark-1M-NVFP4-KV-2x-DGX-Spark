@@ -43,6 +43,15 @@ writes a format nobody thought to list.
 | `local-ops/toolref-probe.py` | `tool_reference` probe — does it 200, does any schema survive, can the model then call the tool. |
 | `local-ops/toolquality.py` | Tool-selection quality under `ENABLE_TOOL_SEARCH` true vs false. |
 
+## KV mechanism flags and tests (MNT-8 / MNT-9)
+
+| tool | what |
+|---|---|
+| `local-ops/kv-flags.sh` | read or flip the `MNT-8` / `MNT-9` runtime flags on **both** nodes. No restart: the engine re-reads `/var/tmp/vllm-kv-flags/flags.json` once a second. `reset` returns to stock behaviour. |
+| `local-ops/kv-mech-tests.sh` | stage the patched KV files into a container and run `kv-mech-tests.py` (13 checks) against the **real** vLLM classes. No GPU, no restart, never touches the node's repo or the running engine. |
+
+Arms and what each is supposed to move: `CACHE_TEST.md`.
+
 ## Operations
 
 | tool | what it does |

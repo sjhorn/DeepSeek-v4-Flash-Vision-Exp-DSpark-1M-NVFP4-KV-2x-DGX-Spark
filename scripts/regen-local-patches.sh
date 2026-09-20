@@ -30,6 +30,7 @@ anthropic_serving_inline_system.py:entrypoints/anthropic/serving.py
 patch5-detokenizer.py:v1/engine/detokenizer.py
 patch6-single_type_kv_cache_manager.py:v1/core/single_type_kv_cache_manager.py
 patch7-block_pool-dedupe.py:v1/core/block_pool.py
+patch8-kv_cache_utils.py:v1/core/kv_cache_utils.py
 "
 
 mkdir -p "$OUT"

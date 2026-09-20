@@ -1,6 +1,21 @@
 # CACHE_TEST.md — three candidate prefix-cache mechanisms against our tree, and how we would test them
 
-**Status: analysis only. Nothing implemented, nothing deployed, no restart spent.**
+**Status (2026-09-20): Mechanisms 1 and 3 are IMPLEMENTED and mounted, both OFF. Mechanism 2 is
+not implemented. Nothing is measured, and no restart has been spent.**
+
+`MNT-8` (Mechanism 1) and `MNT-9` (Mechanism 3) ship gated on a flags file rather than container
+env, so the whole A/B costs **one** restart instead of three:
+
+```bash
+bash local-ops/kv-flags.sh                               # arm each node is running
+bash local-ops/kv-flags.sh free_queue_prepend_uncached 1 # arm B
+bash local-ops/kv-flags.sh pin_static_head 1             # arm C
+bash local-ops/kv-flags.sh reset                         # arm A
+HOST=spark-45ea bash local-ops/kv-mech-tests.sh          # 13 offline checks, no GPU
+```
+
+Neither flag does anything until the next restart imports the mounted files; after that, arms flip
+with no restart at all.
 Assessed 2026-09-20 against the running image `vllm-dspark-runtime:dspark-nvfp4-stage-c`
 (vLLM `0.21.1rc1.dev339+g1967a5627bc3`), by diffing the PR against the image's real sources —
 `patches/pristine/` plus `kv_cache_utils.py` / `kv_cache_coordinator.py` read out of the container.
@@ -254,11 +269,11 @@ B-pin in the same place inherits the correct ordering**; no scheduler change is 
 
 ### 3a.8 Test arm
 
-Add as arm **C**, its own restart, after B is decided:
+Add as arm **C** — no longer its own restart, since the flags are file-gated:
 
 | arm | flag | note |
 |---|---|---|
-| C | `VLLM_PIN_STATIC_HEAD=1` (default 0) | Mechanism 3 on top of whatever B concluded |
+| C | `pin_static_head: 1` in the flags file (default 0) | Mechanism 3, with Mechanism 1 set to whatever B concluded |
 
 Its primary measurement is **not** the six-turn survival probe — it is **cross-agent**: start
 session 1, let it pin, then measure `engine_cached_tokens` on the *first* turn of session 2 with a
@@ -285,6 +300,47 @@ Anyone drafting the overlay should work against those four plus the generated di
 against upstream vLLM at any tag: this fork's hybrid re-alignment, `eagle_extra_cache_blocks` and
 prompt protection do not exist upstream, and a patch written against a stock tree will not apply.
 
+## 3b. What was actually built (2026-09-20)
+
+| id | files | flag (default) |
+|---|---|---|
+| `MNT-8` | `patches/patch8-kv_cache_utils.py` (new mount: `prepend_n`), `patch7-block_pool-dedupe.py` (`free_blocks(..., prepend=)`), `patch6-single_type_kv_cache_manager.py` (`_free_split()` at all three free sites, including `free()` and the `MNT-6b` leftovers) | `free_queue_prepend_uncached` (**0**) |
+| `MNT-9` | `patches/patch6-single_type_kv_cache_manager.py` (`_static_head_boundary`, `_head_pin_candidates`, `_maybe_pin_static_head`, `_trim_head_pins`, `_release_head_pin`, `_head_pin_ref`) | `pin_static_head` (**0**), `head_pin_fraction` (0.05) |
+
+Decisions worth knowing before reading the diff:
+
+- **The pin budget is reserved, not shared.** Head pins live in `_head_pins` / `_pinned_head_block_ids`,
+  never in `MNT-6a`'s `_protected_prompt_block_queue`, so `MNT-6a`'s FIFO trim cannot take them —
+  §3a.7 said this was non-negotiable.
+- **The reuse signal is the re-pin itself.** A later request re-pinning a head we already hold is
+  the only evidence available in this layer that the head was matched; it moves that head to the
+  back of the LRU. Heads nothing returns for age out first.
+- **`get_num_common_prefix_blocks` discounts the pin reference** in both managers that count
+  references. Without that, every pinned block reads as "one more request than there is" and
+  cascade attention's common-prefix count is wrong.
+- **`MNT-9` hooks the base `cache_blocks`**, i.e. the same place `MNT-6a` protects from — after
+  `remove_skipped_blocks` in the same `allocate_slots` call, which is the ordering §3a.5 required.
+- **The head scan is memoised per request and capped at 65,536 tokens.** `cache_blocks` runs every
+  scheduler step, and a 1M-token prompt must never be rescanned.
+- **B floors to `cache_alignment_tokens` (256 here) and is dropped below 512 tokens.**
+
+Verified offline against the real vLLM classes, in-container, no GPU and no restart —
+`HOST=spark-45ea bash local-ops/kv-mech-tests.sh`, 13 checks:
+
+```
+PASS 1 prepend_n ordering: [4, 5, 0, 1]          PASS 8  no pin before prefill crosses B
+PASS 2 prepend_n empty/refill                    PASS 9  LRU trim released the least-recently-reused head
+PASS 3 free_blocks(prepend=) -> [3, 4, 1, 2]     PASS 10 SWA pins only the 9-block tail ending at B
+PASS 4 flags: default off, file on, env wins     PASS 11 _head_pin_ref discounts the pin reference
+PASS 5 full-attention pins exactly [0,B)         PASS 12 flag off => inert
+PASS 6 re-pin is a hit, not a second reference   PASS 13 heads below the 512-token floor are not pinned
+PASS 7 uncached blocks inside the head skipped
+```
+
+**What these do not establish:** anything about hit rate, retention or latency on real traffic.
+They are correctness tests for ordering and refcounts, which is what silently corrupts a block pool;
+the question the arms answer is untouched by them.
+
 ## 4. The test plan
 
 Written before the change, so the result cannot be rationalised afterwards.
@@ -301,10 +357,11 @@ Secondary, free per request: `engine_cached_tokens` (`API-14`) on every response
 
 ### 4.2 Arms
 
-| arm | `VLLM_FREE_QUEUE_PREPEND_UNCACHED` | note |
+| arm | flags file | note |
 |---|---|---|
-| A (control) | 0 | must reproduce today's decay, or the run is void |
-| B | 1 | Mechanism 1 only |
+| A (control) | both 0 (`kv-flags.sh reset`) | must reproduce today's decay, or the run is void |
+| B | `free_queue_prepend_uncached: 1` | Mechanism 1 only |
+| C | `pin_static_head: 1`, prepend back to 0 | Mechanism 3 only (§3a.8) |
 
 Mechanisms 2 and 3 are **not** in this matrix. Each gets its own restart later (arm C is
 §3a.8), because stacking them makes an ambiguous result uninterpretable — the mistake

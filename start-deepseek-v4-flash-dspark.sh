@@ -123,6 +123,22 @@ REMOTE_COMPOSE="cd $REMOTE_WORKER_DIR && env -u MASTER_ADDR -u MASTER_PORT -u NO
 
 echo "Syncing DSpark deployment files to ${WORKER_HOST}:${WORKER_DIR}"
 ssh "$WORKER_HOST" "mkdir -p $REMOTE_WORKER_DIR"
+
+# MNT-8 / MNT-9 flags file. Node-local, never in the repo, and created OFF: the
+# compose bind-mounts the directory, and a missing one would be created by Docker
+# as an empty root-owned dir -- which works, but leaves no record of what the
+# flags are or that they exist. Existing files are left alone, so an A/B arm set
+# with local-ops/kv-flags.sh survives a restart.
+KV_FLAGS_DIR=/var/tmp/vllm-kv-flags
+for host in "" "$WORKER_HOST"; do
+  if [ -z "$host" ]; then
+    mkdir -p "$KV_FLAGS_DIR"
+    [ -f "$KV_FLAGS_DIR/flags.json" ] || \
+      printf '{"free_queue_prepend_uncached": 0, "pin_static_head": 0}\n' > "$KV_FLAGS_DIR/flags.json"
+  else
+    ssh "$host" "mkdir -p $KV_FLAGS_DIR && [ -f $KV_FLAGS_DIR/flags.json ] || printf '{\"free_queue_prepend_uncached\": 0, \"pin_static_head\": 0}\n' > $KV_FLAGS_DIR/flags.json"
+  fi
+done
 scp "$COMPOSE_FILE" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/docker-compose.dspark.yml"
 scp "$ENV_FILE" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/.env.dspark"
 

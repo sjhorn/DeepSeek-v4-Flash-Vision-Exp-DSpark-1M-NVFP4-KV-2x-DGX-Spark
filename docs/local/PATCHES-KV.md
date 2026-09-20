@@ -1,6 +1,6 @@
-# PATCHES-KV.md — the KV / prefix-cache core patches (MNT-5, MNT-6, MNT-7)
+# PATCHES-KV.md — the KV / prefix-cache core patches (MNT-5 … MNT-9)
 
-Three bind-mounted files inside vLLM's KV machinery:
+Four bind-mounted files inside vLLM's KV machinery:
 
 | id | file | target | what |
 |---|---|---|---|
@@ -8,6 +8,13 @@ Three bind-mounted files inside vLLM's KV machinery:
 | `MNT-6a` | `patches/patch6-single_type_kv_cache_manager.py` | `v1/core/single_type_kv_cache_manager.py` | bound the prompt-block protection set |
 | `MNT-6b` | ″ | ″ | sliding-window groups recycle their own pages instead of churning the shared LRU |
 | `MNT-7` | `patches/patch7-block_pool-dedupe.py` | `v1/core/block_pool.py` | commit-time same-content dedupe |
+| `MNT-8` | `patches/patch8-kv_cache_utils.py` (+ patch6, patch7) | `v1/core/kv_cache_utils.py` ″ | uncached pages to the FRONT of the free queue |
+| `MNT-9` | `patches/patch6-single_type_kv_cache_manager.py` | `v1/core/single_type_kv_cache_manager.py` | pin the static head, in a budget reserved from `MNT-6a` |
+
+> **`MNT-8` and `MNT-9` are mounted but OFF, and neither is measured yet.** They are the two
+> mechanisms `CACHE_TEST.md` argues for; the write-up, the arms and the per-group numbers live
+> there, not here. Unlike every other patch in this file they are **not** gated on container env —
+> see the flags note below.
 
 > **The "Patch 5" collision, fixed 2026-09-20.** The protected-block cap used to be called
 > "Patch 5" in this project's prose *and* in its own `logger.info` label, while
@@ -67,6 +74,40 @@ pages looked like a retention leak, but it is correct hygiene: only `ref_cnt == 
 solely by that request) are recycled, and their stale hash mapping must be dropped because the page
 is about to be overwritten. The recycling exists to *protect* other requests' prefixes from global
 LRU churn. Do not disable `VLLM_SWA_RECYCLE_SKIPPED_BLOCKS` expecting better retention.
+
+## MNT-8 / MNT-9 — gated on a file, not on env, so an arm costs no restart
+
+Container env cannot change on a running engine, so an env-gated A/B costs one 250-600s cold boot
+per arm and interrupts every session on the cluster. Both mechanisms therefore read
+`/var/tmp/vllm-kv-flags/flags.json` (bind-mounted at `/etc/vllm-kv-flags`, re-stat'ed at most once
+a second):
+
+```bash
+bash local-ops/kv-flags.sh                               # what each node is running
+bash local-ops/kv-flags.sh free_queue_prepend_uncached 1 # arm B
+bash local-ops/kv-flags.sh pin_static_head 1             # arm C
+bash local-ops/kv-flags.sh reset                         # arm A (stock behaviour)
+```
+
+Rules that follow from the design:
+
+- **The directory is mounted, not the file** — so an atomic replace (`os.replace`) is visible
+  inside the container. `kv-flags.sh` writes that way; editing in place risks a half-written file.
+- **A missing file, bad JSON or an unreadable path means every flag is OFF**, which is stock
+  behaviour. That is the safe direction, and it is also why a torn write cannot silently produce a
+  third arm.
+- **`VLLM_<FLAG_NAME>` in the container env always wins**, so a boot can pin an arm if a run ever
+  needs that. Nothing sets one today.
+- **A flip applies to the next request only.** It does not re-order blocks already freed or
+  un-pin what is pinned, so give an arm a fresh session rather than flipping mid-conversation.
+- The start script creates the file OFF on both nodes if it is absent, and leaves an existing one
+  alone — an arm survives a restart.
+
+Both mechanisms' ordering and refcount logic are tested offline against the real vLLM classes,
+no GPU and no restart: `HOST=spark-45ea bash local-ops/kv-mech-tests.sh` (13 checks — pin covers
+exactly `[0, B)`, a re-pin is a hit rather than a second reference, the SWA groups pin only the
+contiguous tail, the LRU trim releases the least-recently-reused head, and each flag is inert when
+off).
 
 **Unpatched sources** are tracked at `patches/pristine/`, and `patches/generated/*.patch` is our
 delta against them — that is what to read when assessing an upstream patch, and it needs no cluster
