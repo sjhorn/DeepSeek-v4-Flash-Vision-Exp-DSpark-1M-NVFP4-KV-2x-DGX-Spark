@@ -118,8 +118,8 @@ retention", confirmed on 0.22.1rc1) is **not in our 0.21.1rc1.dev339 runtime**.
 | **Free-queue ordering** — `prepend_n()`, `free_blocks(prepend=True)`, scratch blocks reused before cached ones, in `remove_skipped_blocks()` *and* `SlidingWindowManager.free()` | **Applies — port it.** It is the missing end-of-request half of `MNT-6b`, and the first mechanism that predicts multi-turn prefix decay while a single-turn head survives. Not yet implemented or measured. |
 | **`VLLM_PREFIX_CACHE_RETENTION_INTERVAL`** — sparse SWA checkpointing (`0`, or a multiple of the 256-token alignment such as `32768`) | **Applies in principle, second in line.** Our SWA groups cache densely *regardless* of any interval, because `kv_cache_coordinator.py:515` disables the mask under MTP. Adopting it means replacing that fork-local bail-out with upstream's eagle-aware mask — a live A/B, where a mistake reads as 0% hit. |
 
-Full analysis, the per-group block-size table and the porting surface:
-[`PREFIX-CACHE.md`](PREFIX-CACHE.md#upstream-vllm43447-deepseek-v4-prefix-cache-retention--what-applies-to-us-assessed-2026-09-20).
+Full analysis, the per-group block-size table, the porting surface and the test plan:
+[`CACHE_TEST.md`](../../CACHE_TEST.md).
 
 > **Cable topology — we have ONE cable, not two (checked 2026-09-03).** "Dual-HCA" here does not
 > mean two links. `rocep1s0f0` and `roceP2p1s0f0` report **the same `sys_image_guid`**

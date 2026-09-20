@@ -771,80 +771,18 @@ dropped at `single_type_kv_cache_manager.py:597` —
 (`num_speculative_tokens=5`) makes `use_eagle` true. Confirmed by A/B: eagle off is exactly
 monotone, eagle on is uniformly -256. Leave it; 256 tokens is 0.7% of a 36K head.
 
-## Upstream vllm#43447 ("DeepSeek-V4 prefix cache retention") — what applies to us (assessed 2026-09-20)
+## Upstream vllm#43447 ("DeepSeek-V4 prefix cache retention") — assessed 2026-09-20
 
-Upstream PR [vllm-project/vllm#43447](https://github.com/vllm-project/vllm/pull/43447) targets the
-exact pathology this document chases: on hybrid KV models, sliding-window allocations flush cached
-blocks out of the free queue, so prefix hits die within seconds. **It is not in our runtime**
-(0.21.1rc1.dev339+g1967a5627bc3) and it is not a drop-in — but our image is close enough to its
-base that both halves port, and one of them lands squarely on the open question in
-["What is NOT established"](#what-is-not-established).
+[vllm#43447](https://github.com/vllm-project/vllm/pull/43447) targets the exact pathology this
+document chases, and is **not in our runtime** (0.21.1rc1.dev339). Of its two halves:
 
-It has two independent mechanisms. **They have opposite verdicts for us.**
+- **Free-queue ordering** (scratch blocks reused before cached ones) **applies** — it is the missing
+  end-of-request half of `MNT-6b`, and the first mechanism that predicts *multi-turn* decay while a
+  single-turn head survives, i.e. a mechanism for the candidate left open in
+  ["What is NOT established"](#what-is-not-established) above.
+- **`VLLM_PREFIX_CACHE_RETENTION_INTERVAL`** applies in principle but is blocked behind the fork's
+  `eagle_extra_cache_blocks` bail-out, which makes our SWA groups cache densely regardless.
 
-### Mechanism 1 — free-queue ordering (uncached blocks reused first). **Applies. Strongest candidate we have.**
-
-Upstream adds `FreeKVCacheBlockQueue.prepend_n()`, `BlockPool.free_blocks(..., prepend=True)`, and
-splits every SWA free into two lists: blocks with `block_hash is None` (scratch — **prepend**, so
-they are the next thing reused) and blocks that carry a hash (real prefix-cache entries —
-**append**, so they die last). It does this in `remove_skipped_blocks()` **and in
-`SlidingWindowManager.free()`**.
-
-Our tree does neither. `SingleTypeKVCacheManager.free()` (pristine line 416) appends the whole
-request in reverse, cached and scratch alike, and allocation pops from the **head**:
-
-> every turn of a conversation ends by putting that turn's worthless scratch pages at the **back**
-> of the queue, so the next allocation evicts genuinely cached prefix blocks that sit in front of
-> them.
-
-`MNT-6b` already solves this for the *in-request* path — it keeps skipped pages inside the request
-instead of freeing them at all — but it does **not** cover the end-of-request path, and its own
-leftovers are appended (`free_blocks(leftover)`), i.e. exactly the wrong end. With five KV groups
-of page sizes 256 / 64 / 64 / 4 / 8 tokens, one turn frees thousands of tiny pages this way; the
-observed `MNT-6b` log for a single request is 1,008 pages in group 4 and 126 each in groups 1-2.
-
-This is the first concrete mechanism that predicts *multi-turn* decay while a single-turn head
-survives — which is where Phase A left the investigation. It is also cheap: `prepend_n` ports
-verbatim (our `FreeKVCacheBlockQueue` has the identical fake-head/fake-tail structure), and the
-call sites are files we already mount (`MNT-6*`, `MNT-7`) plus one new mount of `kv_cache_utils.py`.
-
-**Not yet implemented, not yet measured.** It needs a restart to test and is a hypothesis until it is.
-
-### Mechanism 2 — `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`. **Applies in principle; blocked behind a fork-local bail-out.**
-
-Upstream sparsifies which SWA checkpoints get cached at all: unset = dense (today's behaviour),
-`0` = only the latest replayable prompt boundary, positive multiple of `scheduler_block_size` =
-one tail per interval. It must be a multiple of the alignment, which here is
-`lcm(256,64,64,4,8) = 256`, so the author's suggested `32768` is legal for us.
-
-The catch is that **our SWA groups currently cache densely regardless**, and not by default:
-`kv_cache_coordinator.py:515` sets `mgr.eagle_extra_cache_blocks = 1` for SWA managers in EAGLE/MTP
-attention groups, and `_cache_block_mask()` then returns `None` — caching **every** block. We run
-MTP (`num_speculative_tokens=5`), so this is live. The in-image comment says the mask was too
-aggressive under eagle and gave 0% hit; upstream's replacement is eagle-aware (`shift = 1`) and is
-meant to be the correct version of that mask.
-
-What the mask would cost us, per 256-token alignment segment (`need = cdiv(127, block_size) + 1`,
-`sliding_window=128`):
-
-| group | page | blocks/segment | needed for a hit | cached today | cached with the mask | with `interval=32768` |
-|---|---|---|---|---|---|---|
-| 1, 2 | 64 | 4 | 3 | 100% | 75% | ~0.04% |
-| 4 | 8 | 32 | 17 | 100% | 53% | ~0.2% |
-| 3 | 4 | 64 | 33 | 100% | 52% | ~0.4% |
-
-So the win is real but **indirect** — it removes cached-but-unreachable SWA entries from the hash
-map and from the free queue, which is what makes Mechanism 1's cached/scratch split meaningful.
-Adopting it means re-litigating the fork's `eagle_extra_cache_blocks` bail-out against upstream's
-`shift`-aware mask, with a live A/B; a mistake here reads as 0% hit, not as a small regression.
-
-**Verdict: second, after Mechanism 1, and only with a hit-rate A/B in the same sitting.**
-
-### What this does NOT change
-
-- It does not supersede `MNT-6a`/`MNT-6b`/`MNT-7`. Mechanism 1 is the missing *end-of-request* half
-  of `MNT-6b`, not a replacement for it.
-- It says nothing about the API-side movers (`API-8`, `API-11a/b`, `API-13`), which are a different
-  failure entirely.
-- Upstream's own numbers (0% -> 74.3% hit) are for their workload on a later tree; they are not a
-  prediction for ours.
+Neither is implemented and neither is measured. **The analysis, the per-group page-size table, the
+porting surface and the test plan live in [`CACHE_TEST.md`](../../CACHE_TEST.md)** — not here, so
+the two cannot drift. Fold the result back into this document once it is measured.
