@@ -437,6 +437,16 @@ docker logs <container> | grep -A1 'vllm.stat_logger_plugins'
 #   - prefill_collector -> prefill_collector:PrefillCollector
 ```
 
+**Two traps in the endpoint, found 2026-09-21** (detail and the traffic measurement that exposed
+them: [`PREFIX-CACHE.md`](PREFIX-CACHE.md#concurrent-siblings)):
+
+- the cursor parameter is **`since`**, not `cursor`. An unknown parameter is ignored and falls back
+  to `0`, so `?cursor=N` silently returns the **whole ring** on every poll. The reply key
+  `next_since` is the hint.
+- `finish_reason` is `""` on every row, so an abort is indistinguishable from a normal finish.
+  `FinishedRequestStats` does carry `finish_reason` and `max_tokens_param`; recording them needs a
+  restart, so it is noted, not done.
+
 **Not established here.** No measurement is attached to this entry because it reports a number
 rather than changing one — decode, prompt and cache behaviour are untouched. Whether the per-turn
 rows actually settle the eviction-vs-invalidation question is the open work in `MERGE.md`, and is

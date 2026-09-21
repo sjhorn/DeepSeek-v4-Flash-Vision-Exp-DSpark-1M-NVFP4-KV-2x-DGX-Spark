@@ -826,3 +826,68 @@ that earlier boundary.
 None of the three is implemented and none is measured. **The analysis, the per-group page-size table, the
 porting surface and the test plan live in [`CACHE-TEST.md`](CACHE-TEST.md)** — not here, so
 the two cannot drift. Fold the result back into this document once it is measured.
+
+<a id="concurrent-siblings"></a>
+
+## Two engine requests per client turn — measured 2026-09-21, and it is the CLIENT
+
+**The question.** `Running: 2 reqs` regularly shows two requests that look like the same turn,
+decoding in parallel and landing as one answer in the UI. Asked whether that is deliberate.
+
+**It is two distinct HTTP requests from the client.** Nothing in the engine or in our patches
+duplicates a request on this traffic: since the current boot the engine finished **743** requests
+against **756** `POST /v1/messages` + 16 `/v1/chat/completions` + 3 `/v1/messages/count`. Engine
+requests are *fewer* than HTTP requests, so there is no fan-out. (`PREFIX_WATCH` cannot be used for
+this ratio — it is emitted from `_convert_anthropic_to_openai_request()`, once per HTTP request,
+so it would not see a re-run either way. The engine-row count is the witness.)
+
+Concurrency itself is by design: `MAX_NUM_SEQS=12`, continuous batching. Two rows in `Running:` are
+two engine requests, never one request shown twice.
+
+**Three concurrent request kinds, separated by their `PREFIX_WATCH` fingerprint** (one client
+session, 2026-09-21 14:33–14:38Z, correlated against `PLG-14b` rows by start time):
+
+| kind | `user0` / `sys` / `tools` | prompt | output | what it is |
+|---|---|---|---:|---|
+| main turn | `b39d` / `4898` / `5984` | 106–117K tok | 100–5,834 tok | the visible turn |
+| short sibling | **same three hashes**, prompt **+150 tok** | 112,807 tok | **7–13 tok** | a client side-call on the same conversation |
+| classifier | `3ace` / `f316` / **`4f53`** | ~31K tok | **10 tok** | the auto-mode permission classifier |
+
+`tools=4f53cda18c2b` is `sha256("[]")` — **no tools at all**, which is how the classifier is
+recognised without reading a prompt. Its size matches the captured classifier body documented in
+[`PATCHES-API.md`](PATCHES-API.md#api-9) (25,788 tokens then, ~31K now as the transcript grew), as
+does its ~10-token `<severity>N` output.
+
+**The overlap is real, not an artefact.** Worked example: main `21cbe2` started 14:36:13.4
+(112,654 prompt / 3,262 generated / 88.1s); the sibling `ca0376` started 14:37:31.1 — 78s inside
+that window — with 112,807 prompt (**+153 tokens**) and generated **7 tokens** in 1.3s. The
+`+150`-token delta and the 0.3–3.7s arrival gap recur across 25 pairs in one hour of log.
+
+**It is cheap, and that is the point.** Siblings and classifier alike arrive on a prompt the engine
+already holds: `cached_tokens/prompt_tokens` is 0.97–0.999 on every one of them (e.g. 112,384 of
+112,807). They cost a KV slot and ~1s, not a re-prefill. Two *long* generations overlapping is a
+different case — a subagent/fork inheriting the parent's context shows the same `user0` with a
+different `sys`+`tools` (`b667`/`cff1`/`4e8a` here) and generates in full, e.g. 82,547/8,360 tok
+over 413s beside 82,393/9,448 tok over 567s.
+
+**The one place a duplicate generation is ours.** `create_messages()` in
+`patches/anthropic_serving_inline_system.py`: when a request carries a *server-side* tool
+(`web_search_*`/`web_fetch_*`) and the model does **not** call it, round 0 runs the whole answer
+non-streaming, discards it, and re-runs the identical prompt with `stream=True`. That is two full
+generations for one HTTP request — **sequential, never parallel**, and identical in prompt length.
+No such pair appears in the current ring, so it is not firing on this traffic; if it ever does, the
+signature is two rows with *exactly* equal `prompt_tokens` and no overlap.
+
+### Two instrument traps found while measuring this
+
+- **The uvicorn access line is logged when the response STARTS, not when it ends.** Every
+  `POST /v1/messages` line lands 0.3–1.0s after its `PREFIX_WATCH` line, including for requests
+  that then decode for 400s. It is useless as a completion timestamp — reconstruct durations from
+  `PLG-14b`'s `e2e_s` instead. An in-flight count built by differencing arrivals against these
+  lines is wrong.
+- **`PLG-14b`'s cursor parameter is `since`, not `cursor`.** An unknown parameter is silently
+  ignored and defaults to 0, so `?cursor=N` returns the **whole ring** on every poll and looks like
+  an engine under continuous load. The reply's key is `next_since`, which is the hint.
+- `finish_reason` is `""` on every row, so an aborted request is not distinguishable from a
+  completed one there. `FinishedRequestStats` does carry the field (and `max_tokens_param`, which
+  the plugin does not record); not chased, since it needs a restart to change.
