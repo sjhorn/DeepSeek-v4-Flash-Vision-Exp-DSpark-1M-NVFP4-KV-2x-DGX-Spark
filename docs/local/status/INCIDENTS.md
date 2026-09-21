@@ -609,7 +609,38 @@ row that passes while `docker exec <c> grep -c '<marker>' <file>` returns 0.
 **The general lesson** — a fail-closed check is only fail-closed if you have watched it fail. This
 one was added as a backstop after a near-miss, and had a whole class of rows it could not fail on.
 
-### An experiment's flags were being rewritten by ANOTHER session on the same box (2026-09-20/21)
+### "Another session rewrote our flags" — MISDIAGNOSED. It was `kv-flags.sh` itself (corrected 2026-09-21)
+
+**The entry below is wrong about the cause and is kept only as a record of the error.** No other
+session was involved on either occasion. `local-ops/kv-flags.sh` carried two example lines in its
+header that had **lost their leading `#`**, above `set -uo pipefail`:
+
+```
+  bash local-ops/kv-flags.sh swa_recycle 0          # line 12 — no '#'
+  bash local-ops/kv-flags.sh pin_static_head 1      # line 13 — no '#'
+```
+
+Those were the first executable statements in the file, so **every** invocation ran them —
+including the no-argument one whose only job is to *print* the flags. See the fork-bomb entry
+below for the mechanism.
+
+**Why it looked like another session.** The original trace captured
+`+ bash local-ops/kv-flags.sh swa_recycle 0` looping and concluded someone else was issuing it.
+That command was the *script running its own header*. And the flags it left —
+`swa_recycle: 0, pin_static_head: 1` — are exactly the arguments on those two lines, which is the
+signature to recognise: **if the flags ever read precisely that pair, suspect this bug, not a
+colleague.** As the recursion unwinds, each level falls through to the real script and reaches
+`ssh`, so the writes really did land on both nodes.
+
+Confirmed 2026-09-21: the bug was present in the file at commit `b1dd333`, i.e. before any of that
+day's edits, and reproduced identically at 08:10:47Z — same two keys, same values, both nodes.
+
+**What survives from the entry below:** rules 1, 2 and 4 are good practice regardless of cause, and
+rule 4 especially — check `docker exec … cat /etc/vllm-kv-flags/flags.json`, because it proves what
+the *engine* sees. What does not survive is the attribution, and the conclusion that a shared box
+means unattributable flag changes.
+
+### An experiment's flags were being rewritten by ANOTHER session on the same box (2026-09-20/21) — SUPERSEDED, see above
 
 **Symptom.** Mid-experiment, `/var/tmp/vllm-kv-flags/flags.json` changed on both nodes to settings
 nobody in this session had set (`pin_static_head: 1, swa_recycle: 0` — two arms mixed). It happened
@@ -633,7 +664,60 @@ measurement is equally void. Two sessions can also silently interleave arms with
 4. Prefer `docker exec … cat /etc/vllm-kv-flags/flags.json` for the final check: it proves what the
    *engine* sees, not what the host file says.
 
-### `kv-flags.sh` leaked a stuck `ssh` per call, and exhausted the Mac's process table (2026-09-20)
+### `kv-flags.sh` fork-bombed the laptop from its own header comment (2026-09-21)
+
+**Symptom.** The Mac becomes unable to fork: `(eval):1: fork failed: resource temporarily
+unavailable` on almost any command, intermittently recovering and failing again. `ulimit -u` shows
+8000 and a normal `ps` shows only ~450 processes — **because `ps` itself cannot fork to produce the
+real count.** Nothing on the cluster is affected; the engine serves normally throughout.
+
+**Root cause.** Two example lines in the script's header had lost their leading `#`:
+
+```
+  bash local-ops/kv-flags.sh swa_recycle 0          # line 12 — no '#'
+  bash local-ops/kv-flags.sh pin_static_head 1      # line 13 — no '#'
+```
+
+They sat **above `set -uo pipefail`**, making them the first executable statements in the file. So
+every invocation ran line 12, which re-ran the script, which reached its own line 12.
+
+**Not an exponential fork bomb — an infinitely deep chain**, one child per level, each parent
+blocked on a child that never returns. The evidence distinguishes the two:
+
+| observation | meaning |
+|---|---|
+| consecutive ppids (66037 → 66038 → 66039 …), exactly one child each | a chain, not a tree |
+| **6,518** procs with `swa_recycle 0` vs **3** with `pin_static_head 1` | line 12 recurses; line 13 is all but unreachable |
+| 8,000-process cap reached in seconds | too fast to catch interactively |
+
+**The no-argument invocation was the dangerous one.** `bash local-ops/kv-flags.sh` with no args
+exists purely to *print* the current flags — the most innocuous call in the file — and it detonated
+identically. It does not take running an experiment to trigger.
+
+**It reached the nodes.** As the chain unwinds (a child exits when `fork` fails), each level falls
+through to the real script and executes it with its own arguments, reaching the `ssh` calls. Both
+nodes' flags files were rewritten to exactly `swa_recycle: 0, pin_static_head: 1` — the two lines'
+arguments — at 08:10:47Z. **This is what the "another session rewrote our flags" incident above
+actually was, on both occasions.**
+
+**It defeats its own cleanup.** The process table is full, so the `pkill` that would fix it cannot
+fork either. What works is retrying `pkill -9 -f '[k]v-flags'` until one attempt gets a slot — the
+bracket form matters, because `pkill -f kv-flags` also matches the shell you typed it in and can
+kill your own session.
+
+**Fix.** Both lines commented, with a note above them recording this. Verified:
+
+```bash
+awk 'NR<71 && /^[^#]/ && NF' local-ops/kv-flags.sh | wc -l   # MUST be 0
+bash -n local-ops/kv-flags.sh
+```
+
+**The general rule this establishes:** in any script here, **executable content must never appear
+above `set -uo pipefail`**, and a usage block full of copy-pasteable command lines is exactly where
+a dropped `#` becomes self-execution. Present in the file at `b1dd333` and earlier — it was not
+introduced by the edits of the day it was found.
+
+### `kv-flags.sh` leaked a stuck `ssh` per call, and exhausted the Mac's process table (2026-09-20) — CAUSE CORRECTED, see above
 
 **Symptom.** `local-ops/kv-flags.sh: fork: Resource temporarily unavailable`, hundreds of lines,
 then every local command failed — `echo` included. A single `kv-flags.sh` invocation also hit a

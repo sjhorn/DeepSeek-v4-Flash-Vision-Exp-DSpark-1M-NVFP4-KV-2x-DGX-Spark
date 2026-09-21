@@ -12,6 +12,49 @@ boot log, what changed, and which start script was used. That is the working agr
 > Moved verbatim from `STATUS.md` during the 2026-09-20 doc split.
 
 
+## Boot metrics (2026-09-21 08:49Z boot: `MNT-10` + the `MNT-6c` code default)
+
+**Restart spent with a specific ask, to stop one long prefill starving every decode behind it.**
+Diagnosis and evidence: [`INCIDENTS.md`](INCIDENTS.md) "Decode collapses to ~2 tok/s beside a long
+prefill"; mechanism: [`../PATCHES-KV.md`](../PATCHES-KV.md) `MNT-10`.
+
+| | |
+|---|---|
+| stopped | 08:47Z, both sides, cleanly |
+| API answering | **08:52Z — 220s cold boot**, the fastest recorded here |
+| **GPU KV cache size** | **2,536,173 tokens** (**2.42x** at 1,048,576) |
+| protected block cap | 1,708 blocks/group — pool **17,088** blocks, 5 managers, fraction 0.50 |
+| started by | `start-deepseek-v4-flash-dspark.sh`, detached |
+| what changed | `MNT-10` (new `v1/core/sched/scheduler.py` mount), `--long-prefill-token-threshold 2048`, and `MNT-6c`'s code default flipped `True`→`False` |
+
+KV pool 2,536,173 against the 15:34Z boot's 2,517,769 — a **0.7% swing**, well inside the
+documented ~11% per-boot variance.
+
+**Post-boot checks:** `check-local-patches.sh` **22/22 on both nodes, 0 FAIL** (up from 21 rows;
+`MNT-10` added), `check-patch4.sh` OK, smoke test OK, and a 9,011-token prefill confirmed `MNT-6a`
+logging for all five KV groups.
+
+**The check that actually mattered:** `docker logs … | grep 'non-default args'` shows
+`'long_prefill_token_threshold': 2048`. **This is the only proof the setting took** — vLLM logs the
+value only inside a `max_num_partial_prefills > 1` branch, which is false at our settings, so the
+boot log is otherwise silent about it. A future boot that skips this grep cannot tell whether
+`MNT-10` is armed.
+
+> **`MNT-6a`'s cap lines are NOT emitted at boot — CORRECTED.** `CLAUDE.md` and earlier notes here
+> say the boot log "carries" them. It does not: `_max_protected_prompt_blocks()` is called from
+> `_protect_prompt_blocks()`, so the five lines appear only after the first prefill large enough to
+> protect blocks. A trivial smoke test does not do it; 9,011 tokens did. Absence immediately after a
+> boot is **not** evidence the patch is missing — use `check-local-patches.sh` for that.
+
+> **The flags file survived the restart carrying `pin_static_head: 1, swa_recycle: 0`** (mtime
+> 08:10Z). It was first recorded here as another session's leftover arm. **That was wrong** — it was
+> written by *this* session's own first command, via the `kv-flags.sh` header bug (see
+> [`INCIDENTS.md`](INCIDENTS.md), "`kv-flags.sh` fork-bombed the laptop"). Reset to the recommended
+> state afterwards and confirmed through `docker exec … cat /etc/vllm-kv-flags/flags.json` on both
+> nodes. The durable lesson stands regardless of who wrote it: `/var/tmp` is node-local, the start
+> script does not recreate it, so **a restart does not return the flags to the recommended state —
+> check them after every boot.**
+
 ## Boot metrics (2026-09-20 15:34Z boot: make `MNT-8` / `MNT-9` live for the A/B)
 
 **Restart spent deliberately, with a specific ask, to run arms A and B of `CACHE_TEST.md`.**

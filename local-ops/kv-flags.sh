@@ -9,9 +9,23 @@
 #   bash local-ops/kv-flags.sh                     # show both nodes
 #   bash local-ops/kv-flags.sh free_queue_prepend_uncached 1
 #   bash local-ops/kv-flags.sh swa_recycle_cached 0   # arm E -- the likely fix
-  bash local-ops/kv-flags.sh swa_recycle 0          # arm D -- MNT-6b off entirely
-  bash local-ops/kv-flags.sh pin_static_head 1
+#   bash local-ops/kv-flags.sh swa_recycle 0          # arm D -- MNT-6b off entirely
+#   bash local-ops/kv-flags.sh pin_static_head 1
 #   bash local-ops/kv-flags.sh reset               # the RECOMMENDED state (keeps the fix)
+#
+# THE TWO LINES ABOVE LOST THEIR '#' ONCE AND FORK-BOMBED THE LAPTOP. They sit
+# above `set -uo pipefail`, so they were the FIRST executable statements in the
+# file -- which means EVERY invocation ran them, including the no-argument one
+# whose entire job is to print the current flags. Each ran
+# `bash local-ops/kv-flags.sh swa_recycle 0`, which reached the same line and
+# did it again: not an exponential bomb but an infinitely deep chain, one child
+# per level, which is why `ps` showed thousands of bash processes each with
+# exactly one bash child. It reached the 8000-process per-uid cap in seconds
+# and left the machine unable to fork at all -- including unable to fork the
+# pkill that would have cleaned it up.
+#
+# It never reached the ssh below, so no node was touched; the damage was
+# entirely local. If you edit this block, keep every example commented.
 #
 # Flags (defaults OFF, which is stock behaviour -- EXCEPT the two noted below,
 # swa_recycle_cached and long_prefill_token_threshold, whose defaults are ours):
