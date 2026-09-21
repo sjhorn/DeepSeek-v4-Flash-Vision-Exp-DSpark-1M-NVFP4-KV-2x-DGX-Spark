@@ -652,6 +652,80 @@ when typed by hand and hangs when run from a background task or a loop.
 leak, never ordinary load. For a multi-node flag write, one `ssh` per node beats four script
 invocations (~16 ssh).
 
+### Decode collapses to ~2 tok/s beside a long prefill — scheduler budget starvation, NOT KV and NOT the cache bug (2026-09-21)
+
+**Symptom.** A real Claude Code session with subagents running reports decode at ~2 tok/s where it
+should sit near 30. KV usage looks "fine" (44-67%), so it does not match the KV-exhaustion
+signature above.
+
+**Signature to recognise it.** In `docker logs`, a `loggers.py:271` line with **`Running: 2-5 reqs`,
+`Avg generation throughput` under ~3 tok/s, and `GPU KV cache usage` well under 90%** — paired with
+a `metrics.py:101` line reading **`Drafted: 10 tokens`** for the whole 10-second window. At k=5 that
+is **two engine steps in ten seconds**. Neighbouring windows show `Avg prompt throughput` bursting
+to 3,000-8,000 tokens/s. `vllm:num_preemptions_total` stays **0** and the prefix hit rate stays
+**~94%** throughout — that pair is what separates this from both KV exhaustion and cache loss.
+
+**Measured, 2026-09-20 19:33 -> 2026-09-21 08:09 (696 ten-second windows, 13h of real traffic):**
+
+| | |
+|---|---|
+| decode tok/s, single request, median | **36.0** |
+| decode tok/s per request, Running=5, median | 12.4 |
+| decode tok/s per request, Running=5, p10 | **0.5** |
+| prefill tokens : decode tokens over the window | **12.4 : 1** (3,046,770 vs 245,665) |
+| preemptions | **0** |
+| prefix cache hit rate | 93.8-94.2%, flat |
+| max KV usage | 71.5% |
+
+The collapse is not a steady state — it is bursty. Mean decode over all busy windows is 37-39 tok/s;
+70 of 594 busy windows (12%) fall under 8 tok/s per running request. A worked example, 08:03:05 ->
+08:05:15, exactly two minutes: healthy at `GEN 60-80, KV 44%`, then requests of `len=185834` and
+`len=185431` arrive (`PREFIX_WATCH`), KV steps up to 62-67%, `Waiting` rises to 3, and `GEN` sits at
+**0.2-2.2 tok/s** until it recovers to 39.6 at 08:05:15.
+
+**Root cause — read from the image, confirmed in source, no restart spent.**
+`/opt/env/lib/python3.12/site-packages/vllm/v1/core/sched/scheduler.py`:
+
+```python
+token_budget = self.max_num_scheduled_tokens          # = max_num_batched_tokens = 8192
+while req_index < len(self.running) and token_budget > 0:
+    ...
+    if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
+        num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+    num_new_tokens = min(num_new_tokens, token_budget)
+    ...
+    token_budget -= num_new_tokens
+```
+
+The loop walks `self.running` **in order** and the budget is shared. `long_prefill_token_threshold`
+is **0**, so that clamp is disabled and a request still mid-prefill takes
+`min(remaining_prefill, token_budget)` — **the entire 8192**. The `while` guard then fails and every
+request behind it in `self.running` is scheduled **zero tokens that step**. A decoding sequence
+needs only ~6 tokens; it gets none.
+
+So a ~186K-token prompt whose uncached remainder is tens of thousands of tokens occupies ~1 second
+per 8192-token chunk for tens of consecutive steps, and everything queued behind it emits nothing
+for the duration. That is the two-minute flat line, and it is why the per-request rate lands near
+0.2-2 tok/s rather than the ~2.9 tok/s (one spec-decode step) that co-scheduling would have given.
+
+`max_num_partial_prefills` and `max_long_partial_prefills` are already **1**, so limiting
+*concurrent* prefills cannot help — the damage is done by a **single** long prefill.
+
+**This exonerates `MNT-6c` (CACHE_TEST.md 10, item 1).** The fix is holding under real concurrent
+load: hit rate flat at ~94%, zero preemptions, KV never above 71.5%. The removed eviction is not
+what is costing throughput here.
+
+**Fix, not yet applied — needs a restart, so it needs a specific ask.** Set
+`long_prefill_token_threshold` to ~2048. A long prefill then takes 2048 tokens per step and leaves
+~6144 of budget for the decoders behind it, which need a handful each. Costs ~4 steps per 8192
+prefilled instead of 1; buys back decode during prefill. Prefer it to lowering
+`max_num_batched_tokens`, which would slow prefill without fixing the ordering.
+
+**Client-side mitigations that need no restart:** fewer concurrent subagents, and smaller subagent
+prompts. Each subagent carries its own `tools` array — four distinct `tools=` hashes were live in
+the last 300 requests — so each one's first turn is a cold prefill of 100K+ tokens, and those cold
+prefills are the input to this starvation.
+
 ## Known issues
 
 ### KV pool exhaustion under long-context sessions
