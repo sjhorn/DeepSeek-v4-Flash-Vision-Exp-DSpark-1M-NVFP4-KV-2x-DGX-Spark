@@ -180,7 +180,35 @@ and the right value is genuinely unknown:
   boot default is 2048 and not 4096.
 
 Gating turns that sweep from a 250-600 s cold boot per arm into a live flip — the same trade that
-made `MNT-8`/`MNT-9` affordable to test.
+made `MNT-8`/`MNT-9` affordable to test. **It paid for itself immediately:** the dose-response
+curve below is four arms, measured in one sitting, for zero restarts.
+
+### Measured dose-response (2026-09-21, `local-ops/starve-test.py`)
+
+One "victim" streams a decode; once it is steady, an "attacker" fires a **uniquely stamped**
+(therefore uncached) **144,027-token** prompt. Engine otherwise idle.
+
+| `long_prefill_token_threshold` | victim tok/s during prefill | median gap | **max stall** | attacker prefill | prefill cost |
+|---|---|---|---|---|---|
+| **0** (stock, no cap) | **0.33** | 4.33 s | **5.17 s** | 82.8 s | — |
+| 2048 | 0.95 | 1.20 s | 1.36 s | 87.3 s | +5.4% |
+| **1024 (deployed)** | **1.55** | 0.67 s | **0.74 s** | 95.8 s | **+15.7%** |
+| 512 | 2.53 | 0.41 s | 0.48 s | 123.4 s | +49.0% |
+
+Monotonic, no overlap. Victim rate with no attacker present was 14.5 tok/s in every arm, so the
+ratio column is like-for-like.
+
+**Why 1024 and not 2048.** 2048 buys only 2.9x over stock; 1024 buys **4.7x** and takes the worst
+stall from **5.17 s to 0.74 s** — the number a user actually feels — for 15.7% on a prefill that is
+already the slow part. 512 costs +49% for a further 1.6x and is not worth it. This independently
+lands on the same value as
+[GLM-5.3-Flash-EXL3-2x-DGX-Sparks#110](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/issues/110),
+and confirms [vllm#54919](https://github.com/vllm-project/vllm/issues/54919)'s report that a cap of
+half the budget is too loose to help much.
+
+**What this does NOT establish.** A single victim against a single attacker on an idle engine. It
+does not model several long prefills arriving together, which is what the 13h production trace
+showed, nor the effect on aggregate throughput across many sessions.
 
 ```bash
 bash local-ops/kv-flags.sh long_prefill_token_threshold 1024   # try a tighter cap, live

@@ -33,7 +33,7 @@
 #                                 scheduler step. **Omitted from `reset` ON
 #                                 PURPOSE**: with no key the engine falls through
 #                                 to the boot value (--long-prefill-token-threshold
-#                                 2048 in the compose), which is the state we want.
+#                                 1024 in the compose), which is the state we want.
 #                                 Set it only to A/B a different cap, e.g.
 #                                 `kv-flags.sh long_prefill_token_threshold 1024`;
 #                                 `0` disables the cap and restores the starvation.

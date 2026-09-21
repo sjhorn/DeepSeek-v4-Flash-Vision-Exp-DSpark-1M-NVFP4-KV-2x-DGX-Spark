@@ -609,6 +609,56 @@ row that passes while `docker exec <c> grep -c '<marker>' <file>` returns 0.
 **The general lesson** — a fail-closed check is only fail-closed if you have watched it fail. This
 one was added as a backstop after a near-miss, and had a whole class of rows it could not fail on.
 
+### `MNT-10`'s gate read the HOST path and silently did nothing (2026-09-21)
+
+**Symptom.** The `MNT-10` A/B returned **identical numbers in both arms** — victim 0.95 vs 0.93
+tok/s, attacker prefill 87.3 s vs 87.0 s. It reads like "the knob has no effect", which is the most
+expensive wrong conclusion available: it would have retired a fix that works.
+
+**Root cause.** The gate hardcoded the **host** path:
+
+```python
+_MNT10_FLAGS = "/var/tmp/vllm-kv-flags/flags.json"     # WRONG inside the container
+```
+
+The host keeps the file at `/var/tmp/vllm-kv-flags/`, but the compose mounts that directory at
+**`/etc/vllm-kv-flags`** (`docker-compose.dspark.yml`), which is what `patch6` reads via
+`_FLAGS_PATH`. Inside the container the host path does not exist, so every read raised, fell back
+to "no opinion", and returned the boot value. **Both arms ran at 2048.**
+
+**Why it was invisible.** The patch logged only when an override was *applied*. A gate that can
+never see an override is indistinguishable from a gate with nothing to override — same silence.
+`check-local-patches.sh` passed too, because the marker was present; the marker proves the file is
+mounted, never that its logic reaches anything.
+
+**What exposed it.** Asking for positive proof rather than absence of failure: `grep MNT-10` in the
+container log after deliberately setting the flag. Zero lines where there should have been an
+override line. Re-running against the path the code actually read then produced clean separation
+(0.33 → 1.55 tok/s), confirming both the bug and the mechanism.
+
+**Fix.** Use the same expression as `patch6`, env override included, and **log once when the gate
+first executes** — naming the path and whether it exists — so "armed but idle" and "dead" stop
+looking alike:
+
+```python
+_MNT10_FLAGS = os.environ.get("VLLM_KV_FLAGS_FILE", "/etc/vllm-kv-flags/flags.json")
+```
+
+**Signature.** After a restart, `docker logs <container> | grep 'MNT-10: armed'` must print exactly
+one line, and it must say `present`. If it says `ABSENT — live override unavailable`, the directory
+mount is missing and only the boot value applies.
+
+**The general rule.** Any patch that reads a file from inside the container must take the path from
+the same place the existing patches do. A wrong path fails **silently** — the documented failure
+mode for bind mounts in [`../CLUSTER.md`](../CLUSTER.md) — and a patch with no positive liveness
+signal cannot be distinguished from one that is working and has nothing to say.
+
+**Cleanup this created.** Testing drove the gate through a file written *inside* the container at
+the wrong path. That file vanishes with the container, but the host flags file had also been
+written with `long_prefill_token_threshold: 0`, which would have **disabled the cap at the next
+restart** once the path was fixed. The key was removed so the value falls through to the boot
+default. Check for it: the host flags file should carry **no** `long_prefill_token_threshold` key.
+
 ### "Another session rewrote our flags" — MISDIAGNOSED. It was `kv-flags.sh` itself (corrected 2026-09-21)
 
 **The entry below is wrong about the cause and is kept only as a record of the error.** No other

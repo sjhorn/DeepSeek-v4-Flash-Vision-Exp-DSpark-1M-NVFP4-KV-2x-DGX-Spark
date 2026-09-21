@@ -183,7 +183,7 @@ Two habits that have already paid for themselves here:
   `docs/local/status/INCIDENTS.md`.
 - **Currently deployed: Vision-Exp**, `MAX_MODEL_LEN=1048576`, `MAX_NUM_SEQS=12`,
   `GPU_MEMORY_UTILIZATION=0.86`, `COMPILATION_CONFIG={"max_cudagraph_capture_size":72}`,
-  `PROTECTED_FRACTION=0.50`, `MTP_NUM_TOKENS=5`, `LONG_PREFILL_TOKEN_THRESHOLD=2048`.
+  `PROTECTED_FRACTION=0.50`, `MTP_NUM_TOKENS=5`, `LONG_PREFILL_TOKEN_THRESHOLD=1024`.
   **`MNT-8`/`MNT-9` are mounted but OFF** —
   they are gated on `/var/tmp/vllm-kv-flags/flags.json`, not on env, so an arm can be flipped
   without a restart (`bash local-ops/kv-flags.sh`); see `CACHE_TEST.md`. Re-check with

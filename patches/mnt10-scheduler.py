@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import json          # MNT-10
+import os            # MNT-10
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -97,9 +99,16 @@ logger = init_logger(__name__)
 #
 # Roll back by removing the bind-mount line for this file from the compose.
 # ---------------------------------------------------------------------------
-_MNT10_FLAGS = "/var/tmp/vllm-kv-flags/flags.json"
+# The flags file as seen FROM INSIDE THE CONTAINER. The host keeps it at
+# /var/tmp/vllm-kv-flags/ and the compose mounts that directory read-only at
+# /etc/vllm-kv-flags. Using the host path here was a real bug on 2026-09-21: the
+# gate read a path that does not exist in the container, silently fell through to
+# the boot value, and made an A/B read as "no difference" in both arms. Keep this
+# identical to patch6's _FLAGS_PATH, env override included.
+_MNT10_FLAGS = os.environ.get("VLLM_KV_FLAGS_FILE", "/etc/vllm-kv-flags/flags.json")
 _mnt10_cache: "tuple[float, dict]" = (0.0, {})
 _mnt10_logged: "set[int]" = set()
+_mnt10_armed_logged = False
 
 
 def _mnt10_flags() -> dict:
@@ -116,8 +125,6 @@ def _mnt10_flags() -> dict:
     if now - ts < 1.0:
         return cached
     try:
-        import json
-
         with open(_MNT10_FLAGS) as fh:
             data = json.load(fh)
         if not isinstance(data, dict):
@@ -128,6 +135,28 @@ def _mnt10_flags() -> dict:
     return data
 
 
+def _mnt10_arm_log(boot_value: int) -> None:
+    """Say ONCE, at the first scheduling decision, that the gate is executing.
+
+    Without this the patch is undetectable when it works: the override log only
+    fires when a flag or env var actually overrides, so a gate reading the wrong
+    path looks exactly like a gate with nothing to do. That is precisely the bug
+    that made the first A/B read as "no difference" in both arms.
+    """
+    global _mnt10_armed_logged
+    if _mnt10_armed_logged:
+        return
+    _mnt10_armed_logged = True
+    logger.info(
+        "MNT-10: armed. Per-request per-step cap = %d tokens (boot value); "
+        "flags file %s (%s). Budget max_num_batched_tokens is the shared pool "
+        "this cap carves a request's share out of.",
+        boot_value,
+        _MNT10_FLAGS,
+        "present" if os.path.exists(_MNT10_FLAGS) else "ABSENT — live override unavailable",
+    )
+
+
 def _mnt10_threshold(boot_value: int) -> int:
     """The per-step cap for a single request, or 0 to disable the cap.
 
@@ -135,8 +164,7 @@ def _mnt10_threshold(boot_value: int) -> int:
     --long-prefill-token-threshold set at boot.  Returned unchanged unless an
     env var or the flags file overrides it.
     """
-    import os
-
+    _mnt10_arm_log(boot_value)
     raw = os.environ.get("VLLM_LONG_PREFILL_TOKEN_THRESHOLD")
     if raw is None:
         raw = _mnt10_flags().get("long_prefill_token_threshold")
