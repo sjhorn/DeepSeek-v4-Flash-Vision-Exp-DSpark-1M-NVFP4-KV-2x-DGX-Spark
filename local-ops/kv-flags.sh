@@ -41,7 +41,7 @@ FLAGS=/var/tmp/vllm-kv-flags/flags.json
 show() {
   for n in $NODES; do
     printf '%-12s ' "$n"
-    ssh "${USER_AT}@${n}" "cat $FLAGS 2>/dev/null || echo '(no flags file)'"
+    ssh -n "${USER_AT}@${n}" "cat $FLAGS 2>/dev/null || echo '(no flags file)'"
   done
 }
 
@@ -53,12 +53,12 @@ esac
 
 for n in $NODES; do
   if [ -z "$key" ]; then
-    ssh "${USER_AT}@${n}" "mkdir -p \$(dirname $FLAGS) && printf '%s\n' '{\"free_queue_prepend_uncached\": 0, \"pin_static_head\": 0}' > $FLAGS"
+    ssh -n "${USER_AT}@${n}" "mkdir -p \$(dirname $FLAGS) && printf '%s\n' '{\"free_queue_prepend_uncached\": 0, \"pin_static_head\": 0}' > $FLAGS"
   else
     [ -n "$val" ] || { echo "usage: $0 <flag> <value> | reset" >&2; exit 2; }
     # Rewrite atomically: a half-written file reads as bad JSON, which the
     # engine treats as "every flag off" -- a silent arm change mid-run.
-    ssh "${USER_AT}@${n}" "python3 - <<PY
+    ssh -n "${USER_AT}@${n}" "python3 - <<PY
 import json, os, tempfile
 p = '$FLAGS'
 os.makedirs(os.path.dirname(p), exist_ok=True)

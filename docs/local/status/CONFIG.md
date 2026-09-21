@@ -58,6 +58,7 @@ Passwordless SSH is configured from head to worker via the RoCE IP (`192.168.0.1
 | `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS` | `1` | Accurate KV accounting |
 | `MTP_NUM_TOKENS` | `5` | DSpark speculative tokens |
 | `COMPILATION_CONFIG` | `{"max_cudagraph_capture_size":72}` | **New 2026-09-13.** Default derives 144 (= 2 × seqs × (k+1)); 72 is the real decode ceiling. Saves ~0.40 GiB of graph pool. Passed via `COMPILATION_CONFIG` in `.env.dspark`. |
+| `swa_recycle_cached` (flags file) | `0` | **New 2026-09-21.** `MNT-6c`. Stops `MNT-6b` from evicting the prefix-cache entry of every page it recycles. Cold-head session sim, 3/3: head after a session **0.0% / 14.4s → 99.5% / 0.5s**, and sessions run ~35% faster (82s → 50s). Real session confirms: 99.4% / 0.49s. Node-local file `/var/tmp/vllm-kv-flags/flags.json`, no restart to change. Revert: `bash local-ops/kv-flags.sh swa_recycle_cached 1`. Evidence: [`CACHE_TEST.md`](../../../CACHE_TEST.md) §9. |
 | `PROTECTED_FRACTION` | `0.50` | **New 2026-09-14.** `MNT-6a` protected-block cap, 0.30→0.50. Retention under pressure 280,690 → 457,079 tokens. Host key is `PROTECTED_FRACTION`; the container var is `VLLM_PROTECTED_PROMPT_BLOCKS_FRACTION`. |
 | `SERPER_API_KEY` | (set) | For server-side web_search via SERPER API |
 | `MASTER_ADDR` | `192.168.0.120` | |

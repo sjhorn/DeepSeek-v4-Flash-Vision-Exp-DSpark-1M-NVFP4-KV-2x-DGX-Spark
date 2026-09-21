@@ -1,6 +1,8 @@
 # CACHE_TEST.md — three candidate prefix-cache mechanisms against our tree, and how we would test them
 
-**Status (2026-09-20, after the 15:34Z boot): the cause is FOUND — see §8. Decode across several
+**Status (2026-09-21): the cause is CONFIRMED and FIXED — see §9. `swa_recycle_cached: 0` is live on
+both nodes; a real session's head now survives at 99.4% / 0.49s where it read 0.0% / 14.16s.
+Historical detail below. (2026-09-20, after the 15:34Z boot): the cause is found — see §8. Decode across several
 turns destroys the prompt's cached prefix, reproducibly, with no client and no pressure involved.
 Mechanisms 1 and 3 are implemented, mounted, measured and INERT (§6), both switched back OFF;
 Mechanism 2 is not implemented. The next test targets `MNT-6b` and needs one restart (§8.4).**
@@ -647,6 +649,71 @@ followed by the same with `1 400` as the negative control.
 **Reproducer for whoever runs it** (no session, no client, ~45s):
 `python3 <decode-dose> 7 50` — seven captured bodies, 50 decode tokens each, probe before and
 after. Alive→dead is the signal.
+
+
+## 9. CONFIRMED: `MNT-6c` fixes it (2026-09-21)
+
+**`swa_recycle_cached: 0` makes a conversation's prefix survive multi-turn decode.** Root cause and
+fix both confirmed on the 2026-09-20 21:33 boot, engine taken exclusively for the run.
+
+### 9.1 The measurements
+
+Cold-head session simulation (`local-ops/xsess/session-sim.py 7 400`), alternating arms:
+
+| run | `swa_recycle_cached` | head after the session | prefill | session wall-clock |
+|---|---|---|---|---|
+| baseline | 1 (today) | **0.0%, 0 tok** | 14.44s | 82s |
+| **armE** | **0** | **99.5%, 27,648 tok** | **0.47s** | **51s** |
+| baseline2 | 1 | 0.0%, 0 tok | 14.42s | 82s |
+| **armE2** | **0** | **99.5%** | **0.50s** | **50s** |
+| baseline3 | 1 | 0.0%, 0 tok | 14.41s | 78s |
+| **armE3** | **0** | **99.5%** | **0.55s** | **49s** |
+
+**3/3 separation, no overlap.** And the sessions themselves run **~35% faster** (49-51s vs 78-82s),
+because each turn hits cache instead of re-prefilling.
+
+Validated end-to-end on the real instrument — a genuine headless Claude Code session, probed 2s
+after it ends:
+
+```
+armE, real session:   +0.5s  hit 99.4% = 27,648 tok  0.49s  [clean]
+arm A, 2026-09-20:    +2.0s  hit  0.0% =      0 tok 14.16s  [clean]
+```
+
+### 9.2 A protocol bug found on the way — and it invalidates the first arm-E run
+
+The first attempt compared arms with `decode-dose.py`, which **probes first**. That probe warms the
+head, so every run after the first starts warm — and a warm head survives. Both arms then read
+ALIVE and the comparison was worthless; the earlier non-monotonic sweep (§8.1b) has the same cause.
+
+`session-sim.py` models a real session instead: it **stamps the system prompt uniquely** so the head
+has never been cached, runs the turns (turn 0 creates it cold, `engine_cached_tokens=None`
+confirms), and only then probes. With that, the baseline fails 3/3 and arm E passes 3/3.
+
+**The rule this establishes:** a prefix-cache experiment must not touch the object under test before
+the treatment. Warming to "establish a baseline" destroys the measurement.
+
+### 9.3 What this settles
+
+- **The root cause is confirmed**, not inferred: `MNT-6b` recycling a page calls
+  `_maybe_evict_cached_block()` on it, destroying its `(hash → block)` mapping. As decode advances
+  the sliding window across a multi-turn conversation, that eviction walks through the prompt's
+  checkpoints; the coordinator's minimum-across-groups rule then reads 0% even though full attention
+  still holds the whole head.
+- **`MNT-6b`'s "investigated and exonerated" note was wrong** (offline A/B, no multi-turn decode).
+  The patch's *recycling* is worth keeping; its *eviction* was never necessary for it.
+- **`MNT-8` and `MNT-9` were not the answer** and stay off. `MNT-9`'s new warning was still useful:
+  it showed the SWA runs one block short, which is what eviction-from-the-oldest-end looks like.
+
+### 9.4 Deployed state, and the one fragility
+
+`swa_recycle_cached: 0` is **live on both nodes**. Revert instantly with
+`bash local-ops/kv-flags.sh swa_recycle_cached 1` — no restart either way.
+
+**Fragility:** the flags file is node-local state under `/var/tmp`, not in git. A fresh node, or a
+cleared `/var/tmp`, silently returns to the old (broken) behaviour, because the code default is
+still `True`. **Flip the code default to `False`** at the next convenient restart so the fix is the
+default and the flag becomes the escape hatch rather than the enabler.
 
 ## 5. What is settled and needs no further work
 

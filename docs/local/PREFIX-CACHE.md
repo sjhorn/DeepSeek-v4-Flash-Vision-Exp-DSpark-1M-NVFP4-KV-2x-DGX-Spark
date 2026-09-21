@@ -722,6 +722,11 @@ harness does not model — it reproduces neither stock, with Patch 6, nor with r
 Candidates not yet separated: chunked prefill across turns, async scheduling, spec-decode
 rollback, or preemption under the co-tenant's ~140K-token requests.
 
+**FIXED 2026-09-21 — `MNT-6c` (`swa_recycle_cached: 0`), live on both nodes.** A real session's head
+now survives at **99.4% / 0.49s** where it read 0.0% / 14.16s, and cold-head simulation separates
+3/3 with no overlap. The eviction `MNT-6b` performed on every page it recycled was the bug.
+Full evidence: [`CACHE_TEST.md`](../../CACHE_TEST.md) §9.
+
 **RESOLVED 2026-09-20 — it is decode across turns.** Identical captured bodies, replayed with no
 client at all: `max_tokens=1` leaves the head at 99.6%, `max_tokens=50` over seven turns leaves it
 at 0.0% / 14.83s. One turn decoding 166 tokens is harmless. The leading mechanism is `MNT-6a`'s
