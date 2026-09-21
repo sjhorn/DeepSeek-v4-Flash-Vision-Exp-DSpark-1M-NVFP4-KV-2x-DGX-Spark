@@ -804,8 +804,11 @@ they are pending. What is genuinely left is short.
 |---|---|---|---|
 | **8** | **The swift-lsp `tools` flap** | **The largest remaining cost in these captures.** The plugin attaches seconds into every session and changes the tools array; turn 1 then diverges and re-prefills — **17.85s** in the cold session measured 2026-09-20. `death-probe.sh` disables it deliberately, ordinary sessions do not. | Client-side setting, free: disable the plugin, or accept one re-prefill per session. Measure a session with and without to put a number on it. |
 | **9** | **Warm-up not shipped** | Measured (§7): a warm head makes turn 0 cost **4.26s instead of 16.47s**. Still not wired into the launcher. | Add one `max_tokens=1` request after the health check, using the **exact** head the client sends, at the right tier (`API-12`'s blind spot: the effort prefix is injected downstream). |
-| **3** | **`MNT-9` (head pinning) — keep it or retire it?** | Built and fixed (refuses an incomplete run, §8.4), **never run**, and probably unnecessary now. Mounted with `pin_static_head: 0` on both nodes. | See the correction below — the check is **not** free. |
-| **4** | **`MNT-8` / `MNT-8b` (free-queue order) under real pressure** | Measured inert on an idle engine (§6), but the pressure test shows ~1.1M tokens of unrelated traffic **does** evict a head. With a real co-tenant, ordering may still matter. | Retest only if cache loss is observed on a busy box. Do not re-run on an idle one — that is what made it look inert. |
+| **3** | **`MNT-9` (head pinning) — keep it or retire it?** | Built and fixed (refuses an incomplete run, §8.4), **never run**, and probably unnecessary now. Mounted with `pin_static_head: 0` on both nodes. Baseline arm measured 2026-09-21. | **Arms written and ready: §12.1.** See also the correction below — the check is **not** a free log grep. |
+| **4** | **`MNT-8` / `MNT-8b` (free-queue order) under real pressure** | Measured inert on an idle engine (§6), but the pressure test shows ~1.1M tokens of unrelated traffic **does** evict a head. With a real co-tenant, ordering may still matter. | **Arms written and ready: §12.3** — manufacture the co-tenant on an idle box rather than waiting for one. Do not re-run the §6 shape; an arm where nothing dies measures nothing. |
+| **11** | **Is the `MNT-10` cap free when nobody is being protected?** | Only ever read off one column of the §"dose-response" table: 82.8s at cap 0 against 95.8s at 1024, **n=1, one context size**. It is the whole case for (or against) the adaptive `Running`-aware controller. | **Arms written and ready: §12.2.** |
+| **12** | **`status/CONFIG.md`'s retention figure predates `MNT-6c`** | 457,079 tokens at `PROTECTED_FRACTION=0.50` describes code we no longer run. | **Ready: §12.4.** No flags, no restart — load only. |
+| **13** | **Per-tenant capacity via `cache_salt`** | **Researched 2026-09-21 — §13. Rejected as posed:** a salt isolates, it does not allocate, and it would destroy the cross-tenant head sharing we get free today. The tenant-identity half is worth keeping. | Park behind item 4: build nothing until there is observed cross-tenant eviction to fix. |
 | **10** | **Git state moves the head** | Measured 2026-09-20: Claude Code's system prompt carries git status and recent commits, so **committing changes the head**. A session run after commits shared only the first ~16.4K tokens with the earlier head (**59.3%** partial hit) before diverging inside the system prompt. | Know it when measuring — two sessions either side of a commit are **not** the same head. Fixing it means changing what the client sends; not ours to change unilaterally. |
 
 ### Correction to item 3: the "cheap check" is not free (2026-09-21)
@@ -839,9 +842,11 @@ being repeated.
 
 1. **Items 8 and 9** are the cheap wins, and both are **client-side** — no engine change, no
    restart, no flag.
-2. **Items 3, 4, 10** are park-and-watch. Item 4 has a named trigger (cache loss on a busy box);
-   item 3 needs a scheduled arm, not a grep.
-3. Nothing here is urgent. Item 1 was the one that was, and it is answered.
+2. **Items 3, 4, 11, 12 all have arms written and waiting in §12**, and all four need the same
+   thing: an idle engine. Run them in one window rather than four.
+3. **Items 10 and 13** are park-and-watch. Item 13 is parked behind item 4 on purpose — there is no
+   observed cross-tenant eviction to fix yet.
+4. Nothing here is urgent. Item 1 was the one that was, and it is answered.
 
 ## 11. Settled background facts
 
@@ -859,3 +864,225 @@ being repeated.
   assumption any of this rests on.
 - **This is unrelated to the API-side movers** (`API-8`, `API-11a/b`, `API-13`), which address a
   different failure: the prompt's *head* moving between turns.
+
+## 12. Ready-to-run test plan (written 2026-09-21, not yet run)
+
+**Status: prepared, not executed.** An idle window opened on 2026-09-21 and closed before the arms
+could run; the engine was busy again. Everything below is written to be picked up cold by whoever
+has the next idle window. Nothing here needs a restart.
+
+### 12.0 Preconditions, and the two that have already burned us
+
+```bash
+# 1. a tunnel -- the API binds 127.0.0.1 on the head
+ssh -f -N -L 8888:127.0.0.1:8888 shorn@spark-45ea
+curl -s http://127.0.0.1:8888/health -o /dev/null -w 'health=%{http_code}\n'
+
+# 2. the engine is actually idle -- BOTH must read 0
+curl -s http://127.0.0.1:8888/metrics | grep -E '^vllm:num_requests_(running|waiting)\{'
+
+# 3. record the flags BEFORE, and again AFTER every arm
+bash local-ops/kv-flags.sh
+```
+
+- **The flags file is global engine state, not per-session.** There is regularly a second client on
+  this box. Two people experimenting at once interleave arms and void both results. A flags change
+  between the before- and after-reading of one arm **invalidates that arm** — do not rescue it.
+- **Write the HOST path, read the CONTAINER path.** `kv-flags.sh` writes
+  `/var/tmp/vllm-kv-flags/flags.json`; the engine reads `/etc/vllm-kv-flags/flags.json`. Confirm
+  with `docker exec <container> cat /etc/vllm-kv-flags/flags.json`. Getting this backwards silently
+  disabled `MNT-10`'s gate for a whole A/B.
+- **`kv-flags.sh` merges.** Write every key the arm depends on, not only the one being changed.
+- **Restore at the end, and verify the restore** — `bash local-ops/kv-flags.sh reset`, then read it
+  back on both nodes.
+
+### 12.1 Test A — `MNT-9`: keep it or retire it? (~10 min)
+
+**Decides a live question.** `MNT-9` is mounted, OFF, measured inert, and its ported code is ~60
+lines inside `patch6-…py` plus three flags. Retiring it would shrink the KV patch surface; keeping
+it costs a boolean read per call. Nothing decides that today.
+
+**Why it needs an arm rather than a log grep** — see the correction in §10. The `CANNOT pin`
+warning lives inside `_maybe_pin_static_head()`, which returns early unless `pin_static_head` is
+set, so with `MNT-9` disarmed its absence proves nothing.
+
+```bash
+# baseline (MNT-9 off, the deployed state) -- ALREADY RUN 2026-09-21, recorded below
+python3 local-ops/xsess/session-sim.py 4 300 mnt9-off-a
+
+# arm
+bash local-ops/kv-flags.sh pin_static_head 1
+ssh shorn@spark-45ea "docker exec $C cat /etc/vllm-kv-flags/flags.json"   # prove the ENGINE sees it
+python3 local-ops/xsess/session-sim.py 4 300 mnt9-on-a
+python3 local-ops/xsess/session-sim.py 4 300 mnt9-on-b
+
+# what actually answers the question
+ssh shorn@spark-45ea "docker logs --since 20m $C 2>&1 | grep -E 'MNT-9'"
+
+# restore, and verify
+bash local-ops/kv-flags.sh pin_static_head 0 && bash local-ops/kv-flags.sh
+```
+
+**Baseline already measured (2026-09-21, engine idle, `pin_static_head: 0`):**
+
+| arm | turn 0 | verdict |
+|---|---|---|
+| `mnt9-off-a` | cold head, `in=27,294`, `cached=None` | **ALIVE, hit 99.5%, 27,648 tok, 0.49s, clean** (47s total) |
+
+That reproduces §9's post-`MNT-6c` figure exactly, so the baseline is sound and only the armed arms
+are missing.
+
+**How to read the result.**
+
+| what the log shows | what it means | verdict |
+|---|---|---|
+| `MNT-9 … CANNOT pin` still appears | the required run is still not fully cached even with `MNT-6c` | **retire** — it cannot do its job |
+| pins logged, head survival unchanged (~99.5%) | it works and buys nothing, which is §6's result at a second condition | **retire** |
+| pins logged, head survival or timing better than baseline | the one outcome that justifies keeping it | **keep**, and consider arming |
+
+Two arms is enough to retire, not enough to keep: a "better" reading needs three per side.
+
+### 12.2 Test B — `MNT-10`: what does the cap cost when nobody is being protected? (~15 min)
+
+**This decides whether the adaptive controller is worth building.** §10's dose-response measured the
+*victim's* side of the trade. The other side — the cap taxing a prefill that is starving nobody —
+was only ever read off the attacker column: **82.8s at cap 0 against 95.8s at 1024, +15.7%**, one
+context size, n=1.
+
+The controller idea is one line: `cap = 0 if num_requests_running <= 1 else 1024`. It is worth
+building only if that penalty is real, repeatable, and grows with context.
+
+```bash
+# NOTE the arms are EXPLICIT. Do not use `reset` to mean "1024" -- see 12.5.
+for cap in 0 1024 2048; do
+  bash local-ops/kv-flags.sh long_prefill_token_threshold $cap
+  # 3 uniquely-stamped (uncached) prefill-only requests at each of ~40K, ~140K, ~400K tokens,
+  # max_tokens=1, engine otherwise idle; record TTFT per request
+done
+bash local-ops/kv-flags.sh reset   # removes the key -> boot value
+```
+
+`local-ops/starve-test.py` already builds uniquely-stamped attacker prompts (`ATTACK_WORDS`); the
+solo measurement is that generator with the victim thread removed, so extend it rather than writing
+a new one.
+
+**Record:** cap, context tokens, TTFT, and `engine_cached_tokens` (`API-14`) to prove each prompt
+was genuinely cold. **Decide:** if the penalty at `Running==1` is under ~5% it is noise against
+burst variance and the controller is not worth the global-state risk; at 15%+ and rising with
+context, build it.
+
+### 12.3 Test C — `MNT-8` / `MNT-8b` under manufactured pressure (~40 min)
+
+**The highest-value open item (§10 item 4), and idle time is its precondition** — it needs the whole
+pool, and the earlier null is void precisely because the pool was idle and nothing competed.
+
+The point is not "run it again on an idle box". It is that an idle box lets you *build* the
+co-tenant deterministically instead of waiting for one:
+
+1. create a victim head cold — `session-sim.py`, which stamps a unique system prompt;
+2. drive eviction with `local-ops/cache-pressure/cache_pressure.py` (or `kvpressure.py`) until the
+   pool has cycled well past the victim's head — the §8 pressure test needed ~1.1M tokens of
+   unrelated traffic to kill a head;
+3. probe the victim head: alive or dead;
+4. repeat with `free_queue_prepend_uncached` flipped.
+
+`MNT-8`'s claim is about **ordering** — uncached scratch pages to the front of the free queue,
+cached ones to the back — so the measurement must be head **survival under eviction**, never
+throughput. Run at least 3 reps per arm; a single survival verdict is a coin flip.
+
+**If both arms survive**, the pressure was not enough — raise it until the control arm dies, then
+compare. An arm where nothing dies measures nothing, which is the mistake §6 made.
+
+### 12.4 Test D — retention re-measure (~30-60 min, no flags touched)
+
+`status/CONFIG.md` carries **457,079 tokens retained at `PROTECTED_FRACTION=0.50`**. That predates
+`MNT-6c`, which changed what recycling does to cache entries — so the number describes code we no
+longer run.
+
+```bash
+python3 local-ops/cache-pressure/cache_pressure.py --kv-size <tokens from the boot log>
+# GPU KV cache size / 'Maximum concurrency' line:
+ssh shorn@spark-45ea "docker logs $C 2>&1 | grep -m1 'GPU KV cache size'"
+```
+
+No flag writes, no restart — only load. Update `status/CONFIG.md` with the new figure and the date,
+and say explicitly that it is a post-`MNT-6c` measurement.
+
+### 12.5 Trap: the deployed `long_prefill_token_threshold` is **2048**, not 1024
+
+Found while preparing these arms, and it invalidates the obvious shortcut of treating "no key in the
+flags file" as "1024":
+
+- the **running container's command line** carries `--long-prefill-token-threshold 2048`;
+- the engine's own `MNT-10` log line says `(boot value 2048)`;
+- the flags file has **no** `long_prefill_token_threshold` key, so the effective value falls through
+  to the boot value — **2048 today**;
+- `docker-compose.dspark.yml:301` now reads `${LONG_PREFILL_TOKEN_THRESHOLD:-1024}`, so **1024
+  arrives at the next restart**, not before.
+
+Several docs said 1024 was deployed. They were describing the next boot, not the running engine.
+Corrected in `status/CONFIG.md`. Since §"1024 vs 2048 is a TIE" in
+[`PATCHES-KV.md`](PATCHES-KV.md) found the two indistinguishable on real traffic, nothing needs to
+be done about it — but **an arm that assumes key-absent means 1024 is measuring 2048.**
+
+## 13. Per-request `cache_salt` — researched 2026-09-21, and it does the opposite of what it sounds like
+
+Asked: *we pass client certs through the mTLS proxy; could a per-tenant `cache_salt` be used to make
+sure each tenant gets enough cache?*
+
+**Short answer: `cache_salt` is an isolation feature, not an allocation one. Using it for fairness
+would cost cache, not buy it.** What is true, and worth keeping, is the *tenant identity* half of
+the idea.
+
+### 13.1 What is actually in this build
+
+| layer | supports `cache_salt`? | where |
+|---|---|---|
+| engine core (`Request`) | **yes** | `vllm/v1/request.py`, `v1/engine/*` |
+| block hashing | **yes** | `kv_cache_utils.py:556` — added to the extra keys **only when `start_token_idx == 0`** |
+| OpenAI chat endpoint | **yes** | `entrypoints/openai/chat_completion/protocol.py:386`, validated non-empty |
+| **Anthropic endpoint** | **NO** | no field on `AnthropicMessagesRequest`, and `_build_base_request()` (pristine `serving.py:349`) does not pass one |
+
+So it is unreachable from Claude Code today — the client speaks Anthropic. Adding it is mechanically
+easy: `create_messages` already receives Starlette's `raw_request`, so
+`raw_request.headers.get(...)` is in scope at the exact point `chat_req` is built.
+
+**Salting block 0 partitions the whole prefix**, not just the first 256 tokens:
+`hash_block_tokens()` folds `parent_block_hash` into every block, so once block 0 diverges the
+entire chain does.
+
+### 13.2 Why it cannot "ensure a tenant gets enough cache"
+
+1. **It changes hash keys, not eviction policy.** A salted tenant's blocks sit in the same LRU and
+   are evicted exactly as readily. Nothing about a salt reserves capacity.
+2. **It removes sharing we currently get for free.** Two Claude Code clients on the same version
+   send a byte-identical tools+system head — today that is **one** cached copy. Salted per tenant it
+   becomes one copy *each*, and the pool holds less distinct context, not more.
+3. **`MNT-7` cannot claw that back.** Its commit-time dedupe keys on `(block_hash, group_id)`
+   (`patch7-block_pool-dedupe.py:290`). Salted copies have genuinely different hashes, so they are
+   not duplicates by its definition and will not be collapsed.
+
+Salt earns its keep when **isolation is the requirement** — its docstring is explicit that it exists
+to stop an attacker guessing another tenant's prompts by timing. That is a real thing to want on a
+multi-tenant box, and it is a separate decision from capacity.
+
+### 13.3 The half of the idea that IS worth keeping
+
+The useful part is not the salt, it is **a stable per-tenant identity arriving with the request**.
+Given one, the mechanism that could actually reserve capacity is the one already written and
+mounted: `MNT-9` pins a head in a budget **reserved** from `MNT-6a`'s, and that budget is currently
+divided per **KV manager** (`head_pin_fraction / _num_managers`) — not per tenant. Keyed by tenant
+instead, tenant A's head could not be evicted by tenant B's traffic. That is a genuine fairness
+mechanism built from parts we already have.
+
+**It should not be built yet**, for two reasons that are in this document:
+
+- `MNT-9` measured **inert** on head survival (§6), and `MNT-6c` made the head survive without it
+  (§9). There is currently no observed cross-tenant eviction to fix. Test C (§12.3) is what would
+  produce that evidence, and §10 item 4 already names it as the trigger.
+- The mTLS `vllm-proxy` is **not in this repo**, so what it injects is unverified from here. Any
+  design rests on it presenting a stable per-tenant header, which needs checking first.
+
+**If it is ever built, do not reach for the salt to do it.** Reserve with a pin budget, which keeps
+the cross-tenant *sharing* that a salt would destroy, and add the salt only if isolation becomes a
+stated requirement in its own right.

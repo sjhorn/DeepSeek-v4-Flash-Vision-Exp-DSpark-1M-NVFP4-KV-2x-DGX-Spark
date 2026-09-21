@@ -441,3 +441,48 @@ docker logs <container> | grep -A1 'vllm.stat_logger_plugins'
 rather than changing one — decode, prompt and cache behaviour are untouched. Whether the per-turn
 rows actually settle the eviction-vs-invalidation question is the open work in `MERGE.md`, and is
 not yet done.
+
+<a id="stop-sequence-defect"></a>
+
+## FOUND, NOT FIXED — the Anthropic endpoint never reports a stop-sequence stop (2026-09-21)
+
+**Upstream's defect, in a file we already patch.** Found while verifying `MNT-5`
+([`PATCHES-KV.md`](PATCHES-KV.md)); unrelated to `MNT-5`, which works.
+
+When a client `stop_sequences` entry fires, `/v1/messages` returns:
+
+```
+stop_reason: "end_turn"      stop_sequence: null
+```
+
+Per Anthropic's API contract it should return `stop_reason: "stop_sequence"` and
+`stop_sequence: "<the string that matched>"`. **A truncated answer is therefore indistinguishable
+from a complete one** to any client that trusts `stop_reason` — which is what it is for.
+
+**Reproduced three ways, 2026-09-21**, all at `temperature: 0`:
+
+| request | text returned | reported |
+|---|---|---|
+| `stop_sequences: ["charlie"]`, prompt forces it to say `alpha bravo charlie delta echo` | `'alpha bravo '` | `end_turn` / `null` |
+| `stop_sequences: ["\n\n"]`, three-paragraph prompt | 533 chars, no `\n\n` | `end_turn` / `null` |
+| the same body to **`/v1/chat/completions`** | `'alpha bravo '` | `finish_reason: "stop"`, **`stop_reason: "charlie"`** |
+
+**The information exists and is discarded at the Anthropic layer.** vLLM's OpenAI choice object
+carries the matched string in its own `stop_reason` field — the third row proves it — and both
+Anthropic paths map only `finish_reason`:
+
+- non-streaming, pristine `serving.py:475-479` (ours at `1885-1889`): a three-branch
+  `if choice.finish_reason == "stop" → "end_turn"`, with `choice.stop_reason` never read;
+- streaming, pristine `:638` (ours at `2050`): `self.stop_reason_map.get(finish_reason or "stop")`,
+  from the dict at `:93` — `{"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use"}`.
+
+Ours and pristine are **line-for-line identical here**, so this is not one of our patches
+regressing; it is stock behaviour.
+
+**Not patched, deliberately.** The fix is small — read `choice.stop_reason`, and when it is a
+non-empty string emit `stop_reason: "stop_sequence"` with `stop_sequence` set, in both paths — but
+it lands in `anthropic_serving_inline_system.py`, so it costs a restart, and nothing we run today
+depends on it: Claude Code sends no stop sequences that bite (2,433 turns, zero truncation
+signatures). **Fold it into the next restart that happens for another reason**, as `API-15`, rather
+than spending a boot on it. Worth doing then, because the failure is silent: a client that adopts
+stop sequences later would read truncated answers as complete ones and have no way to tell.

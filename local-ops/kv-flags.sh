@@ -32,8 +32,14 @@
 #   long_prefill_token_threshold  MNT-10. Max tokens ONE request may take per
 #                                 scheduler step. **Omitted from `reset` ON
 #                                 PURPOSE**: with no key the engine falls through
-#                                 to the boot value (--long-prefill-token-threshold
-#                                 1024 in the compose), which is the state we want.
+#                                 to its BOOT value, which is the state we want.
+#                                 *** That boot value is 2048 on the RUNNING
+#                                 engine, not the 1024 the compose now names.
+#                                 The compose changed after this container
+#                                 started and a push is not a restart (verified
+#                                 2026-09-21 against the container command line;
+#                                 docs/local/CACHE-TEST.md 12.5).  An arm that
+#                                 treats "no key" as 1024 is measuring 2048. ***
 #                                 Set it only to A/B a different cap, e.g.
 #                                 `kv-flags.sh long_prefill_token_threshold 1024`;
 #                                 `0` disables the cap and restores the starvation.
