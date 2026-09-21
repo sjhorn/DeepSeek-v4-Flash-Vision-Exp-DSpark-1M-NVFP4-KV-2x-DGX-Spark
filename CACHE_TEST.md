@@ -15,18 +15,67 @@ wrong turns. If you only need the state of the world, this box is it.**
 
 **What is actually ON right now — verified against the engine 2026-09-21, not from this file:**
 
-| mechanism | state | where that comes from |
-|---|---|---|
-| `MNT-6a` protected-block cap | **ON**, fraction 0.50 | `PROTECTED_FRACTION` env; 5 `MNT-6a:` log lines, one per KV group |
-| `MNT-6b` recycling | **ON** | `swa_recycle: 1`; 4 `MNT-6b:` log lines |
-| **`MNT-6c` the fix** | **ON** | `swa_recycle_cached: 0` **and** the code default — belt and braces |
-| `MNT-7` dedupe | **ON** | no kill switch |
-| `MNT-8` free-queue order | **OFF** | `free_queue_prepend_uncached: 0` |
-| `MNT-9` head pinning | **OFF** | `pin_static_head: 0`; no `MNT-9:` log lines |
-| **`MNT-10` prefill cap** | **ON at 1024** | see the warning below |
+| mechanism | state | the switch | what it does, in plain words |
+|---|---|---|---|
+| `MNT-6a` protected-block cap | **ON**, 0.50 | `PROTECTED_FRACTION` env | Puts a limit on how much memory one chat is allowed to lock up, so one big chat cannot starve everyone else. |
+| `MNT-6b` recycling | **ON** | `swa_recycle: 1` | Lets a chat re-use its own finished memory pages instead of throwing them on a shared pile and grabbing fresh ones. |
+| **`MNT-6c` the fix** | **ON** | `swa_recycle_cached: 0` **and** the code default | Stops that re-use from erasing the label that says what text a page holds. Losing labels is what made saved chats un-findable. |
+| `MNT-7` dedupe | **ON** | none | Notices when two pages hold exactly the same text and frees the spare one, which would otherwise sit there forever. |
+| `MNT-8` free-queue order | **OFF** | `free_queue_prepend_uncached: 0` | Would hand back junk pages first and useful pages last, so the engine eats the junk before the good stuff. |
+| `MNT-9` head pinning | **OFF** | `pin_static_head: 0` | Would nail down the unchanging start of every prompt so it can never be thrown away. |
+| **`MNT-10` prefill cap** | **ON at 1024** | see the warning below | Stops one request from grabbing the engine's whole per-step budget, so other chats still get a turn. |
 
 Read the flags the engine actually sees, never the host file:
 `docker exec <container> cat /etc/vllm-kv-flags/flags.json`.
+
+### How each one works, in grade-5 English
+
+First, the picture everything else hangs off. The engine keeps a huge notebook of
+**pages**. Each page stores the model's notes about a chunk of your conversation. Re-reading a
+chunk you already talked about is slow, so the engine tries to **keep the old pages** and look
+them up again. Every saved page has a **label** on it saying which chunk of text it belongs to.
+No label means nobody can ever find that page again, even though it is sitting right there.
+
+**`MNT-6a` — the locker limit.** Pages you are still using are locked so they cannot be taken
+away. The problem was that there was almost no limit, so one very long chat could lock nearly the
+whole notebook and everyone else got nothing. This sets a fair share: each group may lock about
+half the notebook, divided between them, and no more.
+
+**`MNT-6b` — keep your own scraps.** The model only looks at a moving window of recent text. Pages
+that fall out the back of that window are done with. They used to go onto a big shared pile, and
+the chat would then take brand-new pages off that same pile. That is a lot of pointless shuffling.
+Instead, the chat now holds on to its own finished pages and re-uses them itself.
+
+**`MNT-6c` — do not rub out the label.** This is the bug that started all of this. When `MNT-6b`
+re-used a page, it also **rubbed out that page's label** — sensible if the page is about to be
+written over, except the page still held perfectly good notes someone might want. As a chat went
+on, the moving window walked across the whole prompt and rubbed out label after label. Then a new
+session looked for its saved prompt, found no labels, and had to read all 140,000 words again from
+scratch — about 14 seconds instead of half a second. The fix: only re-use pages that have **no
+label**. Labelled pages are handed back normally and stay findable.
+
+**`MNT-7` — throw away the duplicate.** Two pages can end up holding the very same text. Only one
+of them can ever be found by a lookup, so the other one is dead weight holding a slot forever.
+This spots the twin and frees it. It made the engine keep about **4x more** useful pages.
+
+**`MNT-8` — junk to the front of the queue** *(built, switched off)*. When a chat finishes, its
+pages go back on the pile. Some are junk scratch pages; some hold valuable saved text. Both used
+to go to the **back**. The engine takes from the **front**, so it would chew through the valuable
+pages while the junk sat safely at the back — exactly backwards. This would put junk at the front
+to be eaten first. It is off because it made no measurable difference when we tested it.
+
+**`MNT-9` — nail down the beginning** *(built, switched off)*. The first part of every prompt — the
+tool list and the system instructions — is identical on every single turn. This would pin that
+part so it can never be thrown out. It is off because it turned out not to be the problem.
+
+**`MNT-10` — no hogging the trolley.** Each engine step has a fixed budget of about 8,192 tokens,
+like a shopping trolley with limited space. A request reading a giant new prompt would fill the
+**entire** trolley, so every other chat waiting to say its next word got **zero** space that step —
+and the next, and the next. That is why replies crawled at 2 words a second while the engine looked
+healthy. This says no single request may take more than **1,024** of the space, leaving room for
+everyone else. Careful: this only helps when **two or more** requests are active. If only one
+request is running and it feels slow, it is simply reading its own long prompt, and a smaller limit
+makes that **worse**, not better.
 
 > **`MNT-10` is the one inconsistency, and it self-heals at the next restart.** The running gate has
 > the **wrong flags path** (fixed in the branch, not yet live — `docs/local/status/INCIDENTS.md`),
