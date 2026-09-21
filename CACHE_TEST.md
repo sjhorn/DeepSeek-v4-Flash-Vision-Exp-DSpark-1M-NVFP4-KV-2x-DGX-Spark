@@ -10,8 +10,32 @@ wrong turns. If you only need the state of the world, this box is it.**
 | **The fix** | **`MNT-6c`** — recycle only pages with no cache entry. Flag `swa_recycle_cached: 0`. |
 | **Status** | **LIVE on both nodes since 2026-09-21.** Head after a session: **99.5% / 0.5s** (was 0.0% / 14.4s), 3/3 with no overlap; real Claude Code session **99.4% / 0.49s**. Sessions also run **~35% faster** (82s → 50s). |
 | **Reproduce (45-90s, no restart)** | `python3 local-ops/xsess/session-sim.py 7 400 mylabel` — DEAD with the fix off, ALIVE with it on. |
-| **Revert** | `bash local-ops/kv-flags.sh swa_recycle_cached 1` — no restart. |
-| **What is left** | **§10.** Item 1 (does the fix cost anything under load?) is the only urgent one. |
+| **Revert** | `bash local-ops/kv-flags.sh swa_recycle_cached 1` — no restart. Since 2026-09-21 the **code default is the fix**, so this flag is the escape hatch, not the enabler. |
+| **What is left** | **§10.** Item 1 is **ANSWERED** (the fix costs nothing under load — 13h of real traffic, zero preemptions, prefix hit rate flat, later measured **98.3%** live). Items 2 (code default) and 8/9 remain; 5/6/7 are proposed for deletion. |
+
+**What is actually ON right now — verified against the engine 2026-09-21, not from this file:**
+
+| mechanism | state | where that comes from |
+|---|---|---|
+| `MNT-6a` protected-block cap | **ON**, fraction 0.50 | `PROTECTED_FRACTION` env; 5 `MNT-6a:` log lines, one per KV group |
+| `MNT-6b` recycling | **ON** | `swa_recycle: 1`; 4 `MNT-6b:` log lines |
+| **`MNT-6c` the fix** | **ON** | `swa_recycle_cached: 0` **and** the code default — belt and braces |
+| `MNT-7` dedupe | **ON** | no kill switch |
+| `MNT-8` free-queue order | **OFF** | `free_queue_prepend_uncached: 0` |
+| `MNT-9` head pinning | **OFF** | `pin_static_head: 0`; no `MNT-9:` log lines |
+| **`MNT-10` prefill cap** | **ON at 1024** | see the warning below |
+
+Read the flags the engine actually sees, never the host file:
+`docker exec <container> cat /etc/vllm-kv-flags/flags.json`.
+
+> **`MNT-10` is the one inconsistency, and it self-heals at the next restart.** The running gate has
+> the **wrong flags path** (fixed in the branch, not yet live — `docs/local/status/INCIDENTS.md`),
+> so today it reads a *container-local* `/var/tmp/vllm-kv-flags/flags.json` holding **1024**, while
+> the boot arg for this container says **2048**. 1024 is what is in force. After the next restart
+> the fixed gate reads `/etc/vllm-kv-flags/flags.json`, which carries **no**
+> `long_prefill_token_threshold` key, so it falls through to the compose boot default — also
+> **1024**. Same value either side, no gap. `MNT-10` is a *scheduling* fix, not a cache one; its
+> evidence lives in [`docs/local/PATCHES-KV.md`](docs/local/PATCHES-KV.md).
 
 ```bash
 bash local-ops/kv-flags.sh                          # what each node is running
