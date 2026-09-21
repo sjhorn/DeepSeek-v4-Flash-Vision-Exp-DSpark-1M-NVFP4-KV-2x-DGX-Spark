@@ -23,15 +23,17 @@ and only what `MNT-10` did — it changed no scheduling logic at all.
 
 ## Tier 1 — live now, no restart
 
+Two different things share this tier, and the difference matters: the rows here are **global** —
+they change the engine for every session and need node access — while **Tier 1a** below is
+**per request** and needs none.
+
 | knob | how | who can do it | evidence |
 |---|---|---|---|
 | `swa_recycle`, `swa_recycle_cached` (`MNT-6b`/`6c`) | flags file | node shell / ssh | `_flag()` re-reads at most 1×/s |
 | `free_queue_prepend_uncached` (`MNT-8`) | ″ | ″ | ″ |
 | `pin_static_head`, `head_pin_fraction` (`MNT-9`) | ″ | ″ | ″ |
 | `long_prefill_token_threshold` (`MNT-10`) | ″ | ″ | read per step, `scheduler.py:493` and `:764` |
-| temperature, `max_tokens`, `top_p`, stop strings | per request | **any client** | request body |
-| thinking tier / effort | per request, via the model alias | **any client** | [`THINKING-AND-EFFORT.md`](THINKING-AND-EFFORT.md) |
-| tools array, system prompt | per request | **any client** | it *is* the prompt |
+| **everything in the request body** | per request | **any client, no node access** | full list in **Tier 1a** below |
 | GPU clock pin | `sudo nvidia-smi -lgc 300,2200` | node shell **+ sudo** | does not survive a node reboot |
 
 > **Flags file: write the HOST path, read the CONTAINER path.** The host keeps it at
@@ -40,6 +42,70 @@ and only what `MNT-10` did — it changed no scheduling logic at all.
 > `docker exec <container> cat /etc/vllm-kv-flags/flags.json` — that proves what the **engine**
 > sees. Getting this backwards silently disabled `MNT-10`'s gate for a whole A/B
 > ([`status/INCIDENTS.md`](status/INCIDENTS.md)).
+
+## Tier 1a — PER REQUEST: everything a client can change with no node access
+
+**This is the only surface that needs no ssh, no sudo and no restart.** Every row is a field in the
+request body, so any client can set it on any single call, and it affects **that call only**. The
+rest of Tier 1 (the flags file, GPU clocks) is live but **global** — it changes the engine for
+everybody and needs node access.
+
+Declared in `patches/anthropic_protocol_inline_system.py` (`API-0`) and acted on in
+`patches/anthropic_serving_inline_system.py`.
+
+### Knobs you set
+
+| field | what it does, in plain words |
+|---|---|
+| **`model`** | **The biggest one.** The name you send picks whether the model thinks before answering, and how hard. The weights are identical every time — only the thinking changes. See the alias table below. |
+| `max_tokens` | The most words the model is allowed to write back. It stops there, even mid-sentence. Required. |
+| `temperature` | How adventurous the wording is. `0` gives the same answer every time; our default is `1.0`, which varies. Use `0` when you are measuring something. |
+| `top_p`, `top_k` | Two other ways to limit which word it may pick next. Most callers leave these alone. |
+| `stop_sequences` | A list of phrases that make it stop writing the instant it says one. |
+| `stream` | Send the answer word by word as it is written, instead of all at once at the end. |
+| `system` | The standing instructions that sit in front of the whole conversation. |
+| `messages` | The conversation so far. |
+| `tools` | The list of tools the model is allowed to ask for. **Changing this changes the start of the prompt, which throws away the saved copy** — see the warning below. |
+| `tool_choice` | Whether it *must* use a tool, *may* pick one, or *must not*. |
+| `thinking` | The client saying outright "do not think on this one" (`{"type": "disabled"}`). Honoured by `API-9d`. (The `CLASSIFIER_NOTHINK=0` kill switch that disables this is an env var, so turning the *feature* off is Tier 3 — but sending the field is per request.) |
+| `chat_template_kwargs` | A direct override of thinking and effort, skipping the model-name shortcut. Use when you want the setting without changing the name. |
+| `metadata` | A label you attach to the call. We do not act on it. |
+| `kv_transfer_params` | For split prefill/decode servers. **We do not run that**, so it does nothing here. |
+
+### Picking a tier with the model name (`API-9`)
+
+Twelve names are served. They all run the same weights; the name only sets thinking and effort.
+
+| name you send | thinking? | effort | in plain words |
+|---|---|---|---|
+| `claude-haiku-*`, `*-nothink` | **no** | — | Answers straight away. Best for small background jobs like titles and summaries. |
+| `claude-sonnet-*`, `*-think-low` | yes | low | The everyday setting. `low` is the *empty* instruction, so thinking happens with **no extra prompt words**. |
+| `claude-opus-*`, `*-think-high` | yes | high | Thinks harder. Measured **best** on our maths benchmark: 11/12 correct. |
+| `claude-fable-5`, `*-think-max` | yes | max | Thinks hardest — **and scored worse**: 8/12, a third of answers cut off, 1.7x the tokens. Reach for it knowingly, not by default. |
+
+> **`max` is not "better than `high`".** It is slower, costlier and scored lower. `high` is the top
+> of the useful range. This is recorded because it is the opposite of what the names suggest.
+
+### Things that happen per request on their own
+
+You do not set these; our patches apply them to every call. Listed so nobody hunts for a knob.
+
+| patch | what it does, in plain words |
+|---|---|
+| `API-8` | Deletes any leaked "thinking out loud" text from earlier assistant turns before sending them back in. |
+| `API-10` | Catches broken tool instructions from the model instead of letting the request crash. |
+| `API-11a` | Removes a per-request counter that used to sit near the top of the prompt. Anything that changes up there throws away the saved copy of the whole prompt. |
+| `API-11b` | Stops a reminder note being hoisted to the very front on later turns, for the same reason. |
+| `API-12` | Writes one `PREFIX_WATCH` line per request with a fingerprint of the prompt's start, so you can see when the start moved. |
+| `API-13` | Keeps the tool list steady when a client briefly drops a tool, so one flap does not cost a full re-read. |
+| `API-14` | Adds `engine_cached_tokens` to the reply, telling you how much of your prompt was genuinely reused. |
+
+> **The prompt's beginning is precious.** The engine saves its notes on a prompt and reuses them
+> next turn. That only works if the **start** of the prompt is byte-for-byte identical. Change the
+> tools list, the system text, or anything before them, and the saved copy is worthless — the
+> engine re-reads all ~140,000 words, which takes about 14 seconds instead of half a second. Four
+> of the seven patches above exist purely to stop the start moving. Check `engine_cached_tokens`
+> on the reply to see whether you paid that cost.
 
 ## Tier 2 — boot-locked today, but the value is read per step or per request
 
