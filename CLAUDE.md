@@ -174,9 +174,17 @@ Two habits that have already paid for themselves here:
 - Default temperature is 1.0 (`--generation-config vllm`); pass `"temperature": 0` for determinism.
 - If `firmware-notifier` comes back after an update it crash-loops every 12s — re-mask
   `snap.firmware-updater.firmware-notifier.{timer,service}` (user units).
+- **Slow decode with KV well under 90% is NOT a KV problem.** If decode sits at 0.2-2 tok/s while
+  `GPU KV cache usage` reads 45-70%, `vllm:num_preemptions_total` is 0 and the hit rate is ~94%,
+  it is one long prefill taking the whole scheduler `token_budget` and starving everything behind
+  it — not exhaustion, not cache loss. The tell is `Drafted: 10 tokens` across a 10s window
+  (= two engine steps in ten seconds). Tune it **live**, no restart:
+  `bash local-ops/kv-flags.sh long_prefill_token_threshold 1024`. See `MNT-10` in
+  `docs/local/status/INCIDENTS.md`.
 - **Currently deployed: Vision-Exp**, `MAX_MODEL_LEN=1048576`, `MAX_NUM_SEQS=12`,
   `GPU_MEMORY_UTILIZATION=0.86`, `COMPILATION_CONFIG={"max_cudagraph_capture_size":72}`,
-  `PROTECTED_FRACTION=0.50`, `MTP_NUM_TOKENS=5`. **`MNT-8`/`MNT-9` are mounted but OFF** —
+  `PROTECTED_FRACTION=0.50`, `MTP_NUM_TOKENS=5`, `LONG_PREFILL_TOKEN_THRESHOLD=2048`.
+  **`MNT-8`/`MNT-9` are mounted but OFF** —
   they are gated on `/var/tmp/vllm-kv-flags/flags.json`, not on env, so an arm can be flipped
   without a restart (`bash local-ops/kv-flags.sh`); see `CACHE_TEST.md`. Re-check with
   `docker logs <container> | grep 'non-default args'` rather than trusting this line;

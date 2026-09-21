@@ -96,6 +96,7 @@ MNT-8|v1/core/kv_cache_utils.py|prepend_n(self|scratch pages queue behind cached
 MNT-8b|v1/core/block_pool.py|prepend_n(freed)|free_blocks cannot route scratch pages to the head of the queue
 MNT-9|v1/core/single_type_kv_cache_manager.py|_FLAG_PIN_HEAD|the static head is pinned only to the prompt end, and released FIFO
 MNT-6c|v1/core/single_type_kv_cache_manager.py|_recycle_cached_pages(|recycling destroys the prefix-cache mapping of every page it reuses
+MNT-10|v1/core/sched/scheduler.py|_mnt10_threshold(|one long prefill takes the whole token budget; decodes behind it get zero tokens per step
 '
 
 # PLG-14b is not a patch over a vLLM file -- it is an ADDED site-packages plugin,

@@ -78,6 +78,17 @@ services:
       # turn buries worthless pages behind live prefixes the allocator then evicts.
       # Inert until the flags file turns it on. Remove this line to roll back.
       - ./patches/patch8-kv_cache_utils.py:/opt/env/lib/python3.12/site-packages/vllm/v1/core/kv_cache_utils.py:ro
+      # MNT-10 (2026-09-21): makes --long-prefill-token-threshold live-tunable via
+      # the same flags file as MNT-8/9. The V1 scheduler walks self.running in order
+      # against ONE shared token_budget, so a request mid-chunked-prefill takes all
+      # 8192 and every request behind it gets ZERO tokens that step -- decode falls
+      # to 0.2-2 tok/s for minutes at 44-71% KV with zero preemptions. Stock's knob
+      # fixes it but is boot-only, and the right value is unknown (vllm#54919 says
+      # 4096 was not enough at MNBT=8192). The scheduler re-reads the field every
+      # step, so gating it turns a boot-per-arm sweep into a live flip.
+      # Boot default is set by --long-prefill-token-threshold below. Remove this
+      # line to roll back to stock scheduling.
+      - ./patches/mnt10-scheduler.py:/opt/env/lib/python3.12/site-packages/vllm/v1/core/sched/scheduler.py:ro
       # MNT-8 / MNT-9 runtime flags, node-local and NOT part of the repo (like
       # ~/vision-stage). Container env cannot change on a running engine, so an
       # env-gated A/B costs one cold boot per arm; this file is re-read once a
@@ -287,6 +298,7 @@ services:
         --max-model-len ${MAX_MODEL_LEN:-1048576}
         --max-num-seqs ${MAX_NUM_SEQS:-6}
         --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS:-8192}
+        --long-prefill-token-threshold ${LONG_PREFILL_TOKEN_THRESHOLD:-2048}
         --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.80}
         --enable-prefix-caching
         --async-scheduling

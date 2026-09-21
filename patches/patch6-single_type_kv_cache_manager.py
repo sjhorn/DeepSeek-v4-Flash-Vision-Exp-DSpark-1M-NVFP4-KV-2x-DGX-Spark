@@ -131,8 +131,15 @@ def _recycle_cached_pages() -> bool:
     stay reusable in the LRU. That keeps what MNT-6b is for -- keeping one long
     prefill from churning the shared queue -- without discarding checkpoints.
     Same cached/uncached discrimination vllm#43447 makes for the free queue.
+
+    **The default is False (MNT-6c), i.e. the fix is ON unless something turns it
+    off.** It was True until 2026-09-21, with the fix carried only by
+    ``/var/tmp/vllm-kv-flags/flags.json`` -- node-local state outside git, so a
+    rebuilt node or a cleared ``/var/tmp`` silently restored the bug. The flag is
+    now the escape hatch rather than the enabler: ``swa_recycle_cached 1``
+    restores stock eviction, live, with no restart. CACHE_TEST.md 10, item 2.
     """
-    return bool(_flag("swa_recycle_cached", True))
+    return bool(_flag("swa_recycle_cached", False))
 
 
 # MNT-8 (vllm#43447, ported 2026-09-20): free a request's blocks in two groups —

@@ -1,0 +1,139 @@
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -61,6 +61,105 @@ from vllm.v1.utils import record_function_or_nullcontext
+ logger = init_logger(__name__)
+ 
+ 
++# ---------------------------------------------------------------------------
++# MNT-10 (2026-09-21): make `long_prefill_token_threshold` live-tunable.
++#
++# WHY.  vLLM's V1 scheduler walks `self.running` IN ORDER against ONE shared
++# `token_budget` (= max_num_batched_tokens, 8192 here).  A request still in
++# chunked prefill takes `min(remaining_prefill, token_budget)` -- i.e. ALL of
++# it -- the `while ... and token_budget > 0` guard then fails, and every request
++# behind it is scheduled ZERO tokens that step.  A decoding sequence needs about
++# six.  It gets none.
++#
++# Measured on our own traffic 2026-09-20/21 (13h, 696 windows): single-request
++# decode is healthy at 36 tok/s median, but aggregate falls to 0.2-2 tok/s for
++# minutes at a time whenever a ~186K-token prompt is prefilling -- at 44-71% KV,
++# with ZERO preemptions and a flat ~94% prefix hit rate.  The tell in the log is
++# `Drafted: 10 tokens` across a 10-second window: at k=5 that is two engine steps
++# in ten seconds.  See docs/local/status/INCIDENTS.md.
++#
++# Stock already has the right knob -- `long_prefill_token_threshold` caps how
++# much ONE request may take per step, leaving the rest of the budget for the
++# decoders behind it -- but it defaults to 0 (disabled) and is BOOT-ONLY.
++#
++# WHY GATE IT.  The scheduler re-reads this field on EVERY step, so nothing but
++# the config plumbing forces a restart.  The right value is genuinely unknown:
++# MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks#110 (our exact hardware) fixed a
++# 440s freeze with 1024 against MNBT=2048, while vllm#54919 (2-node DGX Spark
++# TP2) reports 4096 against MNBT=8192 was NOT enough.  Gating it turns a
++# 250-600s cold boot per arm into a live flip, which is the same trade that made
++# MNT-8/MNT-9 affordable to test.
++#
++# Precedence, matching patch6: env var VLLM_LONG_PREFILL_TOKEN_THRESHOLD wins,
++# then the flags file, then whatever --long-prefill-token-threshold set at boot
++# (2048 in docker-compose.dspark.yml).  So the CLI value is the floor you get
++# with no flags file at all, and a cleared /var/tmp cannot silently disable it.
++#
++# Roll back by removing the bind-mount line for this file from the compose.
++# ---------------------------------------------------------------------------
++_MNT10_FLAGS = "/var/tmp/vllm-kv-flags/flags.json"
++_mnt10_cache: "tuple[float, dict]" = (0.0, {})
++_mnt10_logged: "set[int]" = set()
++
++
++def _mnt10_flags() -> dict:
++    """Re-read the flags file at most once a second.
++
++    A half-written file reads as bad JSON; we return the LAST GOOD value rather
++    than {} so a mid-run rewrite cannot silently drop the cap for a step.  That
++    is the opposite of the kv-flags convention on purpose -- here "no opinion"
++    must fall through to the boot value, not to 0/disabled.
++    """
++    global _mnt10_cache
++    now = time.monotonic()
++    ts, cached = _mnt10_cache
++    if now - ts < 1.0:
++        return cached
++    try:
++        import json
++
++        with open(_MNT10_FLAGS) as fh:
++            data = json.load(fh)
++        if not isinstance(data, dict):
++            data = cached
++    except Exception:
++        data = cached
++    _mnt10_cache = (now, data)
++    return data
++
++
++def _mnt10_threshold(boot_value: int) -> int:
++    """The per-step cap for a single request, or 0 to disable the cap.
++
++    `boot_value` is `scheduler_config.long_prefill_token_threshold`, i.e. what
++    --long-prefill-token-threshold set at boot.  Returned unchanged unless an
++    env var or the flags file overrides it.
++    """
++    import os
++
++    raw = os.environ.get("VLLM_LONG_PREFILL_TOKEN_THRESHOLD")
++    if raw is None:
++        raw = _mnt10_flags().get("long_prefill_token_threshold")
++    if raw is None:
++        return boot_value
++    try:
++        value = int(raw)
++    except (TypeError, ValueError):
++        return boot_value
++    if value < 0:
++        return boot_value
++    if value not in _mnt10_logged:
++        _mnt10_logged.add(value)
++        logger.info(
++            "MNT-10: long_prefill_token_threshold overridden to %d "
++            "(boot value %d) -- one request may take at most this many tokens "
++            "per step, leaving the rest of the budget for decodes behind it",
++            value,
++            boot_value,
++        )
++    return value
++
++
+ class Scheduler(SchedulerInterface):
+     def __init__(
+         self,
+@@ -387,8 +486,14 @@ class Scheduler(SchedulerInterface):
+                 + request.num_output_placeholders
+                 - request.num_computed_tokens
+             )
+-            if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
+-                num_new_tokens = self.scheduler_config.long_prefill_token_threshold
++            # MNT-10: live-tunable. This is THE site that matters -- capping a
++            # running request's prefill chunk here is what leaves token_budget
++            # for the decodes further down `self.running`.
++            _mnt10_cap = _mnt10_threshold(
++                self.scheduler_config.long_prefill_token_threshold
++            )
++            if 0 < _mnt10_cap < num_new_tokens:
++                num_new_tokens = _mnt10_cap
+             num_new_tokens = min(num_new_tokens, token_budget)
+ 
+             # Make sure the input position does not exceed the max model len.
+@@ -652,7 +757,12 @@ class Scheduler(SchedulerInterface):
+                     # `request.num_prompt_tokens` to consider the resumed
+                     # requests, which have output tokens.
+                     num_new_tokens = request.num_tokens - num_computed_tokens
+-                    threshold = self.scheduler_config.long_prefill_token_threshold
++                    # MNT-10: same override on the admission path, so a newly
++                    # admitted long prefill is capped from its very first step
++                    # rather than after it has already starved one step.
++                    threshold = _mnt10_threshold(
++                        self.scheduler_config.long_prefill_token_threshold
++                    )
+                     if 0 < threshold < num_new_tokens:
+                         num_new_tokens = threshold
+ 

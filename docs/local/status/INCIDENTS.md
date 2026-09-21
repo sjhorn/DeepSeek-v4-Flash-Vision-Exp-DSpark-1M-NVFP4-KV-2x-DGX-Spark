@@ -708,8 +708,14 @@ per 8192-token chunk for tens of consecutive steps, and everything queued behind
 for the duration. That is the two-minute flat line, and it is why the per-request rate lands near
 0.2-2 tok/s rather than the ~2.9 tok/s (one spec-decode step) that co-scheduling would have given.
 
-`max_num_partial_prefills` and `max_long_partial_prefills` are already **1**, so limiting
-*concurrent* prefills cannot help — the damage is done by a **single** long prefill.
+**`max_num_partial_prefills` cannot help, and not for the reason it looks like.** It reads as `1`,
+which suggests concurrent long prefills are already limited. They are not: the field appears **only**
+in `engine/arg_utils.py` and `config/scheduler.py` — grep the whole installed package — and is
+**never read by any scheduler code**. It is dead config on this build, exactly as
+[`../PATCHES-KV.md`](../PATCHES-KV.md) recorded when assessing `co-l/ds4-prefix-cache-fixes`
+`02-schedfix`. So there is **no** limit on concurrent partial prefills, which is why several 185K+
+requests pile into `self.running` together — and a *single* one is already enough to zero the
+budget. Capping per-request tokens per step is the only lever that works here.
 
 **This exonerates `MNT-6c` (CACHE_TEST.md 10, item 1).** The fix is holding under real concurrent
 load: hit rate flat at ~94%, zero preemptions, KV never above 71.5%. The removed eviction is not

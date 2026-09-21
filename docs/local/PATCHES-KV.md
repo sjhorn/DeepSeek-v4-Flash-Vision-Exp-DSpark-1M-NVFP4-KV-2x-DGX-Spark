@@ -1,6 +1,6 @@
-# PATCHES-KV.md — the KV / prefix-cache core patches (MNT-5 … MNT-9)
+# PATCHES-KV.md — the KV / prefix-cache core patches (MNT-5 … MNT-10)
 
-Four bind-mounted files inside vLLM's KV machinery:
+Five bind-mounted files inside vLLM's KV and scheduling machinery:
 
 | id | file | target | what |
 |---|---|---|---|
@@ -11,6 +11,7 @@ Four bind-mounted files inside vLLM's KV machinery:
 | `MNT-8` | `patches/patch8-kv_cache_utils.py` (+ patch6, patch7) | `v1/core/kv_cache_utils.py` ″ | uncached pages to the FRONT of the free queue |
 | `MNT-9` | `patches/patch6-single_type_kv_cache_manager.py` | `v1/core/single_type_kv_cache_manager.py` | pin the static head, in a budget reserved from `MNT-6a` |
 | `MNT-6c` | ″ | ″ | recycle only pages with no cache entry, so decode stops destroying prefix-cache mappings |
+| `MNT-10` | `patches/mnt10-scheduler.py` | `v1/core/sched/scheduler.py` | make `long_prefill_token_threshold` live-tunable, so one long prefill cannot take the whole token budget |
 
 > **`MNT-8` and `MNT-9` are mounted but OFF, and neither is measured yet.** They are the two
 > mechanisms `CACHE_TEST.md` argues for; the write-up, the arms and the per-group numbers live
@@ -66,7 +67,7 @@ sandbox dir and run the patch with `VLLM_PYTHON_DIR=<sandbox>` (zero cluster ris
 | Patch | Target | Disposition |
 | --- | --- | --- |
 | `01-reffix` | `tokenizers/deepseek_v4_encoding.py` | **Skip.** Despite the name it is reasoning-effort prompt tiers, nothing to do with caching. |
-| `02-schedfix` | `v1/core/sched/scheduler.py` | **Deferred; the bug is real.** `max_num_partial_prefills` appears ONLY in `engine/arg_utils.py` and `config/scheduler.py` — never read by any scheduler code, so `--max-num-partial-prefills` is a **no-op** on our build. Porting needs new scheduler state (`_inflight_prefills`) with a correct add/remove lifecycle; issue-#43 A3 additionally needs `next_decode_eligible_step`, `current_step`, `defer_prefills` which we lack (0 occurrences each). Likely inert anyway: KV capacity gates admission to 1-3 concurrent long-context requests, below their `min(cap, 3)` ceiling. |
+| `02-schedfix` | `v1/core/sched/scheduler.py` | **Deferred; the bug is real — and `MNT-10` (2026-09-21) now bind-mounts this same file, so a future port has somewhere to land.** The starvation this patch aims at was since measured on our own traffic and fixed more cheaply, by capping per-request tokens per step rather than by adding prefill-admission state: see [`status/INCIDENTS.md`](status/INCIDENTS.md). The no-op finding below is CONFIRMED still true 2026-09-21 (`max_num_partial_prefills` appears only in `arg_utils.py` and `config/scheduler.py` across the whole installed package). `max_num_partial_prefills` appears ONLY in `engine/arg_utils.py` and `config/scheduler.py` — never read by any scheduler code, so `--max-num-partial-prefills` is a **no-op** on our build. Porting needs new scheduler state (`_inflight_prefills`) with a correct add/remove lifecycle; issue-#43 A3 additionally needs `next_decode_eligible_step`, `current_step`, `defer_prefills` which we lack (0 occurrences each). Likely inert anyway: KV capacity gates admission to 1-3 concurrent long-context requests, below their `min(cap, 3)` ceiling. |
 | `03-dedupe` | `v1/core/block_pool.py` | **PORTED as `MNT-7`.** Our `CachedBlockHashToBlock.insert()` explicitly merges a duplicate `(hash, group)` into a dict while lookups return only one, so stale copies hold LRU slots forever. 14-line guard; **3.9x retention** (72,109 → 280,690 tokens), needle 5/5, no throughput cost. |
 | `04-boundfix` | `single_type_kv_cache_manager.py` + `kv_cache_coordinator.py` | **Not applicable.** It fixes *sparse retention*, which our fork does not have: `reachable_block_mask`, `retention_interval`, `scheduler_block_size`, `_swa_anchor_slack`, `eagle_slack` are **0 occurrences** in our tree. Nothing to port onto. (It does *not* conflict with `MNT-6b` as first feared — `MNT-6b` touches `__init__`, `allocate_new_blocks`, `take_new_block_ids`, `free`, `remove_skipped_blocks`; boundfix targets `cache_blocks`.) |
 
@@ -130,3 +131,81 @@ metrics) plus `pristine-vllm-files.tgz`.
 > Reading through a bind-mount gives you the *patched* file, not the original — that is how
 > `local-ops/baseline-20260914/MISLABELLED-was-patched-single_type_kv_cache_manager.py` came to be
 > filed as pristine for five days.
+
+## MNT-10 — one long prefill takes the whole token budget, and everything behind it stops
+
+**The failure.** vLLM's V1 scheduler walks `self.running` **in order** against **one shared**
+`token_budget` (= `max_num_batched_tokens`, 8192 here):
+
+```python
+token_budget = self.max_num_scheduled_tokens
+while req_index < len(self.running) and token_budget > 0:
+    ...
+    if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
+        num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+    num_new_tokens = min(num_new_tokens, token_budget)
+    token_budget -= num_new_tokens
+```
+
+`long_prefill_token_threshold` defaults to **0**, so the clamp is dead and a request still in
+chunked prefill takes `min(remaining, token_budget)` — **all 8192**. The `while` guard then fails
+and every request behind it is scheduled **zero tokens that step**. A decoding sequence needs about
+six. It gets none.
+
+**Measured on our own traffic**, 2026-09-20 19:33 → 2026-09-21 08:09, 696 ten-second windows of
+real Claude-Code-with-subagents load. Full numbers and the worked two-minute example are in
+[`status/INCIDENTS.md`](status/INCIDENTS.md); the short version:
+
+| | |
+|---|---|
+| decode, single request, median | **36.0 tok/s** |
+| decode per request, `Running=5`, p10 | **0.5 tok/s** |
+| prefill : decode tokens | **12.4 : 1** |
+| preemptions / max KV / hit rate | **0** / 71.5% / flat ~94% |
+
+Zero preemptions with a flat hit rate is what separates this from both KV exhaustion and cache
+loss — **it exonerated `MNT-6c` under load**, which was `CACHE_TEST.md` §10 item 1 and the only
+real risk that fix introduced.
+
+**Why it is gated rather than just set.** Stock already has the right knob; it is simply boot-only.
+The scheduler re-reads the field on **every step**, so nothing but config plumbing forces a restart,
+and the right value is genuinely unknown:
+
+- [GLM-5.3-Flash-EXL3-2x-DGX-Sparks#110](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/issues/110)
+  — **our exact hardware** (2× DGX Spark GB10, TP=2 over RoCEv2, 1M context), same diagnosis to the
+  same line. `1024` against `MNBT=2048` took a **440 s** freeze to **17.9–24.9 s**; cost **+10.6%**
+  on the long prefill *under contention only*, nothing solo.
+- [vllm#54919](https://github.com/vllm-project/vllm/issues/54919) — same symptom on 2-node DGX Spark
+  TP2, open and undiagnosed. **Reports `4096` against `MNBT=8192` was not enough**, which is why our
+  boot default is 2048 and not 4096.
+
+Gating turns that sweep from a 250-600 s cold boot per arm into a live flip — the same trade that
+made `MNT-8`/`MNT-9` affordable to test.
+
+```bash
+bash local-ops/kv-flags.sh long_prefill_token_threshold 1024   # try a tighter cap, live
+bash local-ops/kv-flags.sh long_prefill_token_threshold 0      # disable the cap (restores the bug)
+bash local-ops/kv-flags.sh reset                               # omits the key -> boot value, 2048
+```
+
+**Two deliberate differences from the other flags**, both because "no opinion" must mean *the boot
+value*, never *0/disabled*:
+
+1. `reset` does **not** write this key. With no key the engine falls through to
+   `--long-prefill-token-threshold` from the compose (2048), which is the state we want.
+2. A corrupt or half-written flags file returns the **last good** value, then the boot value. Every
+   other flag reads a bad file as "off"; here that would silently restore the starvation.
+
+**Verification after a restart — the boot log will NOT tell you.** The confirming `logger.info` in
+`config/scheduler.py` sits inside a `max_num_partial_prefills > 1` branch, which is false for us, so
+nothing is printed at our settings. Check these instead:
+
+```bash
+docker logs <container> | grep 'non-default args'        # must contain long_prefill_token_threshold: 2048
+bash scripts/check-local-patches.sh <container>          # MNT-10 row must pass
+docker logs <container> | grep 'MNT-10'                  # only if a flags/env OVERRIDE is active
+```
+
+The pre-flight that made this safe to deploy: the `long_prefill_token_threshold = 0` reset in
+`config/scheduler.py` fires **only for encoder-decoder models** (we are not one), and the
+`max_num_partial_prefills > 1` branch only *auto-fills a zero* — it does not clear a value we set.

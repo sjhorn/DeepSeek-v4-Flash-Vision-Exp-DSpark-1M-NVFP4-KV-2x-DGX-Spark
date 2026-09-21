@@ -13,7 +13,21 @@
   bash local-ops/kv-flags.sh pin_static_head 1
 #   bash local-ops/kv-flags.sh reset               # the RECOMMENDED state (keeps the fix)
 #
-# Flags (defaults OFF, which is stock behaviour):
+# Flags (defaults OFF, which is stock behaviour -- EXCEPT the two noted below,
+# swa_recycle_cached and long_prefill_token_threshold, whose defaults are ours):
+#   long_prefill_token_threshold  MNT-10. Max tokens ONE request may take per
+#                                 scheduler step. **Omitted from `reset` ON
+#                                 PURPOSE**: with no key the engine falls through
+#                                 to the boot value (--long-prefill-token-threshold
+#                                 2048 in the compose), which is the state we want.
+#                                 Set it only to A/B a different cap, e.g.
+#                                 `kv-flags.sh long_prefill_token_threshold 1024`;
+#                                 `0` disables the cap and restores the starvation.
+#                                 Unlike every other flag here, a corrupt/missing
+#                                 flags file falls back to the LAST GOOD value and
+#                                 then the boot value -- never to 0. See
+#                                 docs/local/status/INCIDENTS.md "Decode collapses
+#                                 to ~2 tok/s beside a long prefill".
 #   free_queue_prepend_uncached   MNT-8, vllm#43447 free-queue ordering
 #   pin_static_head               MNT-9, pin the tools+system head at B
 #   head_pin_fraction             MNT-9 budget, share of the pool per manager (0.05)
@@ -22,9 +36,15 @@
 #                                 diagnosis only)
 #   swa_recycle                   MNT-6b master switch (default 1 = recycle).
 #                                 VLLM_SWA_RECYCLE_SKIPPED_BLOCKS still overrides.
-#   swa_recycle_cached            MNT-6c. **0 is the CONFIRMED FIX and is what runs
-#                                 today**; the code default is still 1, so this file
-#                                 is what keeps the fix on. Recycles only pages with
+#   swa_recycle_cached            MNT-6c. **0 is the CONFIRMED FIX. Since the
+#                                 2026-09-21 restart the CODE default is 0, so the
+#                                 fix survives a cleared /var/tmp and a fresh node,
+#                                 and this file is the ESCAPE HATCH (set 1 for the
+#                                 old, broken behaviour) rather than the enabler.**
+#                                 Note the fail-safe direction also flipped: bad
+#                                 JSON reads as "every flag at its default", which
+#                                 now KEEPS the fix instead of silently dropping it.
+#                                 Recycles only pages with
 #                                 NO cache entry, so prefix-cache mappings survive
 #                                 decode. Head after a session 0.0%/14.4s -> 99.5%/
 #                                 0.5s, 3/3. CACHE_TEST.md 9.
