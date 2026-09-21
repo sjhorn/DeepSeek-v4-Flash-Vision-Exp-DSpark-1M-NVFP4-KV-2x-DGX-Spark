@@ -1,37 +1,40 @@
-# CACHE_TEST.md — three candidate prefix-cache mechanisms against our tree, and how we would test them
+# CACHE_TEST.md — why long sessions re-prefilled, what fixed it, and what is left
 
-**Status (2026-09-21): the cause is CONFIRMED and FIXED — see §9. `swa_recycle_cached: 0` is live on
-both nodes; a real session's head now survives at 99.4% / 0.49s where it read 0.0% / 14.16s.
-Historical detail below. (2026-09-20, after the 15:34Z boot): the cause is found — see §8. Decode across several
-turns destroys the prompt's cached prefix, reproducibly, with no client and no pressure involved.
-Mechanisms 1 and 3 are implemented, mounted, measured and INERT (§6), both switched back OFF;
-Mechanism 2 is not implemented. The next test targets `MNT-6b` and needs one restart (§8.4).**
+**READ THIS FIRST. Everything below §0 is the investigation, in the order it happened, including the
+wrong turns. If you only need the state of the world, this box is it.**
 
-`MNT-8` (Mechanism 1) and `MNT-9` (Mechanism 3) ship gated on a flags file rather than container
-env, so the whole A/B costs **one** restart instead of three:
+| | |
+|---|---|
+| **The bug** | A conversation's cached prompt became unreusable after a few turns. A new session paid a full cold prefill: **0.0% hit, ~14s**, instead of ~0.5s. |
+| **The cause** | **Our own `MNT-6b`.** Recycling a sliding-window page called `_maybe_evict_cached_block()` on it, destroying its `(hash → block)` mapping. Decode walks the window across the prompt's checkpoints; the coordinator takes the **minimum across KV groups**, so the hit reads 0% even though full attention still holds the whole head. Confirmed §8, §9. |
+| **The fix** | **`MNT-6c`** — recycle only pages with no cache entry. Flag `swa_recycle_cached: 0`. |
+| **Status** | **LIVE on both nodes since 2026-09-21.** Head after a session: **99.5% / 0.5s** (was 0.0% / 14.4s), 3/3 with no overlap; real Claude Code session **99.4% / 0.49s**. Sessions also run **~35% faster** (82s → 50s). |
+| **Reproduce (45-90s, no restart)** | `python3 local-ops/xsess/session-sim.py 7 400 mylabel` — DEAD with the fix off, ALIVE with it on. |
+| **Revert** | `bash local-ops/kv-flags.sh swa_recycle_cached 1` — no restart. |
+| **What is left** | **§10.** Item 1 (does the fix cost anything under load?) is the only urgent one. |
 
 ```bash
-bash local-ops/kv-flags.sh                               # arm each node is running
-bash local-ops/kv-flags.sh free_queue_prepend_uncached 1 # arm B
-bash local-ops/kv-flags.sh pin_static_head 1             # arm C
-bash local-ops/kv-flags.sh reset                         # arm A
-HOST=spark-45ea bash local-ops/kv-mech-tests.sh          # 13 offline checks, no GPU
+bash local-ops/kv-flags.sh                          # what each node is running
+bash local-ops/kv-flags.sh reset                    # the RECOMMENDED state (keeps the fix)
+bash local-ops/kv-flags.sh swa_recycle_cached 1     # old behaviour, for an A/B
+HOST=spark-45ea bash local-ops/kv-mech-tests.sh     # 16 offline checks, no GPU, no restart
 ```
 
-Neither flag does anything until the next restart imports the mounted files; after that, arms flip
-with no restart at all. **Until that restart `check-local-patches.sh` reports `FAIL` for `MNT-8`,
-`MNT-8b` and `MNT-9`, and that is correct** — a single-file bind mount holds the inode git replaced,
-so the container is still reading the pre-push file (`INCIDENTS.md`, 2026-09-20). The flags file is
-deliberately not subject to this: its **directory** is what the compose mounts.
-Assessed 2026-09-20 against the running image `vllm-dspark-runtime:dspark-nvfp4-stage-c`
-(vLLM `0.21.1rc1.dev339+g1967a5627bc3`), by diffing the PR against the image's real sources —
-`patches/pristine/` plus `kv_cache_utils.py` / `kv_cache_coordinator.py` read out of the container.
+> **Two traps that cost real time here.**
+> 1. **Never warm the head before the treatment.** A reproducer that probes first makes *both* arms
+>    look fine (§9.2). `session-sim.py` stamps the system prompt unique and probes **last**.
+> 2. **A commit moves the head.** Claude Code's system prompt carries git status and recent commits,
+>    so two sessions either side of a commit are not comparable (59.3% partial hit, measured).
 
-Two of the three mechanisms come from upstream vllm#43447; the third (§3a, pinning the static head
-in-engine) was proposed separately and is assessed here because it competes for the same budget and
-edits the same files. This is the working document for the experiment. The standing evidence it draws on lives in
-[`docs/local/PREFIX-CACHE.md`](docs/local/PREFIX-CACHE.md); the one-line verdict lives in
-[`docs/local/UPSTREAM.md`](docs/local/UPSTREAM.md). Nothing is restated in all three.
+**`MNT-8` and `MNT-9` are mounted but OFF.** Neither was the answer (§6); they are kept because
+`MNT-9`'s warning is a useful instrument. `Mechanism 2` was never built and is proposed for deletion
+(§10).
+
+Assessed against image `vllm-dspark-runtime:dspark-nvfp4-stage-c` (vLLM
+`0.21.1rc1.dev339+g1967a5627bc3`). Standing cache evidence lives in
+[`docs/local/PREFIX-CACHE.md`](docs/local/PREFIX-CACHE.md), the patch rows in
+[`docs/local/PATCH-REGISTRY.md`](docs/local/PATCH-REGISTRY.md), the config change in
+[`docs/local/status/CONFIG.md`](docs/local/status/CONFIG.md). Nothing is restated in all of them.
 
 ---
 
@@ -743,15 +746,14 @@ fixed, and keeping them on a list pretends they are pending.
 3. **Items 5, 6, 7** should be deleted from the plan.
 4. **Items 3, 4, 10** are park-and-watch.
 
-## 5. What is settled and needs no further work
+## 11. Settled background facts
 
-- **Patch 6 is applied and both settings are on**, on both nodes, in the running engine:
-  `PROTECTED_FRACTION=0.50` (`VLLM_PROTECTED_PROMPT_BLOCKS_FRACTION`), `SWA_RECYCLE=1`
-  (`VLLM_SWA_RECYCLE_SKIPPED_BLOCKS`), both mounts present, markers present, and the boot log
-  carries the `MNT-6a: protected prompt block cap …` lines for all five groups. The
-  `Unknown vLLM environment variable detected: VLLM_SWA_RECYCLE_SKIPPED_BLOCKS` warning is vLLM's
-  `envs.py` not recognising a var that is not upstream's; our patch reads it directly via
-  `os.environ` and recycling is on.
+- **`MNT-6a` and `MNT-6b` are applied on both nodes**, mounts present, markers present, and the boot
+  log carries the `MNT-6a: protected prompt block cap …` lines for all five KV groups.
+  `PROTECTED_FRACTION=0.50` is still a container env var. **`SWA_RECYCLE` is no longer one** — the
+  compose line was removed 2026-09-20 so the flags file governs (`swa_recycle`), because an env var
+  set there would silently override the file and make an arm a no-op. Recycling itself is still ON;
+  what `MNT-6c` changed is that it no longer evicts the cache entry of the pages it recycles.
 - **No mechanism here supersedes `MNT-6a`, `MNT-6b` or `MNT-7`.** Mechanism 1 is the missing
   end-of-request half of `MNT-6b`; Mechanism 3 is a narrowing of `MNT-6a`, at a different boundary
   and with a hit-aware release. Both build on what is deployed rather than replacing it.

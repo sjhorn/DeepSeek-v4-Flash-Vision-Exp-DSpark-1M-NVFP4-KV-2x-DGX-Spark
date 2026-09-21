@@ -11,7 +11,7 @@
 #   bash local-ops/kv-flags.sh swa_recycle_cached 0   # arm E -- the likely fix
   bash local-ops/kv-flags.sh swa_recycle 0          # arm D -- MNT-6b off entirely
   bash local-ops/kv-flags.sh pin_static_head 1
-#   bash local-ops/kv-flags.sh reset               # everything OFF (arm A)
+#   bash local-ops/kv-flags.sh reset               # the RECOMMENDED state (keeps the fix)
 #
 # Flags (defaults OFF, which is stock behaviour):
 #   free_queue_prepend_uncached   MNT-8, vllm#43447 free-queue ordering
@@ -22,10 +22,12 @@
 #                                 diagnosis only)
 #   swa_recycle                   MNT-6b master switch (default 1 = recycle).
 #                                 VLLM_SWA_RECYCLE_SKIPPED_BLOCKS still overrides.
-#   swa_recycle_cached            MNT-6c (default 1 = today's behaviour). Set 0 to
-#                                 recycle only pages with NO cache entry, so the
-#                                 prefix-cache mappings survive decode. This is the
-#                                 arm for the 2026-09-20 root cause, CACHE_TEST.md 8.
+#   swa_recycle_cached            MNT-6c. **0 is the CONFIRMED FIX and is what runs
+#                                 today**; the code default is still 1, so this file
+#                                 is what keeps the fix on. Recycles only pages with
+#                                 NO cache entry, so prefix-cache mappings survive
+#                                 decode. Head after a session 0.0%/14.4s -> 99.5%/
+#                                 0.5s, 3/3. CACHE_TEST.md 9.
 #
 # A flip takes effect on the NEXT request. It does not re-order blocks already
 # freed, so give an arm a fresh session, not a running one. An env var of the
@@ -53,7 +55,12 @@ esac
 
 for n in $NODES; do
   if [ -z "$key" ]; then
-    ssh -n "${USER_AT}@${n}" "mkdir -p \$(dirname $FLAGS) && printf '%s\n' '{\"free_queue_prepend_uncached\": 0, \"pin_static_head\": 0}' > $FLAGS"
+    # RESET = the RECOMMENDED state, not the pre-2026-09-21 one. swa_recycle_cached
+    # MUST be listed here: it is the confirmed fix for the prefix being destroyed by
+    # multi-turn decode (CACHE_TEST.md 9), and an earlier reset that wrote only two
+    # keys would have silently restored the bug. To get the OLD behaviour for an
+    # A/B, set it explicitly: `kv-flags.sh swa_recycle_cached 1`.
+    ssh -n "${USER_AT}@${n}" "mkdir -p \$(dirname $FLAGS) && printf '%s\n' '{\"free_queue_prepend_uncached\": 0, \"pin_static_head\": 0, \"swa_recycle\": 1, \"swa_recycle_cached\": 0}' > $FLAGS"
   else
     [ -n "$val" ] || { echo "usage: $0 <flag> <value> | reset" >&2; exit 2; }
     # Rewrite atomically: a half-written file reads as bad JSON, which the
