@@ -721,6 +721,37 @@ what is costing throughput here.
 prefilled instead of 1; buys back decode during prefill. Prefer it to lowering
 `max_num_batched_tokens`, which would slow prefill without fixing the ordering.
 
+**This is known upstream, and the fix is confirmed on our exact hardware.**
+
+- [MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks#110](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/issues/110)
+  — **2x DGX Spark GB10, TP=2 over RoCEv2, `max_model_len` 1,000,000**, i.e. our rig. Same
+  diagnosis, to the same line: "the scheduler allocated `min(remaining, token_budget)` to each
+  chunked prefill without limits". A 325K cold prefill froze a warm 325K session for **440 s**;
+  `--long-prefill-token-threshold 1024` (at `MNBT=2048`) cut the victim's follow-ups to
+  **17.9-24.9 s**, median 19.8 s, zero evictions. Cost: **+10.6%** on the long prefill *under
+  contention only* — no measurable penalty solo. They also note a secondary effect we should expect
+  and not misread: **cached blocks are lost while a request waits, which looks like a prefix-cache
+  failure and is not one.**
+- [vllm-project/vllm#54919](https://github.com/vllm-project/vllm/issues/54919) — same symptom class
+  on **2-node DGX Spark TP2**: "aggregate decode throughput falls to ~0.5-5 tok/s for 3-7 minutes"
+  with KV free and the waiting queue empty. Open, no maintainer diagnosis. **Caution worth heeding:
+  that reporter capped prefill at 4096 against `MNBT=8192` and said the slowdown persisted** — a
+  50% cap was not enough. That argues for 2048 or lower against our 8192, not 4096.
+- [vllm-project/vllm#54145](https://github.com/vllm-project/vllm/pull/54145) (`--min-prefill-chunk-tokens`)
+  is a *different* knob for the inverse problem and is **unmerged** and conflicted. Not ours.
+- Nothing about this is DeepSeek-V4-Flash-specific — it is generic V1 scheduler behaviour.
+
+**Pre-flight, checked so we do not spend a boot on a silent no-op** (`vllm/config/scheduler.py`):
+the `long_prefill_token_threshold = 0` reset at line 229 fires **only for encoder-decoder models**,
+which we are not. The `max_num_partial_prefills > 1` branch only *auto-fills* the value when it is
+0; it does **not** clear one we set. So an explicit setting is honoured at
+`max_num_partial_prefills=1` and does take effect in the running loop.
+
+**But it logs nothing.** The confirming `logger.info` sits inside the `max_num_partial_prefills > 1`
+branch, so at our settings there is **no boot-log line proving the threshold took**. Verify it the
+other way — `docker logs <container> | grep 'non-default args'` must show
+`'long_prefill_token_threshold': 2048`. Treat a missing entry there as the setting not applied.
+
 **Client-side mitigations that need no restart:** fewer concurrent subagents, and smaller subagent
 prompts. Each subagent carries its own `tools` array — four distinct `tools=` hashes were live in
 the last 300 requests — so each one's first turn is a cold prefill of 100K+ tokens, and those cold
