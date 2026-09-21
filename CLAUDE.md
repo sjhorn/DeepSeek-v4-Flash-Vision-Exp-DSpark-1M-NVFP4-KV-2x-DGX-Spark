@@ -20,6 +20,7 @@ same facts were restated in two places and drifted apart.
 | find out why a session re-prefilled, or measure the cache | `docs/local/PREFIX-CACHE.md` |
 | choose a thinking tier or effort level | `docs/local/THINKING-AND-EFFORT.md` |
 | pull from upstream, or judge an upstream change | `docs/local/UPSTREAM.md` |
+| **know whether a change needs a restart, or can be made live** | `docs/local/RUNTIME-SURFACE.md` |
 | find a tool in `local-ops/` | `docs/local/TOOLING.md` |
 | know the current config, KV pool, node versions | `docs/local/status/CONFIG.md` |
 | compare this boot to the last | `docs/local/status/BOOT-METRICS.md` |
@@ -128,6 +129,11 @@ When asking, state all four:
 
 A restart is genuinely required only to change code that is already imported (bind-mounted `.py`
 files) or an env var the container reads at start.
+
+**Before assuming a knob is boot-only, check `docs/local/RUNTIME-SURFACE.md`.** Several values are
+boot-locked only because of *where* they are read from, not because the engine cannot change them:
+the scheduler re-reads them every step. Pointing that read at the flags file makes them live
+forever after, which is all `MNT-10` did. `PROTECTED_FRACTION` is the next such candidate.
 
 **Do not restart merely to "apply" a push.** A push has already put the files in place; they take
 effect at the next restart whenever it happens, for whatever reason. If the change genuinely needs
