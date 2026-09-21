@@ -137,6 +137,7 @@ the attribute alone would desynchronise the two.
 | the model itself (text ↔ vision) | different weights |
 | **every bind-mounted `.py` (`MNT-*`, `API-*`)** | Python imports the module once; the container holds the inode it imported at boot |
 | container env (`VLLM_*`, `PROTECTED_FRACTION`) | a process cannot have its environment changed from outside |
+| `SERVER_TOOL_STREAM`, `SERVER_TOOL_MAX_ROUNDS` (`API-15`) | container env, read at import — the kill switch and round cap for the streamed server-tool turn |
 | `--long-prefill-token-threshold` **as a boot default** | it is a CLI arg — but `MNT-10` makes the *effective* value Tier 1 |
 
 > **A `git push` is not a restart.** It replaces files on the node; the running container keeps the

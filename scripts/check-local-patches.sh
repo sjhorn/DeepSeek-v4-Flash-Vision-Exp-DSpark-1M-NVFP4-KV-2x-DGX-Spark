@@ -88,6 +88,8 @@ API-11b|entrypoints/anthropic/serving.py|def leading_system_boundary|every turn 
 API-12|entrypoints/anthropic/serving.py|_PREFIX_WATCH|no PREFIX_WATCH line; head moves become undetectable
 API-13|entrypoints/anthropic/serving.py|_STICKY_TOOLS|a flapping client tool shrinks the tools array, moving the head
 API-14|entrypoints/anthropic/serving.py|_engine_cached_tokens|the engine num_cached_tokens value never reaches the client
+API-15|entrypoints/anthropic/serving.py|_stream_server_tool_turn|a streamed server-tool turn generates the whole answer twice
+API-15p|entrypoints/anthropic/protocol.py|pause_turn|the server-tool round cap forces an answer instead of pausing
 MNT-5|v1/engine/detokenizer.py|VLLM_SUPPRESS_STOPS_IN_REASONING|stop strings can fire inside the reasoning segment
 MNT-6a|v1/core/single_type_kv_cache_manager.py|_PROTECTED_FRACTION_ENV|unbounded legacy protection caps swallow the block pool
 MNT-6b|v1/core/single_type_kv_cache_manager.py|_recycle_enabled(|sliding-window pages churn the shared LRU instead of recycling

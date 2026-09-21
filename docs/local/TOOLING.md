@@ -10,7 +10,7 @@ writes a format nobody thought to list.
 
 | | |
 |---|---|
-| tracked | 60 files, 444 KB of tooling and write-ups |
+| tracked | 61 files, 452 KB of tooling and write-ups |
 | ignored | the 54 MB of `toolsearch-matrix/` captures, every `*.log` / `*.jsonl` / `*.json` / `*.tsv` / `*.tgz`, and three directories of **data that happens to be `.py`/`.md`** — `baseline-20260914/` and `xsess/image-src/` (copies of vLLM source, superseded by the tracked `patches/pristine/`) and `rollback/` (head-only copies of our own scripts) |
 
 > **Captures contain full prompts and are sensitive. If you add a new output format, confirm
@@ -42,6 +42,12 @@ writes a format nobody thought to list.
 | `local-ops/phase2-probes.sh` | Failure-mode probes: `resume`, `subagent`, `mcp`, `tier`. |
 | `local-ops/toolref-probe.py` | `tool_reference` probe — does it 200, does any schema survive, can the model then call the tool. |
 | `local-ops/toolquality.py` | Tool-selection quality under `ENABLE_TOOL_SEARCH` true vs false. |
+
+## Patch tests that need no cluster
+
+| tool | what it does |
+|---|---|
+| `local-ops/test-api15-stream.py` | **`API-15` unit test — the streamed server-tool turn, 31 checks.** Runs *inside the container* (it needs the image's vLLM/pydantic models) but needs **no engine, no GPU and no restart**: it imports `patches/anthropic_serving_inline_system.py` from `/tmp` as a standalone module and feeds it scripted engine streams. Import from `/tmp` is deliberate — the bind-mounted path still resolves to the inode the engine imported at boot, so testing "the file in the container" would test the OLD code. Run recipe in its docstring. |
 
 ## KV mechanism flags and tests (MNT-8 / MNT-9)
 

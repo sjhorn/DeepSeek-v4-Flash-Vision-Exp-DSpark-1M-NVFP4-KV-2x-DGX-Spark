@@ -34,8 +34,8 @@ Nothing in a filename tells you this, so here is the map. It is the same set
 
 | file in `patches/` | ids it carries | mounted over |
 |---|---|---|
-| `anthropic_protocol_inline_system.py` | `API-0`, part of `API-9d` | `entrypoints/anthropic/protocol.py` |
-| `anthropic_serving_inline_system.py` | `API-8`, `API-9`, `API-9b`, `API-9d`, `API-10`, `API-10b`, `API-11a`, `API-11b`, `API-12`, `API-13`, `API-14` | `entrypoints/anthropic/serving.py` |
+| `anthropic_protocol_inline_system.py` | `API-0`, part of `API-9d`, part of `API-15` | `entrypoints/anthropic/protocol.py` |
+| `anthropic_serving_inline_system.py` | `API-8`, `API-9`, `API-9b`, `API-9d`, `API-10`, `API-10b`, `API-11a`, `API-11b`, `API-12`, `API-13`, `API-14`, `API-15` | `entrypoints/anthropic/serving.py` |
 | `patch5-detokenizer.py` | `MNT-5` | `v1/engine/detokenizer.py` |
 | `patch6-single_type_kv_cache_manager.py` | `MNT-6a`, `MNT-6b`, `MNT-6c`, `MNT-9`, part of `MNT-8` | `v1/core/single_type_kv_cache_manager.py` |
 | `patch7-block_pool-dedupe.py` | `MNT-7`, `MNT-8b` | `v1/core/block_pool.py` |
@@ -117,6 +117,7 @@ file, matching the anchors below.
 | `API-12` | Patch 12 | `PREFIX_WATCH=0` (on) | one `PREFIX_WATCH head=… tools=… sys=… user0=… len=…` line per request, hashing slices only. 50.8 KB/hour, 37µs/request. **Blind spot: the effort prefix is injected downstream, so a tier switch produces identical hashes** | [`#api-12`](PATCHES-API.md) |
 | `API-13` | Patch 13 | `STICKY_TOOLS=0` (on), `STICKY_TOOLS_TTL=3600` | keeps the advertised `tools` array monotonic per conversation, so a flapping client tool (swift-lsp) cannot shrink it and break the append chain. Replaying the real 16-turn capture: 3 tool-set changes → 1 | [`#api-13`](PATCHES-API.md) |
 | `API-14` | Patch 14 | none needed — it only ADDS a response field | returns vLLM's own `num_cached_tokens` as `engine_cached_tokens`. Every external instrument could see *that* a turn re-prefilled but not *by how much*; `/metrics` is engine-wide, so nothing attributed a stall to a request — an ambiguity that forced a published conclusion to be walked back twice. Returns `None`, not `0`, when the engine does not report it | [`#api-14`](PATCHES-API.md) |
+| `API-15` | — (2026-09-21) | `SERVER_TOOL_STREAM=0` restores the old path (on); `SERVER_TOOL_MAX_ROUNDS=10` | a **streamed** turn carrying a server tool (`web_search_*`/`web_fetch_*`) used to generate the whole answer TWICE: round 0 ran non-streaming only to inspect it for tool calls, and when the model did not call one — the common case under `tool_choice: auto` — that finished answer was discarded and the identical prompt re-run streamed. Now one message, streamed once, tools executed in line, resuming through the prefix cache. Also fixes block ordering (in line, not prepended) and adds Anthropic's `pause_turn` at the round cap (10, was a silent forced answer at 5). **Touches two files** — the protocol patch had to learn `pause_turn` — so they deploy together. 31/31 offline checks, `local-ops/test-api15-stream.py` | [`#api-15`](PATCHES-API.md) |
 
 ### Added as a plugin, not patched over anything (`PLG-*`)
 

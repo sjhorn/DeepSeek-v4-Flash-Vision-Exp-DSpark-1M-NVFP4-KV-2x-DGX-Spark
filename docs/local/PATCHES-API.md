@@ -1,4 +1,4 @@
-# PATCHES-API.md — the Anthropic endpoint patches (API-0, API-8 … API-13)
+# PATCHES-API.md — the Anthropic endpoint patches (API-0, API-8 … API-15)
 
 Detail and evidence for the patches that live in the two bind-mounted Anthropic endpoint files:
 
@@ -11,6 +11,7 @@ Detail and evidence for the patches that live in the two bind-mounted Anthropic 
 | `API-11` (11a, 11b) | ″ | prompt-head stabilisers |
 | `API-12` | ″ | prefix-cache tripwire (`PREFIX_WATCH`) |
 | `API-13` | ″ | sticky tool set |
+| `API-15` | ″ + `patches/anthropic_protocol_inline_system.py` | run server tools inside ONE streamed message |
 
 One line each, with kill switches and rollback: `PATCH-REGISTRY.md`.
 The prefix-cache evidence these were built against: `PREFIX-CACHE.md`.
@@ -451,6 +452,94 @@ them: [`PREFIX-CACHE.md`](PREFIX-CACHE.md#concurrent-siblings)):
 rather than changing one — decode, prompt and cache behaviour are untouched. Whether the per-turn
 rows actually settle the eviction-vs-invalidation question is the open work in `MERGE.md`, and is
 not yet done.
+
+<a id="api-15"></a>
+
+## API-15 — run server tools inside ONE streamed message (2026-09-21)
+
+**Found while answering "why do I sometimes see two requests in flight for what looks like one
+turn?"** The answer to *that* was the client
+([`PREFIX-CACHE.md`](PREFIX-CACHE.md#concurrent-siblings)) — but the audit that ruled our own code
+out found this, which is ours.
+
+### What it did
+
+`create_messages()` took a round-trip structure whenever the request carried a **server**-side tool
+(`web_search_*` / `web_fetch_*`): round 0 ran **non-streaming**, purely so the full response could
+be inspected for tool calls. If the model *did* call one, fine. If it did **not** — the common case
+under `tool_choice: auto`, which is what a client sends unless it forces a tool — the finished
+answer was **discarded** and the identical prompt re-run with `stream=True`.
+
+Three costs, not one:
+
+- **double decode** of a whole answer, on a box where the KV pool is the binding constraint;
+- **the client saw nothing** for the entire first generation — a long turn could trip its stream
+  timeout before a byte arrived;
+- at our default temperature 1.0 the discarded answer was a **different sample** from the one
+  delivered, so the work thrown away was not even the work repeated.
+
+**It was latent, not firing.** The matcher requires the underscore form (`web_search_20250305`),
+and Claude Code sends `WebSearch` as a *client*-side tool, which is deliberately excluded. Measured
+2026-09-21: 743 engine requests against 775 HTTP requests since that boot — no doubling anywhere,
+and the one real server-tool call in the log (11:07:46) took the branch where a tool *was* called.
+Fixed because the failure mode is bad, not because it was hurting us.
+
+### What Anthropic actually does, and what this now does
+
+Checked against the `claude-api` reference rather than from memory. The real API runs a
+**server-side sampling loop inside one assistant turn**: content is interleaved — `text`, then
+`server_tool_use`, then `web_search_tool_result`, then more `text` — all in the same message. The
+tool runs mid-turn and generation continues. Nothing is generated and discarded, and there is no
+decide-up-front step: the decision is the model's, made inside the stream.
+
+The fix mirrors that, and is cheaper than it sounds because **a model that emits a tool call ends
+its turn** (`finish_reason: "tool_calls"`) — there is no mid-stream abort to engineer:
+
+1. stream the turn for real; text reaches the client live;
+2. absorb the server tool's `tool_use` block, run the tool, emit `server_tool_use` + the result
+   block **in line where they occurred**;
+3. resume with a continuation request that is almost entirely a prefix-cache hit — Anthropic's
+   "resume where it left off", in our terms;
+4. stitch the segments into one message: `message_start` once, block indices continuous,
+   `message_delta`/`message_stop` only after the last segment.
+
+Two further divergences closed on the way:
+
+- **Block ordering.** `_stream_with_tool_blocks()` injected every executed tool **before the first
+  content block**. The real ordering is in line. (That function stays for the buffered path.)
+- **`pause_turn`.** Anthropic caps its loop at 10 rounds and returns `stop_reason: "pause_turn"`,
+  handing the decision to the client. Ours capped at 5 and silently forced an answer. The value is
+  real protocol, so the **protocol patch had to learn it** — `AnthropicDelta.stop_reason` and
+  `AnthropicMessagesResponse.stop_reason` are Literals, and pydantic would have rejected it. Two
+  files, deployed together, exactly like `API-9d`.
+
+**Only the streaming path changed.** The buffered path never wasted anything: with no tool called
+it returns round 0 directly. `SERVER_TOOL_STREAM=0` restores the old behaviour;
+`SERVER_TOOL_MAX_ROUNDS` tunes the cap.
+
+### Verified without a restart, and without the engine
+
+`local-ops/test-api15-stream.py` — **31/31**, run inside the container so the real vLLM/pydantic
+models are used, importing the patch file from `/tmp` as a standalone module. It needs no GPU, no
+engine and no restart. What it pins:
+
+| | |
+|---|---|
+| message framing | one `message_start`/`message_delta`/`message_stop` per turn, however many engine segments it took |
+| indices | continuous and monotonic across segments; `[text, server_tool_use, web_search_tool_result, text]` at 0,1,2,3 |
+| leakage | a server tool never reaches the client as a client-side `tool_use` block |
+| execution | the tool runs **exactly once** — the continuation is built without re-executing (`_build_continuation_request()` executes while it builds, so API-15 deliberately does not route through it) |
+| usage | output tokens summed across segments; input/cached stay the **turn's**, not the resume's |
+| `pause_turn` | emitted at the round cap |
+| mixed tools | a client-side tool alongside a server one ends the turn rather than resuming — only the client can run it |
+| bad arguments | degrade to a recoverable tool failure with a **string** body (an error result is an object on the wire and text to the model) |
+| re-indexing | a `text_delta` whose bytes look like `"index":0` survives intact — the old wrapper's regex over the serialised frame corrupts it |
+
+**Not established.** No live traffic has exercised it: the path is latent here, and the test drives
+scripted engine streams, not the engine. `pause_turn` is emitted but nothing here has ever needed
+to consume one, so Claude Code's handling of it is unverified. And an inbound `server_tool_use` /
+`web_search_tool_result` block is still dropped by `_convert_messages()`, so search results do not
+survive into the **next** turn's context — pre-existing, not introduced here.
 
 <a id="stop-sequence-defect"></a>
 

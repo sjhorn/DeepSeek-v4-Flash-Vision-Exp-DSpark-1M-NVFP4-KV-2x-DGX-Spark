@@ -107,3 +107,37 @@
      @field_validator("model")
      @classmethod
      def validate_model(cls, v):
+@@ -157,8 +212,15 @@ class AnthropicDelta(BaseModel):
+     signature: str | None = None
+ 
+     # Message delta
++    # PATCH 15: "pause_turn" is real Anthropic protocol -- it is what the
++    # server-side tool loop returns when it hits its round cap, and it is the
++    # signal a client uses to resume the SAME message.  Without it here the
++    # serving patch cannot emit one: pydantic rejects the value and the turn
++    # dies as an internal error instead of pausing.
+     stop_reason: (
+-        Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"] | None
++        Literal[
++            "end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn"
++        ] | None
+     ) = None
+     stop_sequence: str | None = None
+ 
+@@ -192,8 +254,15 @@ class AnthropicMessagesResponse(BaseModel):
+     role: Literal["assistant"] = "assistant"
+     content: list[AnthropicContentBlock]
+     model: str
++    # PATCH 15: "pause_turn" is real Anthropic protocol -- it is what the
++    # server-side tool loop returns when it hits its round cap, and it is the
++    # signal a client uses to resume the SAME message.  Without it here the
++    # serving patch cannot emit one: pydantic rejects the value and the turn
++    # dies as an internal error instead of pausing.
+     stop_reason: (
+-        Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"] | None
++        Literal[
++            "end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn"
++        ] | None
+     ) = None
+     stop_sequence: str | None = None
+     usage: AnthropicUsage | None = None

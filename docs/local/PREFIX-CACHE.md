@@ -870,13 +870,15 @@ different case — a subagent/fork inheriting the parent's context shows the sam
 different `sys`+`tools` (`b667`/`cff1`/`4e8a` here) and generates in full, e.g. 82,547/8,360 tok
 over 413s beside 82,393/9,448 tok over 567s.
 
-**The one place a duplicate generation is ours.** `create_messages()` in
-`patches/anthropic_serving_inline_system.py`: when a request carries a *server-side* tool
-(`web_search_*`/`web_fetch_*`) and the model does **not** call it, round 0 runs the whole answer
-non-streaming, discards it, and re-runs the identical prompt with `stream=True`. That is two full
-generations for one HTTP request — **sequential, never parallel**, and identical in prompt length.
-No such pair appears in the current ring, so it is not firing on this traffic; if it ever does, the
-signature is two rows with *exactly* equal `prompt_tokens` and no overlap.
+**The one place a duplicate generation was ours — fixed the same day as `API-15`.**
+`create_messages()` in `patches/anthropic_serving_inline_system.py`: when a request carried a
+*server-side* tool (`web_search_*`/`web_fetch_*`) and the model did **not** call it, round 0 ran the
+whole answer non-streaming, discarded it, and re-ran the identical prompt with `stream=True` — two
+full generations for one HTTP request, **sequential, never parallel**, identical in prompt length.
+No such pair appears in the ring, so it was never firing on this traffic. A streamed turn now runs
+once with the tools executed in line: [`PATCHES-API.md`](PATCHES-API.md#api-15). **Staged, not yet
+live** — it takes effect at the next restart. Until then the signature to recognise is two rows with
+*exactly* equal `prompt_tokens` and no overlap.
 
 ### Two instrument traps found while measuring this
 

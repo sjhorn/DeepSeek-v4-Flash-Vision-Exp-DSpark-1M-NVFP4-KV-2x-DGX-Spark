@@ -13,7 +13,7 @@
 # diff at patches/generated/entrypoints-anthropic-serving.patch (regenerate with
 # scripts/regen-local-patches.sh, pristine original in patches/pristine/).
 #
-# Seven local patches live in this one file.  Each has a banner of the form
+# Eight local patches live in this one file.  Each has a banner of the form
 #   # ===== API-N: <one line> =====
 #   # why / measured / kill switch / detail:
 # so the banners, the generated diff and docs/local/PATCH-REGISTRY.md line up.
@@ -25,6 +25,7 @@
 #   API-12  prefix-cache tripwire (PREFIX_WATCH log line)
 #   API-13  sticky tool set
 #   API-14  surface the engine's own num_cached_tokens on the response
+#   API-15  run server tools inside ONE streamed message (no re-run)
 #
 # API-0, the companion protocol patch, is a separate file:
 #   patches/anthropic_protocol_inline_system.py
@@ -145,6 +146,63 @@ def _is_any_server_tool(name: str | None = None,
                         type_: str | None = None) -> bool:
     """Return True if either identifier is any server-side tool."""
     return _is_server_search_tool(name, type_) or _is_server_fetch_tool(name, type_)
+
+
+# ===== API-15: run server tools INSIDE one streamed message ================
+# why: the streaming server-tool path generated the whole answer TWICE.  Round
+#      0 ran non-streaming purely to inspect it for tool calls; when the model
+#      did not call one -- the common case under tool_choice auto -- that
+#      finished answer was DISCARDED and the identical prompt was re-run with
+#      stream=True.  Three costs, not one: double decode on a box where the KV
+#      pool is the binding constraint; the client saw NOTHING for the whole
+#      first generation, so a long turn could trip its stream timeout before a
+#      byte arrived; and at our default temperature 1.0 the discarded answer
+#      was a different sample from the one delivered.
+# what Anthropic does, and what this now does: ONE assistant message, streamed
+#      once.  Text flows to the client live; when the model emits a server-tool
+#      call it ENDS ITS TURN (finish_reason=tool_calls), so there is nothing to
+#      abort -- we run the tool, emit server_tool_use + the result block IN
+#      LINE where they occurred, and resume generation with a continuation
+#      request that is almost entirely a prefix-cache hit.  The segments are
+#      stitched into one message: message_start once, block indices continuous,
+#      message_delta/message_stop only after the last segment.
+# pause_turn: Anthropic caps its server loop at 10 rounds and returns
+#      stop_reason="pause_turn" rather than forcing an answer.  We do the same;
+#      the protocol patch had to learn the value (see PATCH 15 there).  The old
+#      code capped at 5 and silently forced a final answer instead.
+# kill switch: SERVER_TOOL_STREAM=0 restores the discard-and-re-run path.
+#      SERVER_TOOL_MAX_ROUNDS tunes the cap (default 10, Anthropic's).
+# detail: docs/local/PATCHES-API.md#api-15
+_SERVER_TOOL_STREAM = os.environ.get("SERVER_TOOL_STREAM", "1") != "0"
+try:
+    _SERVER_TOOL_MAX_ROUNDS = max(
+        1, int(os.environ.get("SERVER_TOOL_MAX_ROUNDS", "10")))
+except ValueError:
+    _SERVER_TOOL_MAX_ROUNDS = 10
+
+
+def _sse_parts(item: str) -> tuple[str | None, dict | None]:
+    """Split one ``event: X\ndata: {...}`` frame back into its parts.
+
+    Returns ``(None, None)`` for anything that is not a single JSON frame, so
+    the caller forwards it untouched.  This exists because the alternative --
+    a regex over the serialised frame -- corrupts any text_delta that happens
+    to contain the same bytes as the field being rewritten.
+    """
+    try:
+        if not item.startswith("event: "):
+            return None, None
+        head, _, rest = item.partition("\n")
+        event = head[len("event: "):].strip()
+        if not rest.startswith("data: "):
+            return None, None
+        return event, json.loads(rest[len("data: "):].strip())
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
+def _sse(event: str, payload: dict) -> str:
+    return wrap_data_with_event(json.dumps(payload), event)
 
 
 # ===== API-11a: drop per-request volatile text from the system prompt =======
@@ -1555,6 +1613,35 @@ class AnthropicServingMessages(OpenAIServingChat):
             }
         return {"type": "tool_result", "content": "Unknown server tool"}
 
+    @staticmethod
+    def _format_tool_result_for_model(result: dict) -> str:
+        """Render one executed server-tool result as text the MODEL reads.
+
+        Shared by the buffered path and by API-15's streamed path so the model
+        sees byte-identical tool output either way -- the two drifting apart
+        would change what the continuation is conditioned on, which is exactly
+        the kind of difference that does not fail anywhere.
+        """
+        raw_content = result.get("content", "")
+        if isinstance(raw_content, dict):
+            # Anthropic's error shape for a server tool is an OBJECT in the
+            # result block ({"error_code": ...}) where success is a LIST. That
+            # object is right for the client and wrong for the model, which is
+            # sent text -- a dict here would reach vLLM's renderer as a tool
+            # message body and fail where nothing is looking.
+            code = raw_content.get("error_code", "unknown_error")
+            return (f"Tool call failed ({code}). Re-issue it with a single "
+                    "valid JSON object as the arguments.")
+        if not isinstance(raw_content, list):
+            return raw_content if isinstance(raw_content, str) else str(raw_content)
+        parts = [
+            f"Title: {r.get('title', '')}\n"
+            f"URL: {r.get('url', '')}\n"
+            f"Snippet: {r.get('encrypted_content', '')}\n"
+            for r in raw_content
+        ]
+        return "\n---\n".join(parts) if parts else "No results found."
+
     def _build_continuation_request(
         self,
         chat_req: ChatCompletionRequest,
@@ -1628,19 +1715,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                     })
                     continue
                 result = self._execute_server_tool(tc.function.name, args)
-                raw_content = result.get("content", "")
-                if isinstance(raw_content, list):
-                    # Format search results as readable text for the model
-                    parts = []
-                    for r in raw_content:
-                        parts.append(
-                            f"Title: {r.get('title', '')}\n"
-                            f"URL: {r.get('url', '')}\n"
-                            f"Snippet: {r.get('encrypted_content', '')}\n"
-                        )
-                    content = "\n---\n".join(parts) if parts else "No results found."
-                else:
-                    content = raw_content
+                content = self._format_tool_result_for_model(result)
 
                 if executed_tools is not None:
                     executed_tools.append({
@@ -1693,6 +1768,13 @@ class AnthropicServingMessages(OpenAIServingChat):
             elif isinstance(generator, ChatCompletionResponse):
                 return self.messages_full_converter(generator, request.model)
             return self.message_stream_converter(generator, request.model)
+
+        # PATCH 15: a streamed turn runs ONCE, with the tools executed in
+        # line -- see the API-15 banner near the top of this file. Only the
+        # streaming path was ever double-generating: the buffered path below
+        # returns round 0 directly when no tool was called, and wastes nothing.
+        if _SERVER_TOOL_STREAM and chat_req.stream:
+            return self._stream_server_tool_turn(chat_req, request, raw_request)
 
         # Server-side tools present. Run tool execution rounds as
         # non-streaming (to inspect the full response for tool calls),
@@ -1789,6 +1871,271 @@ class AnthropicServingMessages(OpenAIServingChat):
             ))
         result.content = tool_blocks + result.content
         return result
+
+    # ===== API-15 ==========================================================
+    async def _stream_server_tool_turn(
+        self,
+        chat_req: ChatCompletionRequest,
+        request: AnthropicMessagesRequest,
+        raw_request: Request | None,
+    ) -> AsyncGenerator[str, None]:
+        """One Anthropic message, streamed once, server tools run in line.
+
+        Each engine request is a SEGMENT of the same message.  A segment ends
+        when the model calls a server tool (it finishes its turn to do so), we
+        execute the tool, and the next segment resumes from the tool result --
+        which the prefix cache already holds, so resuming is cheap.  The client
+        sees one message: `message_start` once, block indices continuous across
+        segments, `message_delta`/`message_stop` once at the very end.
+        """
+        model = request.model
+        next_index = 0          # next free block index in the EMITTED message
+        total_output_tokens = 0
+        first_usage: dict | None = None   # input/cached from segment 0
+        started = False
+        rounds = 0
+        stop_reason = "end_turn"
+
+        while True:
+            chat_req.stream = True
+            chat_req.stream_options = StreamOptions.model_validate(
+                {"include_usage": True, "continuous_usage_stats": True}
+            )
+            generator = await self.create_chat_completion(chat_req, raw_request)
+            if isinstance(generator, ErrorResponse):
+                yield _sse("error", {
+                    "type": "error",
+                    "error": {"type": "internal_error",
+                              "message": generator.message},
+                })
+                return
+            if isinstance(generator, ChatCompletionResponse):
+                # Cannot happen: stream is set True immediately above. If the
+                # engine ever answers a streamed request with a buffered one,
+                # say so rather than emitting a half-formed message.
+                logger.error(
+                    "API-15: engine returned a buffered response to a streamed "
+                    "request; aborting the turn")
+                yield _sse("error", {
+                    "type": "error",
+                    "error": {"type": "internal_error",
+                              "message": "engine did not stream"},
+                })
+                return
+
+            # --- consume one segment ---------------------------------------
+            seg_text: list[str] = []
+            seg_server_calls: list[dict] = []
+            seg_client_tool = False
+            swallow: dict | None = None     # the server tool_use being absorbed
+            swallow_idx: int | None = None  # its index in the CONVERTER's space
+            index_map: dict[int, int] = {}
+
+            async for item in self.message_stream_converter(generator, model):
+                event, payload = _sse_parts(item)
+                if event is None:
+                    yield item
+                    continue
+
+                if event == "message_start":
+                    if started:
+                        continue          # one message_start per message
+                    started = True
+                    yield item
+                    continue
+
+                if event == "content_block_start":
+                    block = payload.get("content_block") or {}
+                    conv_idx = payload.get("index", 0)
+                    if (block.get("type") == "tool_use"
+                            and _is_any_server_tool(block.get("name"))):
+                        # Absorb it: the client must never see a server tool as
+                        # a client-side tool_use block, or it would try to run
+                        # it itself. It reappears below as server_tool_use.
+                        swallow = {"id": block.get("id"),
+                                   "name": block.get("name"), "json": ""}
+                        swallow_idx = conv_idx
+                        continue
+                    if block.get("type") == "tool_use":
+                        seg_client_tool = True
+                    index_map[conv_idx] = next_index
+                    payload["index"] = next_index
+                    next_index += 1
+                    yield _sse(event, payload)
+                    continue
+
+                if event == "content_block_delta":
+                    conv_idx = payload.get("index", 0)
+                    if swallow is not None and conv_idx == swallow_idx:
+                        swallow["json"] += (
+                            (payload.get("delta") or {}).get("partial_json") or "")
+                        continue
+                    delta = payload.get("delta") or {}
+                    if delta.get("type") == "text_delta":
+                        seg_text.append(delta.get("text") or "")
+                    payload["index"] = index_map.get(conv_idx, conv_idx)
+                    yield _sse(event, payload)
+                    continue
+
+                if event == "content_block_stop":
+                    conv_idx = payload.get("index", 0)
+                    if swallow is not None and conv_idx == swallow_idx:
+                        async for out in self._emit_server_tool_blocks(
+                                swallow, next_index, seg_server_calls):
+                            yield out
+                        next_index += 2
+                        swallow, swallow_idx = None, None
+                        continue
+                    payload["index"] = index_map.get(conv_idx, conv_idx)
+                    yield _sse(event, payload)
+                    continue
+
+                if event == "message_delta":
+                    # Held back: a segment's terminator is not the message's.
+                    usage = payload.get("usage") or {}
+                    total_output_tokens += usage.get("output_tokens") or 0
+                    if first_usage is None:
+                        first_usage = usage
+                    stop_reason = (
+                        (payload.get("delta") or {}).get("stop_reason")
+                        or stop_reason)
+                    continue
+
+                if event == "message_stop":
+                    continue
+
+                if event == "error":
+                    yield item
+                    return
+
+                yield item      # ping and anything else, untouched
+
+            # --- decide whether the message continues ----------------------
+            if not seg_server_calls:
+                break
+            if seg_client_tool:
+                # A client-side tool in the same turn: only the client can run
+                # it, so the message has to end here. The server results we
+                # already emitted stay in the message.
+                logger.info(
+                    "API-15: client-side tool called alongside a server tool; "
+                    "ending the turn instead of resuming")
+                break
+            rounds += 1
+            if rounds >= _SERVER_TOOL_MAX_ROUNDS:
+                # Anthropic's pressure valve: hand the decision to the client
+                # rather than forcing an answer out of a loop that is not done.
+                stop_reason = "pause_turn"
+                logger.info("API-15: server tool round cap (%d) reached; "
+                            "pausing the turn", _SERVER_TOOL_MAX_ROUNDS)
+                break
+            self._append_server_tool_turn(chat_req, "".join(seg_text),
+                                          seg_server_calls)
+
+        yield _sse("message_delta", {
+            "type": "message_delta",
+            "delta": {"stop_reason": stop_reason},
+            "usage": {
+                # input/cached describe the TURN's real prefill, which is the
+                # first segment's -- a continuation's numbers describe resuming,
+                # not the prompt the client sent.
+                "input_tokens": (first_usage or {}).get("input_tokens", 0),
+                "output_tokens": total_output_tokens,
+                **({"engine_cached_tokens":
+                    (first_usage or {}).get("engine_cached_tokens")}
+                   if (first_usage or {}).get("engine_cached_tokens") is not None
+                   else {}),
+            },
+        })
+        yield _sse("message_stop", {"type": "message_stop"})
+
+    async def _emit_server_tool_blocks(
+        self,
+        call: dict,
+        index: int,
+        seg_server_calls: list[dict],
+    ) -> AsyncGenerator[str, None]:
+        """Run one server tool and emit its two blocks where it happened.
+
+        In-line at `index` and `index+1`, which is Anthropic's ordering --
+        text, then server_tool_use, then the result, then more text. The old
+        path prepended every executed tool before the first content block.
+        """
+        args, _safe = coerce_tool_arguments(call["json"])
+        if args is None:
+            logger.warning(
+                "API-15: unparseable server tool arguments tool=%s raw=%r",
+                call["name"], (call["json"] or "")[:400])
+            args = {}
+            result = {"type": "web_search_tool_result",
+                      "content": {"error_code": "invalid_tool_input"}}
+        else:
+            result = self._execute_server_tool(call["name"], args)
+
+        yield _sse("content_block_start", {
+            "type": "content_block_start",
+            "index": index,
+            "content_block": {
+                "type": "server_tool_use",
+                "id": call["id"],
+                "name": call["name"],
+                "input": args,
+            },
+        })
+        yield _sse("content_block_stop",
+                   {"type": "content_block_stop", "index": index})
+        yield _sse("content_block_start", {
+            "type": "content_block_start",
+            "index": index + 1,
+            "content_block": {
+                "type": result.get("type", "web_search_tool_result"),
+                "tool_use_id": call["id"],
+                "content": result.get("content", []),
+            },
+        })
+        yield _sse("content_block_stop",
+                   {"type": "content_block_stop", "index": index + 1})
+
+        seg_server_calls.append({
+            "id": call["id"], "name": call["name"],
+            "input": args, "result": result,
+        })
+
+    @staticmethod
+    def _append_server_tool_turn(
+        chat_req: ChatCompletionRequest,
+        assistant_text: str,
+        calls: list[dict],
+    ) -> None:
+        """Append what just happened so the next segment resumes from it.
+
+        Deliberately NOT _build_continuation_request(): that one EXECUTES the
+        tools while building, and API-15 has already executed them in line --
+        routing through it would run every search twice.
+        """
+        chat_req.messages.append({
+            "role": "assistant",
+            "content": assistant_text,
+            "tool_calls": [
+                {
+                    "id": c["id"],
+                    "type": "function",
+                    "function": {"name": c["name"],
+                                 "arguments": json.dumps(c["input"])},
+                }
+                for c in calls
+            ],
+        })
+        for c in calls:
+            chat_req.messages.append({
+                "role": "tool",
+                "tool_call_id": c["id"],
+                "content": AnthropicServingMessages._format_tool_result_for_model(
+                    c["result"]),
+            })
+        # After a forced first round, let the model answer instead of looping.
+        if chat_req.tool_choice and chat_req.tool_choice != "auto":
+            chat_req.tool_choice = "auto"
 
     async def _stream_with_tool_blocks(
         self,
