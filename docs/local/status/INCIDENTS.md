@@ -886,7 +886,7 @@ in `engine/arg_utils.py` and `config/scheduler.py` — grep the whole installed 
 requests pile into `self.running` together — and a *single* one is already enough to zero the
 budget. Capping per-request tokens per step is the only lever that works here.
 
-**This exonerates `MNT-6c` (CACHE_TEST.md 10, item 1).** The fix is holding under real concurrent
+**This exonerates `MNT-6c` (CACHE-TEST.md 10, item 1).** The fix is holding under real concurrent
 load: hit rate flat at ~94%, zero preemptions, KV never above 71.5%. The removed eviction is not
 what is costing throughput here.
 

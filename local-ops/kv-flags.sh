@@ -61,13 +61,13 @@
 #                                 Recycles only pages with
 #                                 NO cache entry, so prefix-cache mappings survive
 #                                 decode. Head after a session 0.0%/14.4s -> 99.5%/
-#                                 0.5s, 3/3. CACHE_TEST.md 9.
+#                                 0.5s, 3/3. docs/local/CACHE-TEST.md 9.
 #
 # A flip takes effect on the NEXT request. It does not re-order blocks already
 # freed, so give an arm a fresh session, not a running one. An env var of the
 # same name (VLLM_<NAME>) always wins over this file -- nothing sets one today.
 #
-# See CACHE_TEST.md for the arms and what each one is supposed to move.
+# See docs/local/CACHE-TEST.md for the arms and what each one is supposed to move.
 set -uo pipefail
 
 NODES="${NODES:-spark-45ea spark-da08}"
@@ -91,7 +91,7 @@ for n in $NODES; do
   if [ -z "$key" ]; then
     # RESET = the RECOMMENDED state, not the pre-2026-09-21 one. swa_recycle_cached
     # MUST be listed here: it is the confirmed fix for the prefix being destroyed by
-    # multi-turn decode (CACHE_TEST.md 9), and an earlier reset that wrote only two
+    # multi-turn decode (docs/local/CACHE-TEST.md 9), and an earlier reset that wrote only two
     # keys would have silently restored the bug. To get the OLD behaviour for an
     # A/B, set it explicitly: `kv-flags.sh swa_recycle_cached 1`.
     ssh -n "${USER_AT}@${n}" "mkdir -p \$(dirname $FLAGS) && printf '%s\n' '{\"free_queue_prepend_uncached\": 0, \"pin_static_head\": 0, \"swa_recycle\": 1, \"swa_recycle_cached\": 0}' > $FLAGS"

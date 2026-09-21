@@ -13,7 +13,7 @@ into the running engine, and the running engine is not touched.
     # or, if the files are already at /tmp/kvtest in the container:
     docker exec <container> python3 /tmp/kvtest/kv-mech-tests.py
 
-Every assertion is a claim CACHE_TEST.md makes about the mechanisms. If one
+Every assertion is a claim docs/local/CACHE-TEST.md makes about the mechanisms. If one
 fails, the write-up is wrong, not just the code.
 """
 from collections import OrderedDict

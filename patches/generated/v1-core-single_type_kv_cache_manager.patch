@@ -56,7 +56,7 @@
 +# Missing file / bad JSON / unreadable => every flag falls back to its default,
 +# which is OFF for both mechanisms.  A flag flip takes effect on the next
 +# request; it does NOT retroactively re-order blocks already freed.
-+# See CACHE_TEST.md.
++# See docs/local/CACHE-TEST.md.
 +_FLAGS_PATH = os.environ.get("VLLM_KV_FLAGS_FILE", "/etc/vllm-kv-flags/flags.json")
 +_FLAGS_TTL_S = 1.0
 +_flags_cache: dict = {}
@@ -109,7 +109,7 @@
 +    """MNT-6b, finer grain -- and the arm most likely to be right.
 +
 +    Recycling a page calls ``_maybe_evict_cached_block()`` on it, which destroys
-+    its (hash -> block) mapping.  Measured 2026-09-20 (CACHE_TEST.md 8): decode
++    its (hash -> block) mapping.  Measured 2026-09-20 (docs/local/CACHE-TEST.md 8): decode
 +    across several turns is what makes a conversation's prefix unreusable, and
 +    this eviction is the leading mechanism -- the coordinator takes the MINIMUM
 +    across KV groups, so losing the sliding-window checkpoints reads as 0% even
@@ -126,7 +126,7 @@
 +    ``/var/tmp/vllm-kv-flags/flags.json`` -- node-local state outside git, so a
 +    rebuilt node or a cleared ``/var/tmp`` silently restored the bug. The flag is
 +    now the escape hatch rather than the enabler: ``swa_recycle_cached 1``
-+    restores stock eviction, live, with no restart. CACHE_TEST.md 10, item 2.
++    restores stock eviction, live, with no restart. docs/local/CACHE-TEST.md 10, item 2.
 +    """
 +    return bool(_flag("swa_recycle_cached", False))
 +
@@ -145,7 +145,7 @@
 +# what differs is the boundary and the release policy:
 +#   - boundary B = first <|User|> token, minus slack, floored to the hit
 +#     alignment.  Verified on this build: the template renders tools, then the
-+#     system prompt, then the first user turn (CACHE_TEST.md 3a.1).
++#     system prompt, then the first user turn (docs/local/CACHE-TEST.md 3a.1).
 +#   - release is LRU over WHOLE HEADS, ordered by last reuse, in a budget
 +#     RESERVED from MNT-6a's — sharing MNT-6a's FIFO queue would let one long
 +#     conversation's body evict every other agent's head, which is the failure
@@ -303,7 +303,7 @@
 +            # takes the minimum across groups -- so a partial pin cannot serve a
 +            # hit anywhere, it just spends budget and reports success. This is
 +            # exactly how the 2026-09-20 arm C produced a confident null: group 3
-+            # pinned 3 of the 33 blocks it needed (CACHE_TEST.md 7.3).
++            # pinned 3 of the 33 blocks it needed (docs/local/CACHE-TEST.md 7.3).
 +            if not self._head_pin_incomplete_logged:
 +                self._head_pin_incomplete_logged = True
 +                logger.warning(

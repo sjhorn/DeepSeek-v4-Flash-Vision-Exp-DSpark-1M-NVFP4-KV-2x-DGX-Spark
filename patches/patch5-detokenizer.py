@@ -1,5 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+#
+# ===== MNT-5: keep client stop strings dormant inside the reasoning segment ==
+#
+# LOCAL PATCH.  This is a whole-file copy of vLLM's v1/engine/detokenizer.py,
+# bind-mounted over it; see docs/local/PATCH-REGISTRY.md.  The delta is
+# patches/generated/v1-engine-detokenizer.patch (4 hunks) and it is the upstream
+# patch patches/0005-suppress-stops-in-reasoning.patch applied to this tree.
+#
+# Unlike every other MNT-* file, the marker check-local-patches.sh greps for is
+# UPSTREAM's env var name (VLLM_SUPPRESS_STOPS_IN_REASONING, default on) rather
+# than an "MNT-5" of our own -- so without this banner nothing in the file says
+# we carry it.  Kill switch: VLLM_SUPPRESS_STOPS_IN_REASONING=0.
+#
+# INERT under `thinking:false`: arming it needs <think> in the prompt or as the
+# first output token.  A prerequisite for the thinking work, not a fix alone.
+# =============================================================================
 import os
 from abc import ABC, abstractmethod
 

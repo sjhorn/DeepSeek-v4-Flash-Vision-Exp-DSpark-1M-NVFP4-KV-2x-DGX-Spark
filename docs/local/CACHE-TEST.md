@@ -1,4 +1,4 @@
-# CACHE_TEST.md — why long sessions re-prefilled, what fixed it, and what is left
+# CACHE-TEST.md — why long sessions re-prefilled, what fixed it, and what is left
 
 **READ THIS FIRST. Everything below §0 is the investigation, in the order it happened, including the
 wrong turns. If you only need the state of the world, this box is it.**
@@ -84,7 +84,7 @@ makes that **worse**, not better.
 > the fixed gate reads `/etc/vllm-kv-flags/flags.json`, which carries **no**
 > `long_prefill_token_threshold` key, so it falls through to the compose boot default — also
 > **1024**. Same value either side, no gap. `MNT-10` is a *scheduling* fix, not a cache one; its
-> evidence lives in [`docs/local/PATCHES-KV.md`](docs/local/PATCHES-KV.md).
+> evidence lives in [`docs/local/PATCHES-KV.md`](PATCHES-KV.md).
 
 ```bash
 bash local-ops/kv-flags.sh                          # what each node is running
@@ -105,9 +105,9 @@ HOST=spark-45ea bash local-ops/kv-mech-tests.sh     # 16 offline checks, no GPU,
 
 Assessed against image `vllm-dspark-runtime:dspark-nvfp4-stage-c` (vLLM
 `0.21.1rc1.dev339+g1967a5627bc3`). Standing cache evidence lives in
-[`docs/local/PREFIX-CACHE.md`](docs/local/PREFIX-CACHE.md), the patch rows in
-[`docs/local/PATCH-REGISTRY.md`](docs/local/PATCH-REGISTRY.md), the config change in
-[`docs/local/status/CONFIG.md`](docs/local/status/CONFIG.md). Nothing is restated in all of them.
+[`docs/local/PREFIX-CACHE.md`](PREFIX-CACHE.md), the patch rows in
+[`docs/local/PATCH-REGISTRY.md`](PATCH-REGISTRY.md), the config change in
+[`docs/local/status/CONFIG.md`](status/CONFIG.md). Nothing is restated in all of them.
 
 ---
 
@@ -781,43 +781,67 @@ the treatment. Warming to "establish a baseline" destroys the measurement.
 - **`MNT-8` and `MNT-9` were not the answer** and stay off. `MNT-9`'s new warning was still useful:
   it showed the SWA runs one block short, which is what eviction-from-the-oldest-end looks like.
 
-### 9.4 Deployed state, and the one fragility
+### 9.4 Deployed state, and the fragility that has since been removed
 
 `swa_recycle_cached: 0` is **live on both nodes**. Revert instantly with
 `bash local-ops/kv-flags.sh swa_recycle_cached 1` — no restart either way.
 
-**Fragility:** the flags file is node-local state under `/var/tmp`, not in git. A fresh node, or a
-cleared `/var/tmp`, silently returns to the old (broken) behaviour, because the code default is
-still `True`. **Flip the code default to `False`** at the next convenient restart so the fix is the
-default and the flag becomes the escape hatch rather than the enabler.
+**The fragility is fixed in the branch** (§10, closed item 2). It was real: the flags file is
+node-local state under `/var/tmp` and not in git, so a fresh node or a cleared `/var/tmp` silently
+restored the broken behaviour, because the code default was `True`. `_recycle_cached_pages()` now
+defaults to `False`, which makes the fix the default and the flag the escape hatch, and flips the
+fail-safe direction too — bad JSON in the flags file now reads as "keep the fix". Live at the next
+restart, whenever one happens; until then `/var/tmp` is still what is holding it.
 
 
 ## 10. Open items — what to pick up next (as of 2026-09-21)
 
-The root cause is closed (§8, §9). Everything below is what is left, in priority order. Items 5, 6
-and 7 are proposed for **deletion**, not for work — they were aimed at the problem that is now
-fixed, and keeping them on a list pretends they are pending.
+The root cause is closed (§8, §9). **Items 1, 2, 5, 6 and 7 were resolved or dropped on
+2026-09-21** and are recorded under "Closed" below rather than kept on a list that would pretend
+they are pending. What is genuinely left is short.
 
 | # | Item | Status | Next step |
 |---|---|---|---|
-| **1** | **Does `MNT-6c` cost anything under load?** | **ANSWERED 2026-09-21: no evidence it does.** 13h of real Claude-Code-with-subagents traffic (696 windows, up to 6 concurrent requests): prefix hit rate flat at 93.8-94.2%, `vllm:num_preemptions_total` **0**, KV never above 71.5%. The decode collapse observed on that traffic was traced to a *different* mechanism — vLLM's shared `token_budget` letting one long prefill starve every request behind it in `self.running`. See `docs/local/status/INCIDENTS.md`, "Decode collapses to ~2 tok/s beside a long prefill". Original note kept below. **NOT MEASURED — the only real risk we introduced.** `MNT-6b`'s recycling exists to stop one long prefill churning the shared queue. We kept the recycling but stopped the eviction, so cached pages now return to the LRU instead of being reused in place. Under a busy box that churn may partly return. | **Do this first.** Two concurrent long sessions (or one plus the pressure driver), watching `vllm:prefix_cache_hits_total`, decode tok/s and `vllm:num_preemptions_total`, with `swa_recycle_cached` flipped between runs. No restart needed. |
-| **2** | **Code default is still the broken behaviour** | **DONE in the branch 2026-09-21, live at the next restart.** `_recycle_cached_pages()` now defaults to `False`, so the fix survives a cleared `/var/tmp` or a fresh node, and `swa_recycle_cached 1` is the escape hatch back to stock. Fail-safe direction flipped too: bad JSON in the flags file now reads as "keep the fix". Original note: Open. `_recycle_cached_pages()` defaults to `True`; the fix lives only in `/var/tmp/vllm-kv-flags/flags.json`, which is node-local and not in git. A rebuilt node, or a cleared `/var/tmp`, silently restores the bug. | Flip the default to `False` in `patches/patch6-…py` and make the flag the escape hatch. Needs one restart — fold it into the next one rather than spending a boot on it. |
-| **3** | **`MNT-9` (head pinning), arm C′** | Built and fixed (refuses an incomplete run, §8.4) but **never run**, and probably unnecessary now. | One cheap check: with `MNT-6c` on, is the `MNT-9 … CANNOT pin` warning gone? If yes that is independent confirmation the checkpoints now survive. Then decide whether to keep `MNT-9` at all. |
-| **4** | **`MNT-8` (free-queue order) under real pressure** | Measured inert on an idle engine (§6), but the pressure test shows ~1.1M tokens of unrelated traffic **does** evict a head. With a real co-tenant, ordering may still matter. | Retest only if cache loss is observed on a busy box. Do not re-run on an idle one — that is what made it look inert. |
-| **5** | **Mechanism 2 — `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`** (§3) | Never implemented. Aimed at the failure that is now fixed, and it would have **conflicted** with `MNT-9` (§3a.7). | **Propose dropping.** Revisit only if a new retention symptom appears. |
-| **6** | **Arm D — `swa_recycle: 0`** (§8.4) | Never run. Arm E delivers the benefit while keeping the useful half of `MNT-6b`. | **Propose dropping.** |
-| **7** | **Dose-response curve** (§8.1b) | The turn-count sweep was invalid (it re-created the head mid-dose). No threshold established. | **Propose dropping.** `session-sim.py` reproduces reliably; a curve adds little. |
-| **8** | **The swift-lsp `tools` flap** | **Now the largest remaining cost in these captures.** The plugin attaches seconds into every session and changes the tools array; turn 1 then diverges and re-prefills — **17.85s** in the cold session measured 2026-09-20. `death-probe.sh` disables it deliberately, ordinary sessions do not. | Client-side setting, free: disable the plugin, or accept one re-prefill per session. Measure a session with and without to put a number on it. |
+| **8** | **The swift-lsp `tools` flap** | **The largest remaining cost in these captures.** The plugin attaches seconds into every session and changes the tools array; turn 1 then diverges and re-prefills — **17.85s** in the cold session measured 2026-09-20. `death-probe.sh` disables it deliberately, ordinary sessions do not. | Client-side setting, free: disable the plugin, or accept one re-prefill per session. Measure a session with and without to put a number on it. |
 | **9** | **Warm-up not shipped** | Measured (§7): a warm head makes turn 0 cost **4.26s instead of 16.47s**. Still not wired into the launcher. | Add one `max_tokens=1` request after the health check, using the **exact** head the client sends, at the right tier (`API-12`'s blind spot: the effort prefix is injected downstream). |
-| **10** | **Git state moves the head** | Measured 2026-09-20 and not previously recorded: Claude Code's system prompt carries git status and recent commits, so **committing changes the head**. A session run after commits shared only the first ~16.4K tokens with the earlier head (**59.3%** partial hit) before diverging inside the system prompt. | Know it when measuring — two sessions either side of a commit are **not** the same head. Fixing it means changing what the client sends; not ours to change unilaterally. |
+| **3** | **`MNT-9` (head pinning) — keep it or retire it?** | Built and fixed (refuses an incomplete run, §8.4), **never run**, and probably unnecessary now. Mounted with `pin_static_head: 0` on both nodes. | See the correction below — the check is **not** free. |
+| **4** | **`MNT-8` / `MNT-8b` (free-queue order) under real pressure** | Measured inert on an idle engine (§6), but the pressure test shows ~1.1M tokens of unrelated traffic **does** evict a head. With a real co-tenant, ordering may still matter. | Retest only if cache loss is observed on a busy box. Do not re-run on an idle one — that is what made it look inert. |
+| **10** | **Git state moves the head** | Measured 2026-09-20: Claude Code's system prompt carries git status and recent commits, so **committing changes the head**. A session run after commits shared only the first ~16.4K tokens with the earlier head (**59.3%** partial hit) before diverging inside the system prompt. | Know it when measuring — two sessions either side of a commit are **not** the same head. Fixing it means changing what the client sends; not ours to change unilaterally. |
+
+### Correction to item 3: the "cheap check" is not free (2026-09-21)
+
+The earlier next-step read *"with `MNT-6c` on, is the `MNT-9 … CANNOT pin` warning gone? If yes
+that is independent confirmation the checkpoints now survive."* **That check cannot be run as
+written.** The warning is emitted inside `_maybe_pin_static_head()`, which returns immediately
+unless `_flag(_FLAG_PIN_HEAD, False)` is true — and `pin_static_head` is `0` on both nodes
+(verified 2026-09-21 via `local-ops/kv-flags.sh`). With `MNT-9` disarmed the warning **cannot**
+appear, so its absence in the log proves nothing at all.
+
+Running it for real means arming `pin_static_head 1` on live traffic. That is a live flag flip and
+needs no restart, but it changes **global** engine state for every session on the box, so it is an
+experiment to schedule — not an incidental log grep. `MNT-6c` is already confirmed by §9 on its own
+evidence; this would only be corroboration, which is why item 3 stays parked.
+
+### Closed on 2026-09-21
+
+Kept as one line each, because "we decided not to do this, and why" is the part that stops the work
+being repeated.
+
+| # | Item | Outcome |
+|---|---|---|
+| 1 | Does `MNT-6c` cost anything under load? | **ANSWERED: no evidence it does.** 13h of real Claude-Code-with-subagents traffic (696 windows, up to 6 concurrent requests): prefix hit rate flat at 93.8–94.2%, `vllm:num_preemptions_total` **0**, KV never above 71.5%. The decode collapse on that traffic was a *different* mechanism — vLLM's shared `token_budget` letting one long prefill starve everything behind it in `self.running`, now `MNT-10`. See [`status/INCIDENTS.md`](status/INCIDENTS.md) |
+| 2 | Code default was still the broken behaviour | **DONE.** `_recycle_cached_pages()` defaults to `False`, so the fix survives a cleared `/var/tmp` or a fresh node and `swa_recycle_cached 1` is the escape hatch back to stock. The fail-safe direction flipped with it: bad JSON in the flags file now reads as "keep the fix" |
+| 5 | Mechanism 2 — `VLLM_PREFIX_CACHE_RETENTION_INTERVAL` (§3) | **DROPPED.** Never implemented; aimed at the failure `MNT-6c` fixed, and it would have **conflicted** with `MNT-9` (§3a.7). Revisit only if a new retention symptom appears |
+| 6 | Arm D — `swa_recycle: 0` (§8.4) | **DROPPED.** Arm E delivers the benefit while keeping the useful half of `MNT-6b`; turning recycling off wholesale was never the goal |
+| 7 | Dose-response curve (§8.1b) | **DROPPED.** The turn-count sweep was invalid — it re-created the head mid-dose — and `session-sim.py` reproduces reliably, so a threshold curve adds little |
 
 ### Priority
 
-1. **Item 1** is the only one I would call urgent: we removed a protection and have not shown the
-   removal is free under load.
-2. **Items 2, 8, 9** are cheap wins.
-3. **Items 5, 6, 7** should be deleted from the plan.
-4. **Items 3, 4, 10** are park-and-watch.
+1. **Items 8 and 9** are the cheap wins, and both are **client-side** — no engine change, no
+   restart, no flag.
+2. **Items 3, 4, 10** are park-and-watch. Item 4 has a named trigger (cache loss on a busy box);
+   item 3 needs a scheduled arm, not a grep.
+3. Nothing here is urgent. Item 1 was the one that was, and it is answered.
 
 ## 11. Settled background facts
 

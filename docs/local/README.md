@@ -14,6 +14,7 @@ unedited.
 | understand or change an Anthropic-endpoint patch | [`PATCHES-API.md`](PATCHES-API.md) |
 | understand or change a KV / block-pool patch | [`PATCHES-KV.md`](PATCHES-KV.md) |
 | find out why a session re-prefilled, or measure the cache | [`PREFIX-CACHE.md`](PREFIX-CACHE.md) |
+| read the investigation that found and fixed it (`MNT-6c`), and what is still open | [`CACHE-TEST.md`](CACHE-TEST.md) |
 | choose a thinking tier or an effort level | [`THINKING-AND-EFFORT.md`](THINKING-AND-EFFORT.md) |
 | pull from upstream, or judge an upstream change | [`UPSTREAM.md`](UPSTREAM.md) |
 | **know if a change needs a restart, or can go live** | [`RUNTIME-SURFACE.md`](RUNTIME-SURFACE.md) |

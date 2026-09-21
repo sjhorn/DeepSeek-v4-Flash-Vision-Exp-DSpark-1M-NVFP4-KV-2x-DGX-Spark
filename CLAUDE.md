@@ -18,6 +18,7 @@ same facts were restated in two places and drifted apart.
 | change an Anthropic-endpoint patch (`API-0`, `API-8`…`API-14`) or the `PLG-14b` plugin | `docs/local/PATCHES-API.md` |
 | change a KV / block-pool patch (`MNT-5`, `MNT-6`, `MNT-7`) | `docs/local/PATCHES-KV.md` |
 | find out why a session re-prefilled, or measure the cache | `docs/local/PREFIX-CACHE.md` |
+| read the investigation that found and fixed the re-prefill (`MNT-6c`) | `docs/local/CACHE-TEST.md` |
 | choose a thinking tier or effort level | `docs/local/THINKING-AND-EFFORT.md` |
 | pull from upstream, or judge an upstream change | `docs/local/UPSTREAM.md` |
 | **know whether a change needs a restart, or can be made live** | `docs/local/RUNTIME-SURFACE.md` |
@@ -60,8 +61,9 @@ git push head local/main && git push worker local/main
 # then: both nodes must report the new commit and 0 dirty.
 # scripts/check-local-patches.sh reports what the RUNNING container has, which a
 # push does NOT change — git replaces files, and a single-file bind mount keeps
-# the old inode. Expect 21/21 only after the next restart; before it, new rows
-# FAIL and that is correct. See docs/local/status/INCIDENTS.md.
+# the old inode. Expect 22/22 (20 patch rows + 2 plugin rows) only after the
+# next restart; before it, new rows FAIL and that is correct.
+# See docs/local/status/INCIDENTS.md.
 ```
 
 Both nodes are `receive.denyCurrentBranch = updateInstead`, so a push updates their **working
@@ -192,7 +194,7 @@ Two habits that have already paid for themselves here:
   `PROTECTED_FRACTION=0.50`, `MTP_NUM_TOKENS=5`, `LONG_PREFILL_TOKEN_THRESHOLD=1024`.
   **`MNT-8`/`MNT-9` are mounted but OFF** —
   they are gated on `/var/tmp/vllm-kv-flags/flags.json`, not on env, so an arm can be flipped
-  without a restart (`bash local-ops/kv-flags.sh`); see `CACHE_TEST.md`. Re-check with
+  without a restart (`bash local-ops/kv-flags.sh`); see `docs/local/CACHE-TEST.md`. Re-check with
   `docker logs <container> | grep 'non-default args'` rather than trusting this line;
   `docs/local/status/CONFIG.md` carries the change history.
 - **A bind mount to the wrong path fails SILENTLY** — the container starts, the API answers, the

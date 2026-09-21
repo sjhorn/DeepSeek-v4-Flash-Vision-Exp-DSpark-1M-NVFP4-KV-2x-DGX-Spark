@@ -709,7 +709,7 @@ Do not re-test these without new evidence:
 | `max_tokens` (4 vs 32000), `stream` | 2x2 matrix, all four shapes **99.7%**, clean. |
 | Transport (direct tunnel vs tap→mTLS→proxy) | Same body both paths, **99.7%** both, clean. |
 | Session growth to 97K tokens | Head retrievable **before and after** growth, 99.7% both. |
-| ~~Generation / decode~~ | **WRONG — this was the cause. Withdrawn 2026-09-20.** The control (one request, 388 tokens) is real and reproduces (one turn, 166 tokens: 99.5%, 0.67s), but it does not generalise: the SAME seven captured bodies replayed with `max_tokens=1` leave the head at **99.6%**, and with 50 decode tokens each leave it at **0.0% / 14.83s**. Decode across a conversation that keeps extending is what destroys the prefix — [`CACHE_TEST.md`](../../CACHE_TEST.md) §8. |
+| ~~Generation / decode~~ | **WRONG — this was the cause. Withdrawn 2026-09-20.** The control (one request, 388 tokens) is real and reproduces (one turn, 166 tokens: 99.5%, 0.67s), but it does not generalise: the SAME seven captured bodies replayed with `max_tokens=1` leave the head at **99.6%**, and with 50 decode tokens each leave it at **0.0% / 14.83s**. Decode across a conversation that keeps extending is what destroys the prefix — [`CACHE-TEST.md`](CACHE-TEST.md) §8. |
 | Time / pressure eviction | Probe-written head survived **5 min** including a 777K-token burst. **Quantified 2026-09-20:** 224,500 tokens of unrelated prefill (5 requests) leaves it at 99.5%; **1,122,240 tokens (25 requests) kills it.** So pressure *can* evict a head, but it needs ~25 large requests — far more than a session does, which is why pressure is not the everyday cause. |
 | Patch 6, `SWA_RECYCLE`, `PROTECTED_FRACTION` | Offline A/B, four cells, identical row for row — and a grow-then-free session sim does **not** reproduce it in any arm. |
 | vllm#42948 hybrid cascade | Does not reproduce; this fork already carries repairs for the neighbouring 0%-hit modes. **No upstream report filed.** |
@@ -717,7 +717,7 @@ Do not re-test these without new evidence:
 | **An aborted / severed request** | **Innocent.** Severing a streaming request mid-flight left the head at 99.7%, clean. |
 | **The `?beta=true` path, `anthropic-beta`, the full live header set** | **Innocent (2026-09-19, A2).** Four arms direct to the engine — control, beta path, beta header, full captured headers — all **99.6% / ~0.76s / clean**. `prompt-caching-scope-2026-01-05` does nothing here. |
 | **A per-session `cache_salt`** | **Disproven from outside.** No client-reachable path sets one; if it did, the beta-header and full-live arms above would have read 0%. |
-| ~~**Eviction, of any kind**~~ | **WITHDRAWN the same day — do not cite this row.** It claimed `MNT-9` held a head by reference and the head still vanished. `MNT-9`'s own log shows it pinned **2 of the 3**, **3 of the 33** and **16 of the 17** blocks the sliding-window groups need for a hit at B, so the head was never held: an incomplete run in any group means no hit, because the coordinator takes the minimum across groups. Eviction remains a live candidate. What does survive: `MNT-8` does not move this metric, and a synthetic head is durable where a session head is not — [`CACHE_TEST.md`](../../CACHE_TEST.md) §6-7. |
+| ~~**Eviction, of any kind**~~ | **WITHDRAWN the same day — do not cite this row.** It claimed `MNT-9` held a head by reference and the head still vanished. `MNT-9`'s own log shows it pinned **2 of the 3**, **3 of the 33** and **16 of the 17** blocks the sliding-window groups need for a hit at B, so the head was never held: an incomplete run in any group means no hit, because the coordinator takes the minimum across groups. Eviction remains a live candidate. What does survive: `MNT-8` does not move this metric, and a synthetic head is durable where a session head is not — [`CACHE-TEST.md`](CACHE-TEST.md) §6-7. |
 | **A warm-up head is durable; a session head is not** | **Measured 2026-09-20 (§7).** A probe-written head reads 99.5% / 0.50s and survives 120s idle; a session starting on it pays **4.26s at turn 0 instead of 16.47s**. But a session's own later turns destroy it: alive at 18:40, one session later 0.0% / 14.40s. So the head dies from allocation churn *within* a session, and the head of the session's LAST turns survives (`MNT-6a` protects that one) while turn 0's does not. |
 | **Being a "real session" as such** | **Innocent (2026-09-19, A3).** A single-turn real `claude -p` session (no tools) leaves a head that is **ALIVE at +2s: 99.6%, 0.57s, n=2**. Real-client, beta path, `cache_control`, `context_management`, `thinking:enabled`, per-session `metadata.session_id` and the live streaming shape are all exercised by that session and are all out. |
 
@@ -731,7 +731,7 @@ rollback, or preemption under the co-tenant's ~140K-token requests.
 **FIXED 2026-09-21 — `MNT-6c` (`swa_recycle_cached: 0`), live on both nodes.** A real session's head
 now survives at **99.4% / 0.49s** where it read 0.0% / 14.16s, and cold-head simulation separates
 3/3 with no overlap. The eviction `MNT-6b` performed on every page it recycled was the bug.
-Full evidence: [`CACHE_TEST.md`](../../CACHE_TEST.md) §9.
+Full evidence: [`CACHE-TEST.md`](CACHE-TEST.md) §9.
 
 **RESOLVED 2026-09-20 — it is decode across turns.** Identical captured bodies, replayed with no
 client at all: `max_tokens=1` leaves the head at 99.6%, `max_tokens=50` over seven turns leaves it
@@ -739,7 +739,7 @@ at 0.0% / 14.83s. One turn decoding 166 tokens is harmless. The leading mechanis
 FIFO protection releasing the head's blocks, after which `MNT-6b`'s `_maybe_evict_cached_block()`
 destroys their hash mappings as the sliding window passes — and the coordinator's
 minimum-across-groups rule then reads 0. Full evidence and the next A/B:
-[`CACHE_TEST.md`](../../CACHE_TEST.md) §8. Reproduce in 45s with
+[`CACHE-TEST.md`](CACHE-TEST.md) §8. Reproduce in 45s with
 `python3 local-ops/xsess/decode-dose.py 7 50`.
 
 **Narrowed 2026-09-19 (Phase A):** it is not "a real session" — it is **multi-turn**. A one-prompt,
@@ -824,5 +824,5 @@ session sharing only the head gets nothing, because `MNT-6b` evicted the sliding
 that earlier boundary.
 
 None of the three is implemented and none is measured. **The analysis, the per-group page-size table, the
-porting surface and the test plan live in [`CACHE_TEST.md`](../../CACHE_TEST.md)** — not here, so
+porting surface and the test plan live in [`CACHE-TEST.md`](CACHE-TEST.md)** — not here, so
 the two cannot drift. Fold the result back into this document once it is measured.

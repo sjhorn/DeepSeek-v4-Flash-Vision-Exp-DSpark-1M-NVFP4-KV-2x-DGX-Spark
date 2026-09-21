@@ -54,7 +54,7 @@ writes a format nobody thought to list.
 | `local-ops/xsess/session-sim.py <turns> <max_tokens> [label]` | **the correct reproducer.** Stamps the system prompt unique (a head nobody has cached), runs the turns with decode, THEN probes once. Use this, not `decode-dose.py`, for any arm comparison: `decode-dose.py` probes first, which warms the head and makes both arms read ALIVE. |
 | `local-ops/xsess/pressure-dose.py` | how much unrelated prefill it takes to evict a warm head (224K: survives, 1.1M: dies). |
 
-Arms and what each is supposed to move: `CACHE_TEST.md`.
+Arms and what each is supposed to move: `CACHE-TEST.md`.
 
 ## Operations
 

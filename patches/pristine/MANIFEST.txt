@@ -1,7 +1,14 @@
-# patches/pristine/ — unpatched vLLM sources, pulled from the runtime image
+# patches/pristine/ — the vLLM sources our mounts are derived FROM, pulled from
+# the runtime image
 #
 # These are the ORIGINALS that patches/*.py are derived from, and the left-hand
 # side of every diff in patches/generated/.  Apache-2.0, same as vLLM.
+#
+# "Pristine" means UNPATCHED BY US (no MNT-*/API-*).  It does NOT mean stock
+# upstream vLLM: the capture comes from the runtime image, so any IMG-* patch
+# recipe/overlay/ bakes in is ALREADY PRESENT here.  That is deliberate — it is
+# what makes patches/generated/ show our mount's delta and nothing else — but it
+# means one file below is image-patched, and it is marked as such.
 #
 # Pull method (do NOT read through a bind-mount — that returns the PATCHED file,
 # which is how local-ops/baseline-20260914/MISLABELLED-was-patched-*.py happened):
@@ -27,7 +34,7 @@ c7744bf7c598c8ff908204d121b04b2e98fc7506630129b6beae74cff4ff3b0b     839  vllm/e
 fc68b4ca9914f7c81bda8cc4d0f7495d0665b1165f29d3b08fbc106064ecfb47    1421  vllm/v1/core/single_type_kv_cache_manager.py
 52d43b97d5c0f84285df596b2da5f4ee32184b9f41b87c6ef99437225b5720b5     344  vllm/v1/engine/detokenizer.py
 
-# Added 2026-09-20 for the KV-cache work in CACHE_TEST.md.  kv_cache_utils.py became
+# Added 2026-09-20 for the KV-cache work in docs/local/CACHE-TEST.md.  kv_cache_utils.py became
 # a real diff base the same day (MNT-8 mounts patch8-kv_cache_utils.py over it); the
 # other two are reference-only, so that the coordinator and manager can be read and
 # ported without cluster access.  regen-local-patches.sh diffs only what its MAP
@@ -35,3 +42,15 @@ fc68b4ca9914f7c81bda8cc4d0f7495d0665b1165f29d3b08fbc106064ecfb47    1421  vllm/v
 85563fd2bd5ada624fdd3f25e53c5ac9285620d2ae8f9b4033ec3d0e1d4514c3     601  vllm/v1/core/kv_cache_manager.py
 d152b52dd908e37eb413c2dc19d63cd54a718f0b398923f520e3425039d6f860     689  vllm/v1/core/kv_cache_coordinator.py
 b02f18a8bf5b3fe016a5756d4868dfe0ba98c8d89bb128ecc6b55d28621cf66f    2149  vllm/v1/core/kv_cache_utils.py
+
+# Added 2026-09-21 for MNT-10 (5330365).
+#
+# *** THIS ONE IS NOT STOCK vLLM. ***  scheduler.py is an IMG-* target: the image
+# bakes recipe/overlay/vllm/v1/core/sched/scheduler.py over it, so this capture
+# already contains IMG-3 (see "Patch 3 (root-cause fix, credit: roady001…)" at
+# line 1490).  Verified byte-identical to that overlay file at capture, and
+# `regen-local-patches.sh --check` re-asserts it on every run — because MNT-10
+# mounts over the image's scheduler, so an overlay edit that is not re-derived
+# into patches/mnt10-scheduler.py silently serves the OLD IMG-3 and fails
+# nowhere.  v1-core-sched-scheduler.patch is therefore MNT-10 only, by design.
+825073826b5be7fbe78e97c6e8fefa14636ca1cb2208f010f9da5acbdcb0a5a2    2369  vllm/v1/core/sched/scheduler.py

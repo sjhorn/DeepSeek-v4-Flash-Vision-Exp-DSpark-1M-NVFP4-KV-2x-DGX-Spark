@@ -57,7 +57,7 @@ boot log is otherwise silent about it. A future boot that skips this grep cannot
 
 ## Boot metrics (2026-09-20 15:34Z boot: make `MNT-8` / `MNT-9` live for the A/B)
 
-**Restart spent deliberately, with a specific ask, to run arms A and B of `CACHE_TEST.md`.**
+**Restart spent deliberately, with a specific ask, to run arms A and B of `CACHE-TEST.md`.**
 Both mechanisms shipped OFF; the restart imported the mounted files so the flags could be flipped
 afterwards **without** further restarts.
 
@@ -85,7 +85,7 @@ KV pool 2,517,769 against the 14:33Z boot's 2,484,672 — a **1.3% swing**, insi
 > the mirror image of the false PASS fixed hours earlier, and the reason both were caught is that
 > the rows were read against a real boot instead of being trusted.
 
-Results of the arms this boot bought: [`CACHE_TEST.md`](../../../CACHE_TEST.md) §6, and the
+Results of the arms this boot bought: [`CACHE-TEST.md`](../CACHE-TEST.md) §6, and the
 warm-up experiment that corrected them, §7.
 
 ## Boot metrics (2026-09-20 14:33Z boot: first boot of `local/main`, boot sentinel proven)

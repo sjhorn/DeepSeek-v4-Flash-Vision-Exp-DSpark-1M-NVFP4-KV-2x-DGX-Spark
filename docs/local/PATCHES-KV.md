@@ -14,7 +14,7 @@ Five bind-mounted files inside vLLM's KV and scheduling machinery:
 | `MNT-10` | `patches/mnt10-scheduler.py` | `v1/core/sched/scheduler.py` | make `long_prefill_token_threshold` live-tunable, so one long prefill cannot take the whole token budget |
 
 > **`MNT-8` and `MNT-9` are mounted but OFF, and neither is measured yet.** They are the two
-> mechanisms `CACHE_TEST.md` argues for; the write-up, the arms and the per-group numbers live
+> mechanisms `CACHE-TEST.md` argues for; the write-up, the arms and the per-group numbers live
 > there, not here. Unlike every other patch in this file they are **not** gated on container env —
 > see the flags note below.
 
@@ -77,7 +77,7 @@ sandbox dir and run the patch with `VLLM_PYTHON_DIR=<sandbox>` (zero cluster ris
 > `MNT-6b`'s eviction on, a conversation's head reads **0.0% / 14.4s** after the session; with
 > `MNT-6c` (`swa_recycle_cached: 0`) it reads **99.5% / 0.5s**, and the session itself is ~35%
 > faster. `_maybe_evict_cached_block()` on recycled pages WAS the bug. The *recycling* is worth
-> keeping; the eviction never was. See [`CACHE_TEST.md`](../../CACHE_TEST.md) §9.
+> keeping; the eviction never was. See [`CACHE-TEST.md`](CACHE-TEST.md) §9.
 
 **`MNT-6b` was investigated and exonerated.** Its `_maybe_evict_cached_block()` call on recycled
 pages looked like a retention leak, but it is correct hygiene: only `ref_cnt == 1` pages (held
@@ -164,7 +164,7 @@ real Claude-Code-with-subagents load. Full numbers and the worked two-minute exa
 | preemptions / max KV / hit rate | **0** / 71.5% / flat ~94% |
 
 Zero preemptions with a flat hit rate is what separates this from both KV exhaustion and cache
-loss — **it exonerated `MNT-6c` under load**, which was `CACHE_TEST.md` §10 item 1 and the only
+loss — **it exonerated `MNT-6c` under load**, which was `CACHE-TEST.md` §10 item 1 and the only
 real risk that fix introduced.
 
 **Why it is gated rather than just set.** Stock already has the right knob; it is simply boot-only.
@@ -286,7 +286,7 @@ everything decodes in the low single digits. 690K prefill tokens passed through 
 
 `MNT-10` makes that window survivable (4.7x on the synthetic victim) but cannot remove it. The
 remaining levers are about **not paying the cold prefill**: warm-up
-([`../../CACHE_TEST.md`](../../CACHE_TEST.md) 10, item 9) and the tools flap (item 8), both
+([`../../CACHE-TEST.md`](CACHE-TEST.md) 10, item 9) and the tools flap (item 8), both
 client-side.
 
 ```bash

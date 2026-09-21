@@ -3,7 +3,7 @@
 # patches/pristine/ (unpatched vLLM, pulled from the runtime image) and the
 # whole-file copies we actually bind-mount.
 #
-# WHY this exists.  The five files in patches/ are whole-file copies of vLLM
+# WHY this exists.  The seven files in patches/ are whole-file copies of vLLM
 # source, because that is what a bind-mount needs.  Our real delta is tiny and
 # invisible inside them: MNT-7 is 14 lines inside 534, MNT-6 is seven hunks
 # inside 1,504.  The generated diffs are the REVIEW SURFACE; the whole-file
@@ -18,6 +18,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PRISTINE="$ROOT/patches/pristine"
+OVERLAY="$ROOT/recipe/overlay/vllm"
 OUT="$ROOT/patches/generated"
 
 CHECK=0
@@ -97,6 +98,45 @@ for entry in $MAP; do
       "$(grep -c '^-[^-]' "$patchfile")"
   fi
 done
+
+# ---------------------------------------------------------------------------
+# Overlay guard: a pristine file that is ALSO an IMG-* overlay file must match it
+#
+# patches/pristine/ is captured from the runtime IMAGE, so for any file that
+# recipe/overlay/ bakes in, the capture already contains that IMG-* patch — and
+# our MNT-* mount is derived from it and carries the IMG-* forward.  Today the
+# only overlap is v1/core/sched/scheduler.py: IMG-3 lives there, and MNT-10
+# mounts over it.
+#
+# That makes an overlay edit silently dangerous.  Change recipe/overlay's
+# scheduler.py and the MNT-10 mount keeps serving the OLD IMG-3: git is clean,
+# check-local-patches.sh still finds its marker, the boot log looks normal, and
+# the generated diff still shows only MNT-10.  Nothing fails.  The sha
+# comparison below is the only thing that catches it.
+#
+# If this fires, the fix is NOT to edit the overlay back.  Re-derive the mounted
+# copy from the new overlay file (re-apply the MNT-* hunks on top), re-capture
+# patches/pristine/ from the rebuilt image, then regenerate.
+# ---------------------------------------------------------------------------
+if [ -d "$OVERLAY" ]; then
+  while IFS= read -r ov; do
+    rel="${ov#$OVERLAY/}"
+    pr="$PRISTINE/vllm/$rel"
+    [ -f "$pr" ] || continue
+    if cmp -s "$ov" "$pr"; then
+      printf '  OK     overlay matches pristine: %-27s\n' "vllm/$rel"
+    else
+      echo "  OVERLAY DRIFT  vllm/$rel" >&2
+      echo "          recipe/overlay/vllm/$rel differs from patches/pristine/vllm/$rel," >&2
+      echo "          so an IMG-* change is NOT in the file we bind-mount over it." >&2
+      echo "          Re-derive the mounted copy and re-capture pristine; see the" >&2
+      echo "          overlay guard comment in this script." >&2
+      rc=1
+    fi
+  done <<EOF
+$(find "$OVERLAY" -name '*.py' | sort)
+EOF
+fi
 
 if [ "$CHECK" = "1" ] && [ -n "$stale" ]; then
   echo
