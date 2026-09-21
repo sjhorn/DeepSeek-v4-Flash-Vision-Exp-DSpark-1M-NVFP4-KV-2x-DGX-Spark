@@ -609,6 +609,49 @@ row that passes while `docker exec <c> grep -c '<marker>' <file>` returns 0.
 **The general lesson** — a fail-closed check is only fail-closed if you have watched it fail. This
 one was added as a backstop after a near-miss, and had a whole class of rows it could not fail on.
 
+### An experiment's flags were being rewritten by ANOTHER session on the same box (2026-09-20/21)
+
+**Symptom.** Mid-experiment, `/var/tmp/vllm-kv-flags/flags.json` changed on both nodes to settings
+nobody in this session had set (`pin_static_head: 1, swa_recycle: 0` — two arms mixed). It happened
+again the next morning at 08:08. A trace started here captured a command this session never issued,
+looping: `+ bash local-ops/kv-flags.sh swa_recycle 0`. The node reported 3-4 users logged in.
+
+**Cause.** The cluster is shared, and so is the flags file. Nothing about the flags mechanism is
+per-session — it is global engine state, like the engine itself.
+
+**Consequences.** Any arm measured while another party writes the flags is void, and *their*
+measurement is equally void. Two sessions can also silently interleave arms without either noticing.
+
+**What to do.**
+
+1. **Read the flags immediately before AND after every arm**, and record both in the write-up. A
+   changed value between the two invalidates that run.
+2. **Set flags explicitly rather than trusting a prior state** — write every key you depend on, not
+   just the one you are changing. `kv-flags.sh` merges, so an unwritten key keeps whatever the last
+   writer left.
+3. **Ask before taking the engine.** It was taken here only after the user said to.
+4. Prefer `docker exec … cat /etc/vllm-kv-flags/flags.json` for the final check: it proves what the
+   *engine* sees, not what the host file says.
+
+### `kv-flags.sh` leaked a stuck `ssh` per call, and exhausted the Mac's process table (2026-09-20)
+
+**Symptom.** `local-ops/kv-flags.sh: fork: Resource temporarily unavailable`, hundreds of lines,
+then every local command failed — `echo` included. A single `kv-flags.sh` invocation also hit a
+300s timeout with no output.
+
+**Cause.** The script called `ssh` **without `-n`**. Without it ssh reads the caller's stdin, which
+never arrives in a non-interactive context (a background job), so the process hangs forever. Each
+call leaked one or two stuck `ssh` processes. Combined with the foreign loop above re-invoking the
+script, that accumulated until no process could fork.
+
+**Fix.** `ssh -n` everywhere in `kv-flags.sh`. **Signature to recognise it:** a script that works
+when typed by hand and hangs when run from a background task or a loop.
+
+**Measured afterwards for reference:** the Mac's limits are `kern.maxproc` 12000 and
+`kern.maxprocperuid` 8000; normal usage during this work was ~350 processes. So exhaustion means a
+leak, never ordinary load. For a multi-node flag write, one `ssh` per node beats four script
+invocations (~16 ssh).
+
 ## Known issues
 
 ### KV pool exhaustion under long-context sessions

@@ -715,6 +715,34 @@ cleared `/var/tmp`, silently returns to the old (broken) behaviour, because the 
 still `True`. **Flip the code default to `False`** at the next convenient restart so the fix is the
 default and the flag becomes the escape hatch rather than the enabler.
 
+
+## 10. Open items — what to pick up next (as of 2026-09-21)
+
+The root cause is closed (§8, §9). Everything below is what is left, in priority order. Items 5, 6
+and 7 are proposed for **deletion**, not for work — they were aimed at the problem that is now
+fixed, and keeping them on a list pretends they are pending.
+
+| # | Item | Status | Next step |
+|---|---|---|---|
+| **1** | **Does `MNT-6c` cost anything under load?** | **NOT MEASURED — the only real risk we introduced.** `MNT-6b`'s recycling exists to stop one long prefill churning the shared queue. We kept the recycling but stopped the eviction, so cached pages now return to the LRU instead of being reused in place. Under a busy box that churn may partly return. | **Do this first.** Two concurrent long sessions (or one plus the pressure driver), watching `vllm:prefix_cache_hits_total`, decode tok/s and `vllm:num_preemptions_total`, with `swa_recycle_cached` flipped between runs. No restart needed. |
+| **2** | **Code default is still the broken behaviour** | Open. `_recycle_cached_pages()` defaults to `True`; the fix lives only in `/var/tmp/vllm-kv-flags/flags.json`, which is node-local and not in git. A rebuilt node, or a cleared `/var/tmp`, silently restores the bug. | Flip the default to `False` in `patches/patch6-…py` and make the flag the escape hatch. Needs one restart — fold it into the next one rather than spending a boot on it. |
+| **3** | **`MNT-9` (head pinning), arm C′** | Built and fixed (refuses an incomplete run, §8.4) but **never run**, and probably unnecessary now. | One cheap check: with `MNT-6c` on, is the `MNT-9 … CANNOT pin` warning gone? If yes that is independent confirmation the checkpoints now survive. Then decide whether to keep `MNT-9` at all. |
+| **4** | **`MNT-8` (free-queue order) under real pressure** | Measured inert on an idle engine (§6), but the pressure test shows ~1.1M tokens of unrelated traffic **does** evict a head. With a real co-tenant, ordering may still matter. | Retest only if cache loss is observed on a busy box. Do not re-run on an idle one — that is what made it look inert. |
+| **5** | **Mechanism 2 — `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`** (§3) | Never implemented. Aimed at the failure that is now fixed, and it would have **conflicted** with `MNT-9` (§3a.7). | **Propose dropping.** Revisit only if a new retention symptom appears. |
+| **6** | **Arm D — `swa_recycle: 0`** (§8.4) | Never run. Arm E delivers the benefit while keeping the useful half of `MNT-6b`. | **Propose dropping.** |
+| **7** | **Dose-response curve** (§8.1b) | The turn-count sweep was invalid (it re-created the head mid-dose). No threshold established. | **Propose dropping.** `session-sim.py` reproduces reliably; a curve adds little. |
+| **8** | **The swift-lsp `tools` flap** | **Now the largest remaining cost in these captures.** The plugin attaches seconds into every session and changes the tools array; turn 1 then diverges and re-prefills — **17.85s** in the cold session measured 2026-09-20. `death-probe.sh` disables it deliberately, ordinary sessions do not. | Client-side setting, free: disable the plugin, or accept one re-prefill per session. Measure a session with and without to put a number on it. |
+| **9** | **Warm-up not shipped** | Measured (§7): a warm head makes turn 0 cost **4.26s instead of 16.47s**. Still not wired into the launcher. | Add one `max_tokens=1` request after the health check, using the **exact** head the client sends, at the right tier (`API-12`'s blind spot: the effort prefix is injected downstream). |
+| **10** | **Git state moves the head** | Measured 2026-09-20 and not previously recorded: Claude Code's system prompt carries git status and recent commits, so **committing changes the head**. A session run after commits shared only the first ~16.4K tokens with the earlier head (**59.3%** partial hit) before diverging inside the system prompt. | Know it when measuring — two sessions either side of a commit are **not** the same head. Fixing it means changing what the client sends; not ours to change unilaterally. |
+
+### Priority
+
+1. **Item 1** is the only one I would call urgent: we removed a protection and have not shown the
+   removal is free under load.
+2. **Items 2, 8, 9** are cheap wins.
+3. **Items 5, 6, 7** should be deleted from the plan.
+4. **Items 3, 4, 10** are park-and-watch.
+
 ## 5. What is settled and needs no further work
 
 - **Patch 6 is applied and both settings are on**, on both nodes, in the running engine:

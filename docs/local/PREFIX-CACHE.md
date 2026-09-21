@@ -78,6 +78,12 @@ ENABLE_TOOL_SEARCH=false          # or just leave it unset; `auto` measured iden
 Measured over 16 turns in two workloads: **0 head moves, 100% strict prefix, every turn at ~99.8%
 of its achievable cache hit.**
 
+> **A commit moves the head (measured 2026-09-20).** Claude Code's system prompt carries git status
+> and recent commits, so committing during an experiment changes the head for every later session.
+> A session run after several commits shared only its first ~16.4K tokens with the earlier head —
+> **59.3%**, then divergence inside the system prompt. Two sessions either side of a commit are not
+> the same head, and comparing them measures the commit, not the cache.
+
 ### The one thing that actually moves the head
 
 **The `swift-lsp@claude-plugins-official` plugin.** It attaches a few seconds into every session,
@@ -768,6 +774,12 @@ reproduction, no GPU, seconds.
 
 ### Measurement traps that invalidated work here
 
+- **NEVER touch the object under test before the treatment (2026-09-21).** The first `MNT-6c` A/B
+  used a reproducer that *probes first*. That probe **warms the head**, so every run after the first
+  starts warm — and a warm head survives. Both arms read ALIVE and the comparison was worthless; the
+  invalid turn-count sweep has the same cause. `local-ops/xsess/session-sim.py` fixes it by stamping
+  the system prompt unique (a head nobody has cached), running the turns, and probing **last**. With
+  that, the control fails 3/3 and the fix passes 3/3.
 - **Never retry a cache measurement with the same request.** The first attempt cached it; the
   retry reads its own footprint back at ~100%. Produced a 12,288-hit reading on an 11,000-token
   shared prefix. Regenerate a fresh request per attempt (perturb only the divergent tail).
