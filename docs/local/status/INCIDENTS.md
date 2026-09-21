@@ -609,6 +609,41 @@ row that passes while `docker exec <c> grep -c '<marker>' <file>` returns 0.
 **The general lesson** — a fail-closed check is only fail-closed if you have watched it fail. This
 one was added as a backstop after a near-miss, and had a whole class of rows it could not fail on.
 
+### A synthetic benchmark ranked the tuning knob backwards (2026-09-21)
+
+**Symptom.** `MNT-10`'s dose-response curve, run against a controlled victim/attacker pair, ranked
+**512 as the best** cap (2.53 tok/s victim, 0.48 s worst stall). On live traffic 512 is the
+**worst** of the three settings tested — aggregate decode median **37.5 tok/s against 2048's
+60.7**, starved windows three times deeper (1.0 vs 4.5 tok/s), plus scheduler-loop stalls of **40 s
+and 80 s** with no stats line emitted at all.
+
+**Root cause — the benchmark scored one half of a two-sided trade.** The cap trades *sharing*
+(other requests get budget) against *duration* (the prefill itself takes more steps). The synthetic
+test had exactly **one** decoder to protect and measured it directly, while the duration cost —
+already visible as **+49% prefill time at 512** — only showed up as a number in a column, not as
+harm. On real traffic that duration is the dominant term: everything stays degraded half again as
+long, and at 512 a 144K prefill becomes 282 chunks each paying fixed per-step cost (attention
+metadata, indexer top-k, kernel launches) at ~140K context.
+
+**The deeper error: the benchmark's victim was never the common case.** Splitting live low-decode
+windows by `Running` shows most of them have **`Running: 1`** — the single request in the engine is
+*itself* prefilling. Nobody is being starved; somebody is waiting on their own prompt. A smaller
+cap makes that strictly worse. The synthetic test could not contain this case by construction,
+because it always had a victim decoding alongside the attacker.
+
+**Signature.** A low `Avg generation throughput` with `Running: 1` is **not** starvation and
+`MNT-10` will not help it. Only `Running >= 2` windows are this patch's problem. Check that split
+before touching the knob.
+
+**What to do instead.** Treat a synthetic curve as evidence that a mechanism *works*, never as a
+guide to its production value. Tune on real traffic, split by `Running`, and prefer a long
+alternating A/B — the four-block one run here was **confounded** (the 2048 arm drew 3.2x the
+prefill tokens of the 1024 arm, 525,191 vs 166,182) and had to be discarded.
+
+**Two claims retracted in the same session**, both from reading too few samples: an apparent decode
+regression at `Running=4` (12.5 tok/s) was **n=2** and reads **70.6** at n=7; and the CUDA-graph
+hypothesis built to explain it is unsupported.
+
 ### `MNT-10`'s gate read the HOST path and silently did nothing (2026-09-21)
 
 **Symptom.** The `MNT-10` A/B returned **identical numbers in both arms** — victim 0.95 vs 0.93

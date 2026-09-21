@@ -210,6 +210,85 @@ half the budget is too loose to help much.
 does not model several long prefills arriving together, which is what the 13h production trace
 showed, nor the effect on aggregate throughput across many sessions.
 
+> **That caveat turned out to matter: the curve above DOES NOT PREDICT REAL TRAFFIC.** It ranks 512
+> best. On live traffic 512 is the **worst** of the three. See "Real traffic disagrees" below. Use
+> the curve as evidence that the knob *works*, never as a guide to its value.
+
+### Real traffic disagrees — 512 is the worst setting, not the best (2026-09-21)
+
+Measured on a live Claude-Code session with two subagents, flipping the cap between blocks. Same
+session, same workload, minutes apart:
+
+| | 2048 (6 min) | 512 (11 min) |
+|---|---|---|
+| **aggregate decode, median** | **60.7 tok/s** | **37.5 tok/s** |
+| decode inside a starved window | 4.5 tok/s | **1.0 tok/s** |
+| low-decode windows | 7 / 39 busy | 11 / 58 busy |
+| **engine stats-line gaps > 15 s** | **none** | **40 s and 80 s** |
+
+The gaps are the alarming part: the engine emitted no `loggers.py:271` line for up to 80 seconds
+while requests were running. That is the scheduler loop itself stalling, not decode being
+descheduled.
+
+**Why the synthetic curve was wrong.** At 512 a 144K prefill becomes **282 chunks**, each paying
+fixed per-step cost — attention metadata build, indexer top-k, kernel launches — at ~140K context.
+The curve already measured that as **+49% prefill duration**; what it could not show is that
+everything else stays degraded for half again as long, which on real traffic outweighs the gentler
+per-step sharing. The synthetic test had exactly one decoder to protect, so it only ever scored the
+sharing half of the trade.
+
+### Most "collapses" are NOT starvation — check `Running` before tuning
+
+The single most useful thing found here, and it reframes the problem:
+
+```
+11:06:00  GEN  7.3  Running: 1
+11:06:10  GEN  1.7  Running: 1     <- ONE request. Nothing is being starved.
+```
+
+`Running: 1` with near-zero decode means **the one request in the engine is itself prefilling** —
+somebody waiting on their own prompt, not being crowded out. **No cap helps that case, and a
+smaller cap actively hurts it**, because it makes that prefill slower. This is why 512 felt like a
+regression to the user even though it "shares better".
+
+At 2048, all 7 low-decode windows had `Running >= 2` (genuine starvation). Before reaching for this
+knob, split low-decode windows by `Running`: only the `>= 2` ones are the problem `MNT-10` exists
+to solve.
+
+### 1024 vs 2048 is a TIE, and the A/B that tried to separate them was CONFOUNDED
+
+An alternating four-block A/B (1024/2048/1024/2048, 5 min each) on live traffic returned 1024 ahead
+at every matched concurrency — **and it is not usable**, because the arms did not receive
+comparable work: the 2048 blocks carried **525,191** prefill tokens against the 1024 blocks'
+**166,182**, a 3.2x imbalance. Four blocks was not enough to average out a workload that arrives in
+bursts. One collapse also straddled an arm boundary, starting under 2048 and continuing into 1024,
+so per-arm attribution is unsound at this block length.
+
+Taken together with the block comparison above (1024 median 61.0, 2048 median 60.7) the two values
+are **indistinguishable on real traffic**. The deployed value is 1024 because the synthetic curve
+favours it on stall duration, not because it beat 2048 anywhere measurable. **Do not re-litigate
+1024 vs 2048 without a much longer alternating run** — the region is flat and the variance is
+workload-driven. Intermediate values such as 1536 are legal (no alignment constraint) and would be
+expected to land inside the same noise.
+
+**Retracted along the way:** an apparent regression at `Running=4` (12.5 tok/s aggregate vs a
+pre-fix 68.8) was read off **n=2**. At n=7 it is **70.6** — no regression. And a matching
+CUDA-graph hypothesis (that a tighter cap forces mixed prefill+decode steps out of graph-eligible
+pure-decode steps) is **not supported**: it predicts 512 degrading gracefully, and 512 instead
+produced multi-second loop stalls.
+
+### The ceiling this knob cannot raise
+
+The prefix cache was measured **live over a 20 s window** — 262,846 queries, 258,304 hits,
+**98.3%** — so cache misses are not the cost. What remains is genuine: **each new subagent pays a
+full cold prefill of its whole context, ~115-145K tokens, taking 90-140 s**, during which
+everything decodes in the low single digits. 690K prefill tokens passed through in 20 minutes.
+
+`MNT-10` makes that window survivable (4.7x on the synthetic victim) but cannot remove it. The
+remaining levers are about **not paying the cold prefill**: warm-up
+([`../../CACHE_TEST.md`](../../CACHE_TEST.md) 10, item 9) and the tools flap (item 8), both
+client-side.
+
 ```bash
 bash local-ops/kv-flags.sh long_prefill_token_threshold 1024   # try a tighter cap, live
 bash local-ops/kv-flags.sh long_prefill_token_threshold 0      # disable the cap (restores the bug)
