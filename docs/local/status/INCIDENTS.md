@@ -934,6 +934,30 @@ prefills are the input to this starvation.
 
 ## Known issues
 
+### NOT an incident: requests that look stuck for 400s with an empty queue (2026-09-22)
+
+**Signature.** Several requests sit in `Running` producing nothing visible for 400s+. Reads as a
+stall, a queue or KV pressure; it is a high-effort **thinking pass** decoding normally.
+
+**Tell it apart in one command** — if all three hold, nothing is wrong:
+
+```bash
+curl -s http://127.0.0.1:8888/metrics | grep -E '^vllm:(num_requests_waiting|num_preemptions_total)'
+#   waiting 0, waiting_by_reason capacity/deferred 0, preemptions 0  -> not a queue
+# and the per-request row shows queued_s ~0, prefill_s a few seconds, decode_s = the rest:
+docker exec <container> python3 -c "import urllib.request,json; \
+  print(json.load(urllib.request.urlopen('http://127.0.0.1:9094/prefill?since=0&limit=20'))['rows'][-5:])"
+```
+
+Measured: 76 requests over 120s in the ring, every one `queued_s` **0.00**, `prefill_s` 0.7-7.2s,
+`decode_s` the whole remainder at **17-40 tok/s**, 2,187-8,171 generated tokens. `claude-opus-*`
+means effort `high`, which averages **8,243 tokens per correct answer** — 235-485s at those rates,
+before the first visible character. Full workup and the levers (all per-request, no restart):
+[`THINKING-AND-EFFORT.md`](../THINKING-AND-EFFORT.md#silent-400s).
+
+**What a real stall looks like instead:** `Drafted: 10 tokens` per 10s window with generation
+throughput 0.0 (`MNT-10`, tuned live), or 0% acceptance at 0.1-0.2 tok/s (KV exhaustion, below).
+
 ### KV pool exhaustion under long-context sessions
 
 With 2+ Claude Code sessions building up long conversation context (500K+ tokens each), the KV pool + prefix cache can fill to 99%+, causing decode throughput to collapse to 0.1-0.2 tok/s and draft acceptance to drop to 0%. Symptoms: extremely slow turns, repeated text in output.

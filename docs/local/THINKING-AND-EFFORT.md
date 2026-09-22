@@ -208,3 +208,66 @@ Also found: `drop_thinking` (default true) is force-disabled whenever any messag
 would not be dropped by the renderer if thinking were adopted for agent work.
 
 Artifacts: `local-ops/hmmt-effort-20260916/`.
+
+<a id="silent-400s"></a>
+
+## "Five requests stuck, no output for 400s" — it is the thinking pass (measured 2026-09-22)
+
+**Symptom.** Watching the engine, several requests sit in `Running` and produce nothing visible
+for 400s or more. It reads as a stall, a queue, or KV pressure. It is none of them.
+
+**What the engine was actually doing.** The queue was empty the whole time —
+`vllm:num_requests_waiting` **0.0** across 60 consecutive 1-second samples, `waiting_by_reason`
+`capacity` **0** and `deferred` **0**, `num_preemptions_total` **0** since boot, and
+`Waiting: 0 reqs` in **6,143 of 6,144** log samples this boot. KV sat at 52%, prefix hit rate 97.4%.
+
+Per-request rows (`PLG-14b`) for every request over 120s, 76 of them in the ring:
+
+| | range |
+|---|---|
+| `queued_s` | **0.00** — nothing ever waited for admission |
+| `prefill_s` | **0.7–7.2s** — the cache is doing its job (`cached` ≈ `prompt`) |
+| `decode_s` | **everything else**, 118–463s |
+| `generation_tokens` | **2,187–8,171** |
+| tokens/s per stream | **17–40** |
+
+So the request is decoding **continuously** for the whole 400s, emitting thousands of tokens. The
+longest: 8,031 tokens at 17.4 tok/s = 462.8s of decode.
+
+**Why none of it is visible.** `claude-opus-*` maps to `{"thinking": True, "reasoning_effort":
+"high"}` ([`MODEL_THINKING_RULES`](../../patches/anthropic_serving_inline_system.py), `API-9`), and
+a high-effort pass measured on HMMT here averages **8,243 tokens per correct answer**. Verified
+live 2026-09-22 against the running engine — `claude-opus-5`, `temperature: 0`, "what is 17*23":
+
+```
+block thinking: 38 chars -> 'We need answer just number. 17*23=391.'
+block text:      3 chars -> '391'
+```
+
+The thinking block comes first and carries nearly all the tokens on a real task. 8,243 tokens at a
+per-stream 17–35 tok/s is **235–485s before the answer starts**. That is the 400s, exactly.
+
+**The rate is per stream, not per box.** Aggregate decode measured 74–104 tok/s at 6–7 running, so
+each stream gets aggregate ÷ running. The same answer arrives 2x faster with half the streams; this
+is why the identical prompt can take 140s or 460s.
+
+**Levers, none of which need a restart:**
+
+| want | do | tier |
+|---|---|---|
+| this one turn fast | send `thinking: {"type": "disabled"}` — `API-9d` honours it | per request, any client |
+| routine work faster | use a `claude-sonnet-*` alias: effort `low`, which **is** the empty prefix — reasoning still happens, with no +79-token instruction | per request |
+| no reasoning at all | a `*-nothink` or `claude-haiku-*` alias | per request |
+| everything faster | run fewer concurrent streams | client-side |
+
+**Know what you are trading.** Our own HMMT numbers say `high` is the tier to reach for on hard
+problems — 11/12 at 8,243 tokens per correct answer, against 5/12 at 20,035 with thinking off.
+Dropping opus → sonnet buys latency with accuracy; do it knowingly, not by default. `max` is worse
+than `high` on both axes, see above.
+
+**Not a stall, and here is how to tell one apart.** A real starvation event looks different:
+`Drafted: 10 tokens` across a 10s window with `Running` > 0 and generation throughput 0.0 — that is
+`MNT-10`, one long prefill eating the token budget, and it is tuned live
+(`bash local-ops/kv-flags.sh long_prefill_token_threshold 1024`). Zero-generation samples this boot
+were rare and almost all at `Running: 1`. KV exhaustion looks different again: 0% acceptance and
+0.1–0.2 tok/s.
