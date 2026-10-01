@@ -139,6 +139,7 @@ the attribute alone would desynchronise the two.
 | container env (`VLLM_*`, `PROTECTED_FRACTION`) | a process cannot have its environment changed from outside |
 | `SERVER_TOOL_STREAM`, `SERVER_TOOL_MAX_ROUNDS` (`API-15`) | container env, read at import — the kill switch and round cap for the streamed server-tool turn |
 | `--long-prefill-token-threshold` **as a boot default** | it is a CLI arg — but `MNT-10` makes the *effective* value Tier 1 |
+| `--served-model-name` / `SERVED_MODEL_ALIASES` | CLI args — but since 2026-10-01 this only changes what `/v1/models` ADVERTISES, not what is ACCEPTED: `VLLM_SKIP_MODEL_NAME_VALIDATION=1` makes any model name work, so a new vendor id no longer needs a restart. Adding one to the list is now cosmetic and can wait for the next restart. See [`THINKING-AND-EFFORT.md`](THINKING-AND-EFFORT.md) |
 
 > **A `git push` is not a restart.** It replaces files on the node; the running container keeps the
 > inode it imported. New patches go live at the next restart, whenever that happens.

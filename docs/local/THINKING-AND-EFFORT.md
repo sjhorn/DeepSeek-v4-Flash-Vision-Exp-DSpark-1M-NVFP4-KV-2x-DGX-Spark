@@ -101,8 +101,9 @@ win comes from hard problems where the off arm rambles to the cap.
 
 ## Model aliases — per-tier thinking (`API-9`, rev 2026-09-18)
 
-One engine, eleven served names. `--served-model-name` takes a list, so aliases cost nothing —
-same weights, same KV pool, just labels. Patch 9 routes the name to `chat_template_kwargs`.
+One engine, thirteen served names (`/v1/models` is the list). `--served-model-name` takes a list,
+so aliases cost nothing — same weights, same KV pool, just labels. Patch 9 routes the name to
+`chat_template_kwargs`.
 
 **We serve the vendor names too.** Claude Code already knows `claude-*` ids, so serving them means
 no unrecognised-model warning, a working `/model` picker, working `ANTHROPIC_DEFAULT_*_MODEL` tier
@@ -132,10 +133,27 @@ watch `stop_reason` on sonnet-tier turns for runaways.
 3. model-name rules (suffix rules first, then vendor prefixes; first match wins)
 4. nothing matches → server-wide `--default-chat-template-kwargs`
 
-Rules live in `MODEL_THINKING_RULES`; names live in `SERVED_MODEL_ALIASES` in the compose. **Keep
-them in sync** — vLLM rejects an unserved name before Patch 9 sees it. Prefix rules mean a new
-Claude id routes correctly without a code change. Kill switches: `MODEL_ALIAS_THINKING=0`,
-`CLASSIFIER_NOTHINK=0`.
+Rules live in `MODEL_THINKING_RULES`; names live in `SERVED_MODEL_ALIASES` in the compose. Prefix
+rules mean a new Claude id routes correctly without a code change. Kill switches:
+`MODEL_ALIAS_THINKING=0`, `CLASSIFIER_NOTHINK=0`.
+
+**"Keep them in sync — vLLM rejects an unserved name before Patch 9 sees it" WAS TRUE UNTIL
+2026-10-01 and is not any more.** `VLLM_SKIP_MODEL_NAME_VALIDATION=1` is now set in the compose, so
+an unserved name is **accepted** and reaches Patch 9's prefix rules like any other. The alias list is
+still worth maintaining, but for a narrower reason: it is what `/v1/models` ADVERTISES — the picker,
+the tier variables and the proxy's health count — and no longer what makes a request work.
+
+What that moves, and what it does not:
+
+- **A new VERSION of a known family is now free.** `claude-opus-5-5` arrived on 2026-10-01 and 404'd
+  four times with *"The model `claude-opus-5-5` does not exist"* before this was turned on; the
+  prefix rule `("prefix", "claude-opus", …)` was already correct and simply never got to run.
+- **A new FAMILY is the case that still bites, and now it bites QUIETLY.** `claude-quartz-5`, say,
+  matches no rule, falls through to `--default-chat-template-kwargs`, and nothing 404s to tell you.
+  That is the one thing the old loud failure bought, and it is why the proxy repo now carries a check
+  that reports any `claude-*` id whose family has no rule here.
+- **A typo is served rather than refused**, with the same quiet fallback. Set
+  `VLLM_SKIP_MODEL_NAME_VALIDATION=0` in `.env.dspark` to get the 404 back.
 
 ### The auto-mode classifier — measured 2026-09-18
 

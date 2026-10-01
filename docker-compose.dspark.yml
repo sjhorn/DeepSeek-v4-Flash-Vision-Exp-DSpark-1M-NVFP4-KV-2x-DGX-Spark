@@ -146,6 +146,46 @@ services:
       MODEL_ALIAS_THINKING: "${MODEL_ALIAS_THINKING:-1}"  # Patch 9
       CLASSIFIER_NOTHINK: "${CLASSIFIER_NOTHINK:-1}"      # Patch 9
       TOOL_ARGS_STRICT: "${TOOL_ARGS_STRICT:-0}"          # Patch 10
+
+      # MODEL-NAME VALIDATION OFF, so this server is model-name agnostic and a
+      # new vendor id does not need a restart to be accepted. Upstream's own
+      # docstring describes exactly this use: "any model name will be accepted
+      # in the 'model' field of requests... useful for proxy/gateway scenarios".
+      #
+      # WHY. --served-model-name is a LAUNCH ARG, so every new id Anthropic
+      # ships (claude-opus-5-5 on 2026-10-01, and whatever follows) otherwise
+      # 404s with "The model `x` does not exist" until somebody restarts the
+      # engine -- and a restart dumps the prefix cache, which on this engine is
+      # ~194s to refill a 54K prompt against 0.9s warm. The alias list below is
+      # still maintained, but only so /v1/models ADVERTISES what we use; it is
+      # no longer what makes a request work.
+      #
+      # Four things checked before turning this on, each of which could have
+      # made it useless:
+      #   - it is the ONLY gate. patches/anthropic_serving_inline_system.py
+      #     does no model validation of its own.
+      #   - ATTRIBUTION SURVIVES. The anthropic layer passes request.model into
+      #     every converter, so the response echoes the id the client asked for
+      #     and the proxy's records and pricing stay correct. (The OpenAI layer
+      #     would have echoed base_model_paths[0] -- the primary served name --
+      #     and silently collapsed every alias into one.)
+      #   - MODEL_THINKING_RULES already matches by PREFIX on claude-haiku/
+      #     sonnet/opus/fable, so a new VERSION of a known family gets the right
+      #     reasoning effort with no edit here.
+      #   - /v1/models is unaffected (show_available_models reads the alias list),
+      #     so the model picker and the proxy's health count stay clean. Padding
+      #     the alias list with guesses would have polluted both.
+      # And it sits in envs.py's `ignored_factors`, so it does NOT invalidate the
+      # compilation cache: enabling it costs a restart, not a recompile.
+      #
+      # THE COST, because it is real. A typo is now SERVED rather than refused,
+      # and it degrades in two quiet ways: a mistyped family misses the prefix
+      # rules above and falls back to --default-chat-template-kwargs, and the
+      # proxy prices it with a defaulted rate. The sharper case is a NEW FAMILY
+      # rather than a new version -- claude-quartz-5, say -- which has no rule
+      # here and silently takes the server default. Set this to 0 to get the
+      # loud 404 back.
+      VLLM_SKIP_MODEL_NAME_VALIDATION: "${VLLM_SKIP_MODEL_NAME_VALIDATION:-1}"
       # Patch 12 prefix-cache tripwire: one INFO line per request carrying
       # four short hashes and a length. Consumed by local-ops/prefix-watch.py.
       PREFIX_WATCH: "${PREFIX_WATCH:-1}"
@@ -287,7 +327,7 @@ services:
         echo "serving with chat-template-kwargs=$${CHAT_TEMPLATE_KWARGS}";
         exec /opt/env/bin/vllm serve ${DSPARK_MODEL:-deepseek-ai/DeepSeek-V4-Flash-DSpark}
         --served-model-name ${SERVED_MODEL_NAME:-deepseek-v4-flash-dspark}
-        ${SERVED_MODEL_ALIASES:-deepseek-v4-flash-dspark-nothink deepseek-v4-flash-dspark-think-low deepseek-v4-flash-dspark-think-high deepseek-v4-flash-dspark-think-max claude-haiku-4-5 claude-haiku-4-5-20251001 claude-sonnet-5 claude-sonnet-4-6 claude-opus-5 claude-opus-4-6 claude-fable-5}
+        ${SERVED_MODEL_ALIASES:-deepseek-v4-flash-dspark-nothink deepseek-v4-flash-dspark-think-low deepseek-v4-flash-dspark-think-high deepseek-v4-flash-dspark-think-max claude-haiku-4-5 claude-haiku-4-5-20251001 claude-sonnet-5 claude-sonnet-4-6 claude-opus-5 claude-opus-5-5 claude-opus-4-6 claude-fable-5}
         --host ${VLLM_HOST:-127.0.0.1}
         --port ${VLLM_PORT:-8888}
         --trust-remote-code
