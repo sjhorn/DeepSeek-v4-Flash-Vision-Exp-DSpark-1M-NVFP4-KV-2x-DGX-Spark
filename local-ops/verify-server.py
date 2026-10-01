@@ -7,7 +7,7 @@ after any change to `patches/anthropic_serving_inline_system.py`.
     python3 local-ops/verify-server.py
 
 Checks, in the order a failure would matter:
-  1. all 12 served ids resolve
+  1. every id the compose configures resolves (derived, not a hardcoded count)
   2. each tier carries its expected effort prefix  (Patch 9)
   3. the permission classifier is exempted from thinking  (Patch 9 rev 2)
   4. the leaked-CoT strip is still ASSISTANT-ONLY  (Patch 8)
@@ -16,6 +16,8 @@ Checks, in the order a failure would matter:
 from __future__ import annotations
 
 import json
+import pathlib
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -93,7 +95,40 @@ try:
 except Exception as e:                                       # noqa: BLE001
     print(f"cannot reach {BASE}: {e}")
     sys.exit(2)
-check("all 12 served ids resolve", len(ids) == 12, f"got {len(ids)}")
+# DERIVED FROM THE COMPOSE, NOT A HARDCODED COUNT. `len(ids) == 12` went stale
+# the first time an alias was added (claude-opus-5-5, 2026-10-01) and failed for
+# being out of date rather than for anything being wrong -- which costs more than
+# it catches, because a suite that cries wolf on a correct deployment is one
+# people start ignoring. Comparing SETS also names the id that went missing,
+# where a count could only say the total moved.
+#
+# Note what this does NOT assert any more: that an unlisted id is REFUSED. Since
+# VLLM_SKIP_MODEL_NAME_VALIDATION=1 it is not -- the list is what /v1/models
+# advertises, not what the engine accepts. See RUNTIME-SURFACE.md.
+def _expected_served_ids():
+    compose = (pathlib.Path(__file__).resolve().parent.parent
+               / "docker-compose.dspark.yml").read_text()
+    env_path = (pathlib.Path(__file__).resolve().parent.parent / ".env.dspark")
+    env = env_path.read_text() if env_path.exists() else ""
+
+    def _env(name):
+        m = re.search(rf"^{name}=(.*)$", env, re.M)
+        return m.group(1).strip().strip('"').strip("'") if m else None
+
+    m = re.search(r"--served-model-name \$\{SERVED_MODEL_NAME:-([^}]*)\}", compose)
+    primary = (_env("SERVED_MODEL_NAME") or (m.group(1) if m else "")).split()
+    m = re.search(r"\$\{SERVED_MODEL_ALIASES:-([^}]*)\}", compose)
+    aliases = (_env("SERVED_MODEL_ALIASES") or (m.group(1) if m else "")).split()
+    return [*primary, *aliases]
+
+
+want_ids = _expected_served_ids()
+missing = sorted(set(want_ids) - set(ids))
+extra = sorted(set(ids) - set(want_ids))
+check(f"all {len(want_ids)} configured ids resolve",
+      not missing and not extra,
+      f"got {len(ids)}" + (f", missing {missing}" if missing else "")
+      + (f", unexpected {extra}" if extra else ""))
 
 # 2 ─ effort prefixes, by suffix rule and by vendor prefix rule
 print("\neffort prefixes (prompt_tokens for a minimal request):")
