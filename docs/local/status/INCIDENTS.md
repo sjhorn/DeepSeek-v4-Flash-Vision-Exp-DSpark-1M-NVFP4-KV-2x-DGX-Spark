@@ -982,6 +982,33 @@ version**), vllm#45663 (OOM in `sparse_attn_indexer` past **~120K tokens** — f
 case), vllm#56772 (MLA+DSA canonical transfers use TP-dependent row sizes). Re-evaluate if
 vllm#43093 and vllm#45663 both close. Runbook and staged mounts: `local-ops/kv-offload-probe.md`.
 
+**RE-CHECKED 2026-10-04 — STILL PARKED, and the trigger above needs rewording because one issue
+closed WITHOUT being fixed.**
+
+| | state on 2026-10-04 | |
+|---|---|---|
+| vllm#43093 | **closed as "not planned"**, stale | the crashes are NOT fixed; upstream declined |
+| vllm#45663 | **open**, stale, no fix | the disqualifying one |
+| vllm#56772 | not re-checked | MLA+DSA TP-dependent row sizes |
+
+So "re-evaluate when both close" would now read as satisfied by #43093 while the blocker is
+untouched. **The real trigger is vllm#45663 alone**: the sparse indexer's
+`fp8_fp4_mqa_logits` materialises every KV block at once instead of chunking, so with offloading
+on it OOMs past **~120K tokens** against a working set of **570K**. Nothing we configure moves
+that.
+
+**#43093's crash is worth recording because it names our own topology:**
+`gpu_block_size=64 not divisible by hash_block_size=256`. The offload path hashes on 256-token
+blocks while one of the five KV groups uses 64 — so it is the HYBRID GROUP LAYOUT that breaks the
+transfer, which is also why this is not a knob.
+
+**And the prize is big enough to keep re-checking.** Measured from this boot: KV is
+**6.92 KB/token** (16.66 GiB / 2,523,706 tokens), so a 570K prefix is **4.04 GB** — against a
+recompute of **~518s**. Breakeven is **7.8 MB/s**; NVMe does 4 GB in **~1.3s**, and both nodes have
+**2.9 TB free**, i.e. ~700 such prefixes. That is a ~400x win on the cold path and it would also
+make an engine restart stop costing every client a full cold prefill.
+
+
 ### GPU thermal management
 
 GPU clock pinned to 300-2200 MHz (`nvidia-smi -lgc 300,2200`) on both nodes to prevent thermal shutdown. This does not survive reboots — `start-cluster.sh` reapplies it automatically, but `start-deepseek-v4-flash-dspark.sh` does not.
