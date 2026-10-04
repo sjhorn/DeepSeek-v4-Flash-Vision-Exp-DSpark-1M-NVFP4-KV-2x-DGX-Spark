@@ -23,9 +23,21 @@ Two measured points, model confirmed to within 2.5%:
 | `PROTECTED_FRACTION` | cap (blocks/group) | retained tokens | retained blocks | ratio |
 | ---: | ---: | ---: | ---: | ---: |
 | 0.30 (old default) | 1,022 | 280,690 | 1,096 | 1.07 |
-| **0.50 (current)** | **1,707** | **457,079** | 1,785 | 1.05 |
+| 0.50 (2026-09-14) | 1,707 | 457,079 | 1,785 | 1.05 |
+| **0.75 (current)** | **2,550** | *~685,000 predicted* | *~2,678* | — |
 
-So **retained ≈ protected cap + ~5-7%**. Raising the fraction raises retention near-linearly.
+So **retained ≈ protected cap + ~5-7%**.
+
+**0.75 is NOT yet a measured point.** Raised 0.50 → 0.75 on 2026-10-04 because real traffic had
+outgrown 0.50: `Rick`'s median prompt was **558,213** tokens and its max **740,315**, against
+retention of ~455,000 — so every cold turn re-read 100⁠-⁠200K+ tokens the engine had already
+read, and 11 of them were killed mid-prefill in one morning. The cap line confirms
+**2,550 blocks at pool 17,004**; the retained figure above is the model's extrapolation and
+`local-ops/cache-pressure/` has NOT been re-run against it. **Do that before quoting it.**
+
+**What 0.75 still does not cover.** 740,315 tokens needs `f ≈ 0.82`, which leaves under 20% of the
+pool unprotected — and the concurrency warning below already applies at 0.50. A conversation that
+large has no safe setting; it has to be compacted. Raising the fraction raises retention near-linearly.
 Extrapolate before testing, do not assume it continues past 0.5.
 
 **The env key is `PROTECTED_FRACTION`, not the container's variable name.** The compose maps
