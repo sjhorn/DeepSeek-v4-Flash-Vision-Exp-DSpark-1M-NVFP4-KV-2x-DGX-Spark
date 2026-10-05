@@ -379,6 +379,14 @@ services:
       COMPILATION_CONFIG: "${COMPILATION_CONFIG:-}"
       # Optional raw --kv-transfer-config JSON (KV disk-offload probe). Empty = off.
       KV_TRANSFER_CONFIG: "${KV_TRANSFER_CONFIG:-}"
+      # Must be handed to the container explicitly, because the command uses the
+      # CONTAINER-side form $${VAR:+--flag ...} rather than compose-side ${VAR}.
+      # Without this line the variable is simply absent inside the container, the
+      # conditional expands to nothing, and vLLM silently takes its DEFAULT (lazy)
+      # loader -- which HANGS at shard 0 on the 64k kernel with the GPU idle. The
+      # same trap docker-compose.yml records for Caddy: a container only sees the
+      # variables handed to it, so a compose-side default is not a container-side one.
+      SAFETENSORS_LOAD_STRATEGY: "${SAFETENSORS_LOAD_STRATEGY:-}"
 
       # Patch 6 knobs (see volumes: above). Defaults match upstream PR #54.
       VLLM_PROTECTED_PROMPT_BLOCKS_FRACTION: "${PROTECTED_FRACTION:-0.30}"
