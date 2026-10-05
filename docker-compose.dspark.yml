@@ -283,6 +283,33 @@ services:
       NCCL_DEBUG: "${NCCL_DEBUG:-WARN}"
       NCCL_NVLS_ENABLE: "${NCCL_NVLS_ENABLE:-0}"
 
+      # Pinned-buffer reclaim. NCCL pins host memory per channel per protocol,
+      # and the defaults cost 2,495,520 kB of VmPin per rank here -- measured
+      # byte-for-byte identical on both nodes, and byte-for-byte identical to
+      # the figure bumblebeers reports before the same change. earlyoom on
+      # these boxes fires at `-m 2` of 121 GiB ~= 2.4 GiB available, so those
+      # 2.38 GiB of UNRECLAIMABLE pinned pages are almost exactly the margin it
+      # needs: it killed the worker three times on 2026-10-04. Reclaiming them
+      # frees ~2.3 GiB/node to spend on GPU_MEMORY_UTILIZATION.
+      #
+      # THESE FOUR LINES ARE NOT REDUNDANT WITH .env.dspark -- do not remove
+      # them as duplication. Compose has NO env_file here and delivers only the
+      # names listed in this block, which is exactly how NCCL_IB_MERGE_NICS
+      # (commented above) has always reached the launcher's shell and never the
+      # container. Setting only .env.dspark measures "no change" and concludes
+      # wrongly.
+      # The defaults here are REAL values and not the empty string, unlike
+      # NCCL_IB_MERGE_NICS above. An empty NCCL_PROTO is a *set* variable as
+      # far as NCCL is concerned, and an empty protocol list can leave no
+      # protocol enabled at all rather than meaning "unset" -- a boot failure
+      # instead of a default. Every other entry in this block defaults to a
+      # real value for the same reason; the two empty ones are both plain
+      # integers where that cannot happen.
+      NCCL_BUFFSIZE: "${NCCL_BUFFSIZE:-1048576}"
+      NCCL_LL128_BUFFSIZE: "${NCCL_LL128_BUFFSIZE:-262144}"
+      NCCL_PROTO: "${NCCL_PROTO:-^LL128}"
+      NCCL_MAX_NCHANNELS: "${NCCL_MAX_NCHANNELS:-8}"
+
       NODE_RANK: "${NODE_RANK}"
       HEADLESS: "${HEADLESS:-}"
       MASTER_ADDR: "${MASTER_ADDR}"
