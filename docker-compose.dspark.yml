@@ -128,9 +128,38 @@ services:
       - ./patches/prefill_plugin/prefill_collector-0.1.dist-info:/opt/env/lib/python3.12/site-packages/prefill_collector-0.1.dist-info:ro
       # KV disk-offload tier (probe). Inert unless KV_TRANSFER_CONFIG is set in .env.dspark.
       - ${KVOFFLOAD_DIR:-/home/shorn/kvoffload}:/kvoffload
+      # dispram: the display carveout, 2046 MiB of device memory the kindling
+      # spark-os host lends back through the RM API. Loaded as a vLLM GENERAL
+      # PLUGIN, not the source patch: /opt/kindling/dispram/vllm holds
+      # kv-cache-from-dispram.patch, which targets vLLM ddd6fbca and edits
+      # gpu_worker.py and worker/utils.py -- and gpu_model_runner.py is already
+      # one of our whole-file mounts, so the patch would fuzz. The plugin stands
+      # aside if the patch is ever present, so the two cannot fight.
+      #
+      # Discovery is the entry-point group vllm.general_plugins, exactly as
+      # prefill_collector above uses vllm.stat_logger_plugins -- the dist-info
+      # beside dispram_vllm.py is what makes it discoverable. VLLM_PLUGINS is
+      # unset here, so everything discovered loads; setting it would turn it
+      # into an allowlist and silently drop whichever name is left out.
+      #
+      # BOTH NODES OR NO BENEFIT: vLLM takes the SMALLEST KV budget across
+      # ranks, so a worker without dispram caps the head node's gain at zero.
+      #
+      # These paths exist only on kindling spark-os. On DGX OS the bind fails
+      # loudly at container create, which is the right failure: it says the host
+      # is not the one this config was written for, rather than quietly serving
+      # with 2046 MiB less than the launch line claims.
+      - /run/dispram:/run/dispram
+      - /opt/kindling/dispram/python:/opt/dispram:ro
 
     environment:
       HF_HOME: /cache/huggingface
+      # dispram's plugin lives here (see volumes:). The image sets no PYTHONPATH
+      # of its own -- verified with docker image inspect, which shows PATH only --
+      # so this is an assignment rather than an append. If a future image gains
+      # one, this has to become "/opt/dispram:$${PYTHONPATH}" or the image's own
+      # path disappears.
+      PYTHONPATH: /opt/dispram
       # Server-side tool execution (web_search via SERPER API)
       SERPER_API_KEY: "${SERPER_API_KEY:-}"
       HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-0}"
@@ -367,6 +396,7 @@ services:
         --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS:-8192}
         --long-prefill-token-threshold ${LONG_PREFILL_TOKEN_THRESHOLD:-1024}
         --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.80}
+        --safetensors-load-strategy ${SAFETENSORS_LOAD_STRATEGY:-eager}
         --enable-prefix-caching
         --async-scheduling
         --enable-chunked-prefill
