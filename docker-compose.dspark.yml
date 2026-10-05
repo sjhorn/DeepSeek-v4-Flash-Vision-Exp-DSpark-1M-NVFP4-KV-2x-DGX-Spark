@@ -418,7 +418,7 @@ services:
         --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS:-8192}
         --long-prefill-token-threshold ${LONG_PREFILL_TOKEN_THRESHOLD:-1024}
         --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.80}
-        --safetensors-load-strategy ${SAFETENSORS_LOAD_STRATEGY:-eager}
+        $${SAFETENSORS_LOAD_STRATEGY:+--safetensors-load-strategy "$$SAFETENSORS_LOAD_STRATEGY"}
         --enable-prefix-caching
         --async-scheduling
         --enable-chunked-prefill
