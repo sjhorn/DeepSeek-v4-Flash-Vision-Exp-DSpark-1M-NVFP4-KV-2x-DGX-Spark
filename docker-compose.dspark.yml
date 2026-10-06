@@ -150,6 +150,18 @@ services:
       # no new whole-file mount.
       - ./patches/safetensors_e8m0_plugin/safetensors_e8m0.py:/opt/env/lib/python3.12/site-packages/safetensors_e8m0.py:ro
       - ./patches/safetensors_e8m0_plugin/safetensors_e8m0-0.1.dist-info:/opt/env/lib/python3.12/site-packages/safetensors_e8m0-0.1.dist-info:ro
+      # Targeted DEBUG logging, off unless VLLM_LOGGING_CONFIG_PATH is set below.
+      # gpu_worker.py:628 computes the two --kv-cache-memory-bytes suggestions and
+      # the full memory decomposition (weights / peak activation / non-torch /
+      # ACTUAL CUDAGraph / free-vs-total) -- and logs it at DEBUG, so it is never
+      # visible at the default level. This config raises ONLY that module, keeping
+      # the vllm logger at INFO, because global VLLM_LOGGING_LEVEL=DEBUG buries the
+      # message in thousands of lines and can rotate it out of docker logs.
+      #
+      # THE HANDLER MUST BE DEBUG TOO. DEFAULT_LOGGING_CONFIG sets the handler level
+      # from VLLM_LOGGING_LEVEL, so a DEBUG logger behind an INFO handler emits
+      # nothing -- the record is created and then dropped on the way out.
+      - ./patches/logging-gpuworker-debug.json:/opt/vllm-logging-debug.json:ro
       # dispram: the display carveout, 2046 MiB of device memory the kindling
       # spark-os host lends back through the RM API. Loaded as a vLLM GENERAL
       # PLUGIN, not the source patch: /opt/kindling/dispram/vllm holds
@@ -387,6 +399,10 @@ services:
       # same trap docker-compose.yml records for Caddy: a container only sees the
       # variables handed to it, so a compose-side default is not a container-side one.
       SAFETENSORS_LOAD_STRATEGY: "${SAFETENSORS_LOAD_STRATEGY:-}"
+      # Set to /opt/vllm-logging-debug.json to surface the kv-cache-memory
+      # suggestions (see volumes:). Empty is safe: vLLM tests it for truthiness,
+      # so "" takes the default logging config.
+      VLLM_LOGGING_CONFIG_PATH: "${VLLM_LOGGING_CONFIG_PATH:-}"
 
       # Patch 6 knobs (see volumes: above). Defaults match upstream PR #54.
       VLLM_PROTECTED_PROMPT_BLOCKS_FRACTION: "${PROTECTED_FRACTION:-0.30}"
