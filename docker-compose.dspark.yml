@@ -403,6 +403,17 @@ services:
       # suggestions (see volumes:). Empty is safe: vLLM tests it for truthiness,
       # so "" takes the default logging config.
       VLLM_LOGGING_CONFIG_PATH: "${VLLM_LOGGING_CONFIG_PATH:-}"
+      # Pin the KV pool in BYTES instead of inferring it from gpu_memory_utilization.
+      # When set this IGNORES gpu_memory_utilization (config/cache.py) and skips memory
+      # profiling entirely, which is the point: the profiler's CUDAGraph estimator is
+      # unstable on this box -- measured 0.72, 1.28 and then -0.04 GiB across three
+      # starts of the SAME config -- and a negative estimate reserves nothing, so the
+      # actual 1.15 GiB of graphs comes out of the KV pool after KV was already sized.
+      # That is an over-commit, not a win, even though it reports the largest pool.
+      # Derive the value from gpu_worker.py's own suggestion (DEBUG; see
+      # VLLM_LOGGING_CONFIG_PATH above) and re-derive it after any change to the model,
+      # TP layout, max_num_batched_tokens, max_num_seqs or the driver.
+      KV_CACHE_MEMORY_BYTES: "${KV_CACHE_MEMORY_BYTES:-}"
 
       # Patch 6 knobs (see volumes: above). Defaults match upstream PR #54.
       VLLM_PROTECTED_PROMPT_BLOCKS_FRACTION: "${PROTECTED_FRACTION:-0.30}"
@@ -443,6 +454,7 @@ services:
         --long-prefill-token-threshold ${LONG_PREFILL_TOKEN_THRESHOLD:-1024}
         --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.80}
         $${SAFETENSORS_LOAD_STRATEGY:+--safetensors-load-strategy "$$SAFETENSORS_LOAD_STRATEGY"}
+        $${KV_CACHE_MEMORY_BYTES:+--kv-cache-memory-bytes "$$KV_CACHE_MEMORY_BYTES"}
         --enable-prefix-caching
         --async-scheduling
         --enable-chunked-prefill
