@@ -1091,6 +1091,66 @@ four-month-old offload path.
 hybrid (non-uniform block size) KV layout in `kv_offload`? That is the one
 question to ask of any candidate version.
 
+#### IT BOOTED, AND THE EQUIVALENCE GATE PASSED -- 2026-10-07 14:17Z
+
+With the kvmgr hybrid shim (`patches/kvmgr_plugin/kvmgr/offload.py`,
+`offload_allow_hybrid=1`) the engine started **with the disk tier configured**:
+
+	GPU KV cache size: 3,377,409 tokens
+	kvmgr: relaxing TieringOffloadingSpec's single-block-size assert for a
+	       HYBRID layout -- block sizes (256, 64, 64, 4, 8), block_size_factor=1
+	Created secondary tier #0 (fs_python)
+	Created TieringOffloadingManager with primary tier (lru, 510 blocks)
+	       and 1 secondary tier(s)
+
+API up, **zero** ValidationError/AssertionError. So there was **no second
+uniformity assertion hiding behind the first** -- the four-file code read held.
+
+**THE GATE PASSED, AND IT MEANS MORE THAN IT LOOKS.** Five prompts, greedy,
+`temperature 0`, `seed 12345`, 68-220 output tokens, SHA-256 of the generated
+text, offload OFF then ON:
+
+	eq1 d7d4d0cd2baab178   eq2 9f02d84f70a01d77   eq3 123a49edf2a743f5
+	eq4 9f2d8698b8f378c2   eq5 c561e43b6abfe72a
+
+**All five identical, and the output token counts too (157/79/149/220/68).**
+
+What makes that meaningful rather than vacuous is the transfer counter:
+
+	vllm:kv_offload_total_bytes_total{transfer_type="GPU_to_CPU"} = 19.28 GB
+
+**19.28 GB really moved through the per-group transfer path** -- roughly a whole
+pool's worth cycled through a 1.07 GB CPU window -- and the output did not change
+by one byte. That is the per-group slicing validated by use, which is the only
+way it could be validated. The counter is the thing to check first on any future
+run: without it, "the hashes match" would only mean the tier was idle.
+
+#### WHAT IS STILL NOT EXERCISED: THE DISK ITSELF
+
+	transfer_type counters present : GPU_to_CPU only
+	files under ~/kvoffload        : 1
+	directories under ~/kvoffload  : 17,222
+	du                             : 68M  (almost entirely directory inodes)
+
+The fs tier **built its whole fan-out** (`<base>_r<rank>/<hhh>/<hh>_g<group_idx>`)
+and wrote essentially nothing. So the CPU primary tier is being cycled hard and
+blocks are **not being promoted to disk**. Until that fires, the headline prize
+-- a 570K prefix restored in ~1.3 s instead of ~518 s recomputed -- is untested,
+and so is the disk round trip's effect on output.
+
+Two candidate reasons, neither confirmed: the GPU pool is at **3.7% usage**
+(3.38M tokens, nothing close to pressure), so eviction may simply never reach
+the stage that promotes; and `store_threshold` defaults to 0, which is
+documented as "no filter" rather than "store everything". Next step is to drive
+real pool pressure and watch for a CPU_to_DISK counter or `.bin` files.
+
+#### One cost to carry
+
+The CPU primary tier is a **1.07 GB mmap in `/dev/shm`**, which is host RAM.
+`MemAvailable` sits at **1.74 GB** with it live. That is the zero-sum cost this
+file has warned about all along, now measured: it holds, but there is not room
+for the 4 GiB tier the original probe config asked for.
+
 #### What was kept from today's attempt
 
 Rolled back: `KV_TRANSFER_CONFIG` only. **Kept, because each booted cleanly and
