@@ -150,6 +150,22 @@ services:
       # no new whole-file mount.
       - ./patches/safetensors_e8m0_plugin/safetensors_e8m0.py:/opt/env/lib/python3.12/site-packages/safetensors_e8m0.py:ro
       - ./patches/safetensors_e8m0_plugin/safetensors_e8m0-0.1.dist-info:/opt/env/lib/python3.12/site-packages/safetensors_e8m0-0.1.dist-info:ro
+      # KV cache manager of our own: our MLA manager for KV group 0, with every
+      # policy knob readable from /etc/vllm-kv-flags/flags.json (mounted above)
+      # and therefore movable WITHOUT a restart -- which matters because a
+      # restart of this engine costs a 672-795s cold prefill.
+      #
+      # A general plugin, like safetensors_e8m0 above, NOT a fourth whole-file
+      # overlay: patch6 is 1,809 lines of upstream that must be re-cut on every
+      # image bump, and a subclass registered into spec_manager_map is a delta
+      # instead of a copy.
+      #
+      # INERT BY DEFAULT. kvmgr_enabled defaults false, and when false every
+      # override calls super(), i.e. patch6 unmodified. The switch is read PER
+      # CALL rather than at registration, because the manager class is chosen
+      # once while the engine starts -- so a class swap could never be hot.
+      - ./patches/kvmgr_plugin/kvmgr:/opt/env/lib/python3.12/site-packages/kvmgr:ro
+      - ./patches/kvmgr_plugin/kvmgr-0.1.dist-info:/opt/env/lib/python3.12/site-packages/kvmgr-0.1.dist-info:ro
       # Targeted DEBUG logging, off unless VLLM_LOGGING_CONFIG_PATH is set below.
       # gpu_worker.py:628 computes the two --kv-cache-memory-bytes suggestions and
       # the full memory decomposition (weights / peak activation / non-torch /

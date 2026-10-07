@@ -85,6 +85,35 @@ Found by breaking the harness: removing the `/num_managers` division made group
 0's cap read 8,192 rather than the expected 18,216, which is the legacy clamp
 showing itself.
 
+### And "by need" has a reading that is 21x WORSE than today
+
+Added 2026-10-07 during Phase 1, because the first implementation of `by_need`
+took that reading and the parity test caught it.
+
+Read as *"give every group the same token extent"*, the block budget splits in
+inverse proportion to block size — and group 3's blocks hold 4 tokens, so it
+needs **64x** as many as group 0 to cover the same extent. The small-block
+groups eat the budget:
+
+	18,216 blocks / sum(1/bs) over 256,64,64,4,8  ->  44,412 tokens EVERY group
+
+against group 0's **932,608 today**. It would look like a principled fix and
+cost 95% of the retention.
+
+**The error is treating a windowed group's need as proportional to context.** It
+is not. A windowed group only ever matches the contiguous run ending at the
+boundary, so it needs `cdiv(window-1, block_size)+1` blocks **however long the
+prompt gets** — and patch6 already knows this, at `_head_pin_candidates`
+(MNT-9), in its own words: *"a sliding-window group only ever matches the
+contiguous run ending at the boundary, so pinning the rest would spend the
+budget on blocks no lookup can use."*
+
+At `sliding_window=128` the four windowed groups want **3 + 3 + 33 + 17 = 56
+blocks between them** — 0.2% of the pool — and full attention takes the
+remainder. That is where the 2.25x above comes from, and
+`policy.window_need_blocks` is asserted against patch6's own code so the two
+definitions cannot drift.
+
 ## FINDING 3 — MNT-5 is not a KV mechanism at all
 
 The plan lists MNT-5 as *"present in `patch6`; purpose to be confirmed"*. It is
