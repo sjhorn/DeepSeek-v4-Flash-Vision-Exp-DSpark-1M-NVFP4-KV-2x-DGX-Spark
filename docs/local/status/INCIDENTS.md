@@ -1211,8 +1211,46 @@ Done 2026-10-07 as a pure read -- no box, no downtime. Every released tag from
 | `O_DIRECT` EINVAL on our block size | **fatal, 13,519 errors, 0 bytes** | **PROBED, falls back** |
 | `nvfp4_ds_mla` in `config/cache.py` | present | **present** |
 
-**Both of our local shims become unnecessary on a bump**, and the second one
-upstream does BETTER than we do. `v0.31.0`'s `tiering/fs/io.py` is 218 lines
+**ONE of our two shims becomes unnecessary on a bump. THE O_DIRECT ONE DOES
+NOT, and the first version of this note said it did.** Corrected the same day,
+by reading `_store_block` rather than stopping at the probe's docstring.
+
+*What upstream's probe actually does:* `probe_o_direct(directory)` writes **one
+aligned `mmap.PAGESIZE` (4096-byte) page** and catches `OSError`. It answers
+*"does this FILESYSTEM support O_DIRECT"* -- for overlayfs, old tmpfs, some NFS,
+which its own docstring names. Our ext4-on-NVMe supports it perfectly well, so
+**the probe PASSES** and `use_o_direct` comes back `True`.
+
+*And then v0.31 writes exactly as we do:*
+
+	view_slice = buffer.cast("B")[offset : offset + block_size]
+	o_direct = O_DIRECT if use_o_direct else 0
+	fd = os.open(tmp_path, ... | o_direct, 0o644)
+	written = os.write(fd, view_slice)
+
+**No alignment handling anywhere.** `block_size` is written verbatim. So a
+2,103,652-byte -- strictly, 2,103,552-byte -- block still fails with EINVAL on
+v0.31.0 just as it does here.
+
+**This is an upstream gap, not our version being old.** It only shows on a
+geometry whose per-block byte size is not 512-aligned, which ours is not
+(`mod 512 = 256`) because it falls out of NVFP4 MLA over a five-group hybrid
+pool. A conventional model's per-block size is a clean power-of-two multiple and
+never trips it, which is presumably why it has survived.
+
+So `offload_odirect=False` is **not** a stopgap that a bump supersedes -- it is a
+fix for something upstream still has. The one thing upstream does better is
+keeping O_DIRECT where it genuinely works; ours drops it unconditionally, and
+backporting `probe_o_direct` would NOT help us because the probe passes here.
+
+**AND THE WHOLE FILE CANNOT BE BACKPORTED ANYWAY**, which was the first thing
+checked: v0.31's `io.py` exports **`batch_store_block` / `batch_load_block`** and
+makes the singular forms private, so our `tiering/fs/manager.py` and
+`thread_pool.py` callers break immediately. It also optionally imports a
+compiled `vllm.fs_io_C` extension absent from our image -- that part degrades
+gracefully via `_HAS_FSIO_C`, but the API change does not.
+
+**What a bump DOES still buy**, and it is the larger half: `v0.31.0`'s `tiering/fs/io.py` is 218 lines
 against our 101, and it carries a runtime probe for exactly our failure:
 
 	"""Return whether O_DIRECT I/O works in *directory*.
