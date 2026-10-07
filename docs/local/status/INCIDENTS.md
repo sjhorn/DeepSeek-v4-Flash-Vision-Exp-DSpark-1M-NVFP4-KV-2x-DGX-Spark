@@ -1144,6 +1144,61 @@ the stage that promotes; and `store_threshold` defaults to 0, which is
 documented as "no filter" rather than "store everything". Next step is to drive
 real pool pressure and watch for a CPU_to_DISK counter or `.bin` files.
 
+#### WHY NOTHING REACHED DISK: O_DIRECT ALIGNMENT. 13,519 errors, zero bytes.
+
+Diagnosed 2026-10-07 without any further traffic, because the data already on
+hand ruled out the obvious answer.
+
+**PRESSURE IS NOT THE BLOCKER, and the counter proves it.** The cascade fires on
+STORE, not on eviction -- `tiering/manager.py` says so in its own header:
+*"Always offload to all tiers -- When a block is stored to the primary tier, it
+is cascaded to ALL secondary tiers"*. And the CPU tier had already cycled **~18x
+over**:
+
+	CPU tier         510 blocks, 1.07 GB mmap, 2.10 MB/block
+	GPU->CPU moved   19.28 GB  =  ~9,167 blocks stored to CPU
+	=> ~8,657 CPU evictions, ~9,167 cascade attempts
+	   files on disk: 1
+
+So "drive more pool pressure" would have spent 45 minutes re-doing something
+that had already happened nine thousand times.
+
+**THE REAL CAUSE.** `tiering/fs/io.py` opens every block with **`O_DIRECT`**:
+
+	fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TRUNC | O_DIRECT, ...)
+
+`O_DIRECT` requires the length and offset to be multiples of the device logical
+block size. Ours are not:
+
+	per-block CPU page : 2,103,552 bytes
+	2,103,552 mod  512 : 256     <- NOT aligned (nvme0n1 LOG-SEC is 512)
+	2,103,552 mod 4096 : 2,304
+
+So every write is rejected before a byte reaches the file:
+
+	ERROR [thread_pool.py:150] FileSystemTierManagerPython:
+	      job 208 block I/O failed: [Errno 22] Invalid argument
+
+**13,519 such errors this boot.** The directory tree (17,222 dirs, including the
+`_g3` and `_g4` small-block groups) was built because `mkdir` succeeds; only the
+writes fail.
+
+**IT FAILS SAFE, and that is the one piece of luck here.** EINVAL, nothing
+written, errors logged loudly, no corruption. Which also means the equivalence
+pass above validates the **GPU<->CPU** path only -- 19.28 GB of real per-group
+transfers with byte-identical output, which is worth having -- and says nothing
+about a disk round trip, because there wasn't one.
+
+**WHAT IT MEANS FOR THE PLAN.** Fixing this is a SECOND patch to the same
+four-month-old subsystem (drop `O_DIRECT`, or pad every write to a 512 boundary
+and track the real length). We would then be two relaxations deep into code
+upstream has **rewritten** -- `gpu_block_size` and `block_size_factor` are gone
+from upstream main's `kv_offload` entirely, replaced by per-group
+`group_data_refs`. **That materially strengthens the version-bump case over
+continuing to patch locally**, and it is the recommendation: ask of a candidate
+release not only "is the single-block-size assert gone" but "does its fs tier
+write without O_DIRECT, or align its writes".
+
 #### One cost to carry
 
 The CPU primary tier is a **1.07 GB mmap in `/dev/shm`**, which is host RAM.
