@@ -105,6 +105,38 @@ def _flag(name: str, default):
         return default
 
 
+def _protected_fraction() -> float:
+    """MNT-6a's fraction, made HOT (2026-10-07).
+
+    It was read straight off os.environ, so the single most valuable knob in
+    this file was restart-only -- and a restart of this engine costs a measured
+    672-795s cold prefill. It now follows the same precedence as every other
+    flag here: the legacy env name wins (so a boot can still pin an arm), then
+    the flags file, then 0.30.
+
+    THE LEGACY NAME IS KEPT ON PURPOSE. The VLLM_<NAME> convention would make it
+    VLLM_PROTECTED_FRACTION and silently drop the
+    VLLM_PROTECTED_PROMPT_BLOCKS_FRACTION that is set on both nodes today.
+
+    *** AN EMPTY ENV VALUE COUNTS AS UNSET. *** docker-compose emits "" for
+    `${PROTECTED_FRACTION:-}` when the variable is not set, and `float("")`
+    raises -- which the old code caught and turned into 0.30, i.e. it would have
+    silently IGNORED the flags file and dropped retention from 0.75 to 0.30 with
+    nothing saying so. Treating blank as absent is what lets the compose stop
+    pinning this knob at all.
+    """
+    raw = os.environ.get(_PROTECTED_FRACTION_ENV)
+    if raw is not None and raw.strip() != "":
+        try:
+            return float(raw)
+        except ValueError:
+            return 0.30
+    try:
+        return float(_flag("protected_fraction", 0.30))
+    except (TypeError, ValueError):
+        return 0.30
+
+
 def _recycle_enabled() -> bool:
     """MNT-6b master switch. Was a module-level constant read from the container
     env, which cannot change on a running engine -- so A/B-ing it cost a cold
@@ -615,10 +647,7 @@ class SingleTypeKVCacheManager(ABC):
         legacy: int | None = None
         if self.max_model_len is not None:
             legacy = 2 * cdiv(max(1, self.max_model_len), self.block_size)
-        try:
-            fraction = float(os.environ.get(_PROTECTED_FRACTION_ENV, "0.30"))
-        except ValueError:
-            fraction = 0.30
+        fraction = _protected_fraction()
         if fraction < 0:
             return legacy
         num_managers = max(1, SingleTypeKVCacheManager._num_managers)

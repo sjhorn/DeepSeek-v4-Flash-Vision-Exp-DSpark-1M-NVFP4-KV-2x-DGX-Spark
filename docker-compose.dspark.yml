@@ -432,7 +432,19 @@ services:
       KV_CACHE_MEMORY_BYTES: "${KV_CACHE_MEMORY_BYTES:-}"
 
       # Patch 6 knobs (see volumes: above). Defaults match upstream PR #54.
-      VLLM_PROTECTED_PROMPT_BLOCKS_FRACTION: "${PROTECTED_FRACTION:-0.30}"
+      # MNT-6a's fraction. DEFAULTS TO BLANK ON PURPOSE (2026-10-07): an env
+      # value WINS over the flags file in _flag(), so a default here made the
+      # single most valuable KV knob restart-only. patch6's
+      # _protected_fraction() treats a BLANK value as unset and falls through
+      # to the flags file, so leaving PROTECTED_FRACTION unset in .env.dspark
+      # is what makes `protected_fraction` live-tunable -- and setting it
+      # there still pins an arm for a boot.
+      #
+      # *** IF YOU UNSET IT HERE, SET protected_fraction IN THE FLAGS FILE. ***
+      # With neither, patch6 falls back to 0.30 and retention silently drops
+      # from 0.75 -- which looks like nothing happened and costs a cold
+      # prefill per long conversation.
+      VLLM_PROTECTED_PROMPT_BLOCKS_FRACTION: "${PROTECTED_FRACTION:-}"
       # MNT-6b's switch moved to the FLAGS FILE on 2026-09-20 (`swa_recycle`), so
       # it can be A/B'd without a cold boot per arm. The env var still overrides
       # the file when it is set -- which is exactly why it must NOT be set here:
