@@ -1199,6 +1199,57 @@ continuing to patch locally**, and it is the recommendation: ask of a candidate
 release not only "is the single-block-size assert gone" but "does its fs tier
 write without O_DIRECT, or align its writes".
 
+#### THE CANDIDATE-VERSION READ: v0.31.0 FIXES BOTH OF OUR PROBLEMS NATIVELY
+
+Done 2026-10-07 as a pure read -- no box, no downtime. Every released tag from
+**v0.27.0** onward was checked for the three things that decide a bump.
+
+| | ours, 0.21.1rc1.dev339 (2026-05-27) | v0.30.0 / v0.31.0 / main |
+|---|---|---|
+| `assert len(gpu_block_size) == 1` | **present** -- we shim it | **GONE** |
+| `gpu_block_size` / `block_size_factor` | present | **GONE**, replaced by per-group refs |
+| `O_DIRECT` EINVAL on our block size | **fatal, 13,519 errors, 0 bytes** | **PROBED, falls back** |
+| `nvfp4_ds_mla` in `config/cache.py` | present | **present** |
+
+**Both of our local shims become unnecessary on a bump**, and the second one
+upstream does BETTER than we do. `v0.31.0`'s `tiering/fs/io.py` is 218 lines
+against our 101, and it carries a runtime probe for exactly our failure:
+
+	"""Return whether O_DIRECT I/O works in *directory*.
+	   O_DIRECT is unsupported on some filesystems (e.g. the overlayfs
+	   backing ...), writing a file with it fails with EINVAL. Probe once
+	   with an aligned ..."""
+	...
+	o_direct = O_DIRECT if use_o_direct else 0
+
+So it keeps O_DIRECT where the filesystem supports it and drops it where it does
+not -- per directory. **Ours drops it unconditionally**, which is correct but
+gives up the performance everywhere. That is a stopgap and should be described
+as one.
+
+**The single-block-size assert is gone from EVERY release >= v0.27.0**, so the
+hybrid blocker this file called structural was fixed upstream four releases ago.
+
+**`nvfp4_ds_mla` is present in v0.30.0, v0.31.0 and main** -- the dtype the whole
+engine depends on survives the jump. *(It read 0 for v0.27-v0.29, but that is
+most likely `config/cache.py` not existing at that path then rather than the
+dtype being absent; unresolved and not worth resolving, since those are older
+than the version we would pick.)*
+
+#### So the recommendation is the BUMP, and the shims are a bridge
+
+The honest cost has not changed and it is large: **0.21 -> 0.31 is ten minor
+versions**, we carry roughly a dozen local patches that must each be re-derived
+(patch5-8, mnt10-scheduler, two anthropic files, three plugins, dispram), it
+needs a Tier-4 image rebuild, and the 64k-page kernel forces the eager
+safetensors loader which needs our own F8_E8M0 dtype plugin. Whether
+DSv4-Flash-DSpark runs at all on v0.31 is **unknown** and is the first thing to
+establish.
+
+What the shims buy in the meantime is a working GPU<->CPU tier today, validated
+by 19.28 GB of transfers with byte-identical output -- and the knowledge that
+when the bump happens, both can simply be deleted rather than ported.
+
 #### One cost to carry
 
 The CPU primary tier is a **1.07 GB mmap in `/dev/shm`**, which is host RAM.
