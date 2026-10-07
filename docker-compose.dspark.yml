@@ -265,6 +265,34 @@ services:
       # here and silently takes the server default. Set this to 0 to get the
       # loud 404 back.
       VLLM_SKIP_MODEL_NAME_VALIDATION: "${VLLM_SKIP_MODEL_NAME_VALIDATION:-1}"
+      # *** PYTHONHASHSEED IS WHAT MAKES A BLOCK HASH SURVIVE A RESTART, and
+      # without it disk-backed prefix restore CANNOT WORK AT ALL. ***
+      #
+      # patch8's init_none_hash does, verbatim:
+      #     NONE_HASH = BlockHash(os.urandom(32))   if PYTHONHASHSEED is unset
+      #     NONE_HASH = BlockHash(hash_fn(seed))    otherwise
+      # and patch8:595 makes NONE_HASH the ROOT of the block-hash Merkle chain
+      # (parent_block_hash = NONE_HASH). So with it unset, every block hash is
+      # chained off 32 random bytes chosen fresh at every process start, and the
+      # .bin files on disk from the previous boot are keyed by hashes this boot
+      # can never compute. The fs tier's lookup() is os.path.exists(), so the
+      # result is not an error -- it is a MISS, forever. Measured 2026-10-07:
+      # 54,070 external-prefix-cache queries, 0 hits, against 27 GB on disk.
+      #
+      # prefix_caching_hash_algo defaults to sha256 here, NOT one of the two CBOR
+      # functions, so init_none_hash's own warning never fires and nothing in the
+      # log says any of this. NONE_HASH is the only per-boot randomness; sha256 of
+      # a fixed seed is fully deterministic.
+      #
+      # *** THE VALUE MUST NEVER CHANGE. *** Change it and every block already on
+      # disk becomes unreachable -- silently, as a miss rather than an error, with
+      # the files still sitting there taking space. It is committed here rather
+      # than left to .env.dspark for exactly that reason: .env.dspark is gitignored
+      # and per-node, which is how a value that matters gets lost.
+      #
+      # Not a compile-cache factor (it appears in envs.py only as a comment about
+      # Ray env propagation), so setting it costs a RESTART and not a recompile.
+      PYTHONHASHSEED: "${PYTHONHASHSEED:-20261007}"
       # Patch 12 prefix-cache tripwire: one INFO line per request carrying
       # four short hashes and a length. Consumed by local-ops/prefix-watch.py.
       PREFIX_WATCH: "${PREFIX_WATCH:-1}"
