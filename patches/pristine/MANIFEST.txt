@@ -54,3 +54,24 @@ b02f18a8bf5b3fe016a5756d4868dfe0ba98c8d89bb128ecc6b55d28621cf66f    2149  vllm/v
 # into patches/mnt10-scheduler.py silently serves the OLD IMG-3 and fails
 # nowhere.  v1-core-sched-scheduler.patch is therefore MNT-10 only, by design.
 825073826b5be7fbe78e97c6e8fefa14636ca1cb2208f010f9da5acbdcb0a5a2    2369  vllm/v1/core/sched/scheduler.py
+
+# ---------------------------------------------------------------------------
+# vllm/v1/kv_offload/** and distributed_kv_connector_offloading_connector.py
+# are REFERENCE ONLY, added 2026-10-07. They are NOT derived into any mount and
+# appear in no diff under patches/generated/ -- nothing here patches them.
+#
+# They are the contract `local-ops/kvharness/test_phase0_disk.py` pins, because
+# we are writing our own OffloadingSpec: upstream's tiering offload consolidates
+# every rank's KV shard into ONE SHARED HOST memory region, which is single-host
+# TP by construction, while ours is one rank per node. Measured: every .bin on
+# disk was page*world_size bytes with the second half EXACTLY ZERO.
+#
+# THE MANIFEST'S OWN PULL WARNING DOES NOT BITE FOR THESE, and it was checked
+# rather than assumed: `docker inspect` lists 20 mounts into the container and
+# NONE of them touches kv_offload, so reading these through site-packages
+# returns the image's own file. Verified 2026-10-07; re-verify before trusting a
+# re-pull, because the warning is right in general.
+#
+# offloading_connector.py is flattened to one filename rather than nesting
+# distributed/kv_transfer/kv_connector/v1/ for a single reference file.
+# ---------------------------------------------------------------------------
