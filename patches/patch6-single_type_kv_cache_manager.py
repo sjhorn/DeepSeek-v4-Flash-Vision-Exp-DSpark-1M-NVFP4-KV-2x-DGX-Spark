@@ -1787,12 +1787,58 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
 }
 
 
+# MNT-11 (2026-10-07): give kvmgr a chance to register before the first manager
+# is built.  BELT AND BRACES, deliberately.
+#
+# kvmgr is delivered as a `vllm.general_plugins` entry point, which is the right
+# mechanism and is how safetensors_e8m0 and the dispram carveout arrive.  What
+# could not be verified without the cluster is whether general plugins load in
+# the ENGINE CORE process -- the one that builds the managers -- or only in the
+# workers.  If they load only in workers, the entry point registers kvmgr where
+# there is no scheduler and Phase 1 silently does NOTHING.
+#
+# A silent no-op is the failure this stack keeps paying for, so registration is
+# also attempted from here, which is by construction the right process: this is
+# the module that OWNS spec_manager_map, and this function is what reads it.
+#
+# LAZY, not at import: kvmgr imports _flag and the manager classes from THIS
+# module, so an import-time hook is a circular import against a half-executed
+# module.  Called from here it runs after everything is defined.
+#
+# register() is idempotent, so the two routes cannot conflict; whichever gets
+# there first wins and the other returns immediately.  If kvmgr is not mounted
+# at all, the import fails and nothing changes -- which is exactly the
+# behaviour before this block existed.
+_kvmgr_tried = False
+
+
+def _maybe_register_kvmgr() -> None:
+    global _kvmgr_tried
+    if _kvmgr_tried:
+        return
+    _kvmgr_tried = True
+    try:
+        import kvmgr
+
+        kvmgr.register()
+    except ImportError:
+        pass  # not mounted: stock behaviour, no message worth printing
+    except Exception:
+        # Mounted but broken. Loud, because the alternative is a policy change
+        # that looks applied and is not.
+        logger.exception(
+            "MNT-11: kvmgr is present but register() failed; the engine "
+            "continues on patch6's own behaviour"
+        )
+
+
 def get_manager_for_kv_cache_spec(
     kv_cache_spec: KVCacheSpec,
     max_num_batched_tokens: int,
     max_model_len: int,
     **kwargs,
 ) -> SingleTypeKVCacheManager:
+    _maybe_register_kvmgr()
     manager_class = spec_manager_map[type(kv_cache_spec)]
     kwargs["max_model_len"] = max_model_len
     # SlidingWindow / ChunkedLocalAttention managers recycle blocks across
