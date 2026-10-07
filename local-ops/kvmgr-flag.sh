@@ -88,9 +88,15 @@ for n in "${NODES[@]}"; do
 
   # Merge, never overwrite: the file carries MNT-6b/8/9 flags too, and
   # clobbering swa_recycle_cached restores a bug this stack already paid for.
+  # NO sudo. /var/tmp/vllm-kv-flags is owned by the login user and
+  # flags.json is 0600 shorn -- the container runs as the same uid, which is
+  # why it can read it. kv-flags.sh uses sudo for both, which is unnecessary
+  # and, since passwordless sudo stopped being granted, now simply FAILS with
+  # "a password is required" under BatchMode. Writing as the owner is both
+  # correct and what works.
   ssh -o BatchMode=yes "$n" "
-    sudo mkdir -p '$FLAGS_DIR' &&
-    sudo python3 - '$FLAGS' '$KEY' '$VAL' <<'PY'
+    mkdir -p '$FLAGS_DIR' &&
+    python3 - '$FLAGS' '$KEY' '$VAL' <<'PY'
 import json, os, sys
 path, key, raw = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
@@ -109,6 +115,7 @@ cur[key] = raw
 tmp = path + '.tmp'
 with open(tmp, 'w') as fh:
     json.dump(cur, fh, indent=1, sort_keys=True)
+os.chmod(tmp, 0o600)   # keep the mode the engine already reads
 os.replace(tmp, path)          # atomic: a half-written file reads as defaults
 print('wrote', path, '->', json.dumps(cur, sort_keys=True))
 PY" 2>&1 | sed 's/^/  /'
