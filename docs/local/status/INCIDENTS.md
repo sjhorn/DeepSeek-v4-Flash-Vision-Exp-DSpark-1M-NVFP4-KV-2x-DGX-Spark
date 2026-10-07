@@ -1144,6 +1144,77 @@ the stage that promotes; and `store_threshold` defaults to 0, which is
 documented as "no filter" rather than "store everything". Next step is to drive
 real pool pressure and watch for a CPU_to_DISK counter or `.bin` files.
 
+#### BLOCKS NOW REACH DISK -- AND THE EQUIVALENCE GATE WAS NEVER VALID
+
+2026-10-07 15:32Z, with `offload_odirect=0` and `offload_allow_hybrid=1`.
+
+**THE O_DIRECT FIX WORKS, and this part is mechanical rather than statistical:**
+
+	.bin files : 13,519        (was 1)
+	du         : 27 GB         (was 68M of empty directories)
+	I/O errors : 0             (was 13,519)
+	file size  : 2,103,552 bytes -- exactly the unaligned length that failed
+	paths      : .../f24/7e_g4/<hash>.bin  -- per-group, group 4
+
+So KV has reached disk on this box for the first time, and the EINVAL is gone
+completely.
+
+**AND THE CORRECTNESS GATE I BUILT IS WORTHLESS, which is the more important
+finding.** Four runs of the same five prompts on ONE unchanged configuration,
+greedy, `temperature 0`, `seed 12345`:
+
+	eq1  out=156  sha=80637ef2af6c3381   'one, two, three...'
+	eq1  out=157  sha=d7d4d0cd2baab178   'One, two, three...'
+	eq1  out=156  sha=80637ef2af6c3381
+	eq1  out=157  sha=d7d4d0cd2baab178
+
+	eq5  out=68   sha=c561e43b6abfe72a
+	eq5  out=68   sha=c561e43b6abfe72a
+	eq5  out=66   sha=f3a2f57ea99014a0
+	eq5  out=68   sha=c561e43b6abfe72a
+
+**This engine is not deterministic run-to-run** -- it differs in token count and
+even in capitalisation -- so a SHA of its output is not a fingerprint of
+anything. The earlier "all five hashes matched offload-off vs offload-on" was
+**luck, not evidence**, and the single eq5 mismatch in the disk run is **not
+evidence of corruption** either. Both readings were unsound.
+
+The likely cause is in the launch line and was in plain sight:
+`SpeculativeConfig(method='dspark', num_spec_tokens=5)` plus
+`--async-scheduling` and chunked prefill. Speculation is output-equivalent in
+theory; in practice the acceptance pattern changes which positions are computed
+together, floating-point reduction order moves with it, and a near-tie argmax
+flips.
+
+**SO THE PER-GROUP SLICING REMAINS UNVALIDATED.** The claim recorded above --
+"19.28 GB of transfers with byte-identical output" -- does not hold, because
+"byte-identical output" was never measurable here. What IS established is that
+nothing CRASHES and that the writes now land; nothing about whether the bytes
+are right.
+
+**What a valid correctness test needs.** Either:
+
+- **Remove the non-determinism for a dedicated run**: drop `--speculative-config`
+  and `--async-scheduling`, confirm a repeated prompt is stable across several
+  runs FIRST, and only then compare offload-off against offload-on. That is one
+  restart and it changes the engine under test, which is a real caveat.
+- **Or test the data path directly instead of the output**: write a block,
+  read it back, compare to the GPU source bytes. That needs instrumentation
+  inside the transfer path but is immune to sampling noise and is the stronger
+  test.
+
+**Always establish that the baseline is STABLE before using it as a gate.** Four
+cheap repeats would have caught this before any conclusion was drawn from it.
+
+#### Cost of dropping O_DIRECT, measured
+
+	MemAvailable  2.06 GB     Cached      2.51 GB
+	SwapFree      8.17 GB     SwapCached  1.45 GB
+
+SwapFree fell from 12.51 GB to 8.17 GB with the page cache now carrying the
+writes, which is the documented cost arriving. No preemptions, engine healthy.
+Worth watching rather than acting on yet.
+
 #### WHY NOTHING REACHED DISK: O_DIRECT ALIGNMENT. 13,519 errors, zero bytes.
 
 Diagnosed 2026-10-07 without any further traffic, because the data already on
