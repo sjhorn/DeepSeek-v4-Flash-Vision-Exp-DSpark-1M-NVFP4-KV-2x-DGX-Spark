@@ -1008,6 +1008,106 @@ recompute of **~518s**. Breakeven is **7.8 MB/s**; NVMe does 4 GB in **~1.3s**, 
 **2.9 TB free**, i.e. ~700 such prefixes. That is a ~400x win on the cold path and it would also
 make an engine restart stop costing every client a full cold prefill.
 
+### RE-TESTED ON THE BOX 2026-10-07 — two of the three cited issues DO NOT apply to us, and the real blocker is a different line
+
+The engine was actually started with `OffloadingConnector` today, which the
+2026-09-14 entry never managed. **It got three steps further and failed on
+something else.** Each correction below is from the running engine or from the
+source at our own commit (`1967a5627bc3`, 2026-05-27), not from the issue titles.
+
+**The September blocker is CLEARED, and it was a config error on our side.**
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` really is refused — vLLM
+raises it in `VllmConfig` validation, in terms:
+
+	Value error, KV connector OffloadingConnector is incompatible with
+	PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True unless
+	enable_cumem_allocator is also enabled.
+
+Setting `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False` passes validation.
+**It must be EXPLICIT AND NON-EMPTY**: the compose uses
+`${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}`, and `:-` substitutes the
+default when the value is unset **or empty** — so blanking it in `.env.dspark`
+silently re-applies `True`. That cost one boot today.
+
+**vllm#45663 is not the disqualifying issue, and is barely an issue.** Its body
+is literally `.` — no repro, no diagnosis, one stale-bot comment — and the
+mechanism this file attributed to it ("materialises every KV block at once
+instead of chunking") **contradicts the code we run**:
+`split_indexer_prefill_chunks` already sub-chunks on the query dimension against
+a logits budget, and that budget is the env var
+`VLLM_SPARSE_INDEXER_MAX_LOGITS_MB` (ours is 256). So "nothing we configure
+moves that" is **wrong** — that is the knob. *(It was never reached today, so
+whether a long context OOMs with offloading on is still unmeasured.)*
+
+**vllm#43093's Error 1 is already fixed in our build.** Verified by running the
+real `resolve_kv_cache_block_sizes` on our five groups in the offline harness:
+it returns scheduler **256** / hash **4** (the GCD), and `kv_offload/base.py`'s
+assertion passes for all of 256/64/64/4/8. The reported `hash_block_size=256` is
+exactly what the *stale* `cache_config.block_size` produced.
+
+**vllm#56772 is CLOSED as completed (2026-09-17)** and concerns
+`canonical_layout: true`, a config option that **does not exist** in our build.
+Moot either way — but it is evidence upstream has been working in this exact
+area since our tree was cut.
+
+#### THE ACTUAL BLOCKER
+
+	File "vllm/v1/kv_offload/tiering/spec.py", line 113, in get_manager
+	    assert len(self.gpu_block_size) == 1
+	AssertionError
+
+`gpu_block_size` is the per-group tuple, and ours is **(256, 64, 64, 4, 8)**. So
+the hybrid group layout *is* what breaks the transfer — this file was right
+about that, and wrong about which line enforces it. Note the scheduler side
+raised; the **worker** side had already built its connector successfully.
+
+**IT IS NOT A STRAY ASSERT, AND IT MUST NOT BE DELETED.** The assertion sits
+immediately before `CPUPrimaryTierOffloadingManager(...)`, which does not use
+the value — so it looks removable. It is not:
+
+- `CPUOffloadingSpec.__init__` derives `kv_bytes_per_offloaded_block` as
+  `kv_bytes_per_block * self.block_size_factor`, a **single scalar**.
+- `block_size_factor` is defined as "number of sub-blocks per block" and drives
+  the pointer arithmetic in `kv_offload/cpu/gpu_worker.py`:
+  `sub_block_size = tensor.shape[1] // block_size_factor`, then a vectorised
+  expansion over `arange(block_size_factor)`.
+
+With five different GPU block sizes there is no single factor. Deleting the
+assert yields pointer arithmetic correct for ONE group and wrong for the other
+four — **silently corrupt KV that decodes to plausible-but-wrong output**, which
+is the same failure class as the `F8_E8M0` dtype risk and is far worse than
+refusing to start.
+
+#### What this changes about the plan
+
+Making the offload path per-group aware is **real engineering inside upstream
+code**, not a config flip and not a one-line patch. And because upstream has
+been actively reworking exactly this (canonical_layout, #56772 completed
+2026-09-17) while our tree is from **2026-05-27**, a **version bump is likely the
+better route than forward-porting a per-group `block_size_factor`** into a
+four-month-old offload path.
+
+**The trigger is no longer "#45663 closes".** It is: does a newer vLLM support a
+hybrid (non-uniform block size) KV layout in `kv_offload`? That is the one
+question to ask of any candidate version.
+
+#### What was kept from today's attempt
+
+Rolled back: `KV_TRANSFER_CONFIG` only. **Kept, because each booted cleanly and
+is independently useful** — `GPU_MEMORY_UTILIZATION=0.88`,
+`KV_CACHE_MEMORY_BYTES=21789705851` (20.29 GiB → **GPU KV cache size 3,377,409
+tokens**, concurrency 3.22x, handing ~1.5 GiB back to host RAM),
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False`, and
+`PROTECTED_FRACTION` unset so `protected_fraction` is governed by the flags file.
+Backups: `.env.dspark.bak-pre-kvoffload-*` on both nodes.
+
+**`GPU_MEMORY_UTILIZATION` DOES NOT GOVERN THE POOL while `KV_CACHE_MEMORY_BYTES`
+is set**, and the engine says so itself: *"reserved 20.29 GiB … as specified by
+kv_cache_memory_bytes config and skipped memory profiling. This does not respect
+the gpu_memory_utilization config."* So util is **not** the lever for freeing
+memory here; the byte figure is. Util only bounds what the worker *requests*
+(0.88 → 108.93 GiB against 115.33 GiB free).
+
 
 ### GPU thermal management
 
