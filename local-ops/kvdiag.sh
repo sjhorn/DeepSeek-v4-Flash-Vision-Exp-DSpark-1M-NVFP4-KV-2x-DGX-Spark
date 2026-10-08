@@ -140,8 +140,14 @@ cmd_capture() {
   if [ "$alive" = "true" ] && [ "$st" != "200" ]; then
     echo "  => container UP but API not answering: treating as HUNG, dumping stacks"
     for p in $(docker exec "$C" sh -c 'for d in /proc/[0-9]*; do c=$(tr "\0" " " < $d/cmdline 2>/dev/null); case "$c" in *VLLM*|*EngineCore*|*vllm*) echo ${d#/proc/};; esac; done' 2>/dev/null | head -6); do
-      echo "    kill -USR1 $p"
-      docker exec "$C" kill -USR1 "$p" 2>/dev/null
+      # *** THERE IS NO `kill` AND NO `ps` IN THIS IMAGE. *** The obvious
+      # spelling fails with `exec: "kill": executable file not found in $PATH`,
+      # so the hang dump this whole branch exists to trigger never fired -- and
+      # it failed on the one capture that needed it. The host cannot signal the
+      # process either: it runs as root in the container and there is no
+      # non-interactive sudo. Python is the only tool present, and it is enough.
+      echo "    SIGUSR1 -> pid $p (via python; the image has no kill(1))"
+      docker exec "$C" /opt/env/bin/python -c "import os,signal,sys;os.kill(int(sys.argv[1]),signal.SIGUSR1)" "$p" 2>&1 | head -2
     done
     sleep 6
     cp "$RUN/engine.log" "$dir/engine-streamed-after-usr1.log" 2>/dev/null
