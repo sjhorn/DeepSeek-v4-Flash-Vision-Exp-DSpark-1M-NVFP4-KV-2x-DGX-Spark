@@ -68,6 +68,21 @@ m=dict(re.findall(r\\\"(\w+):\s+(\d+)\\\", open(\\\"/proc/meminfo\\\").read()))
 print(\\\"mem %.2f swap %.2f\\\" % (int(m[\\\"MemAvailable\\\"])/1048576, int(m[\\\"SwapFree\\\"])/1048576))
 \")\" >> $RUN/mem.log; sleep 15; done'" >/dev/null 2>&1 &
     echo "  memory sampler started -> $RUN/mem.log"
+  # *** STREAM THE KERNEL LOG TOO, because an Xid is only legible against our
+  # *** own timeline. The 2026-10-08 fault was found hours later by grepping
+  # journalctl, and the one thing that mattered -- which transfer was in flight
+  # -- had already scrolled away. journalctl -k IS readable without root here
+  # (unlike dmesg), so there is no reason not to have it.
+  #
+  # Xid 13 is an illegal access from a kernel and Xid 32 a corrupted push
+  # buffer; both are software-class, and both appeared on the boot the disk
+  # offload went live after three weeks with none.
+  if ! pgrep -f "[j]ournalctl -kf" >/dev/null 2>&1; then
+    nohup journalctl -kf -n 0 > "$RUN/kernel.log" 2>/dev/null &
+    echo "  kernel log stream started -> $RUN/kernel.log (Xid lands here, timestamped)"
+  else
+    echo "  kernel log stream already running"
+  fi
   fi
   echo "  api=$(api)  $(mem)"
 }
@@ -122,6 +137,22 @@ cmd_capture() {
     echo "oom_kill > 0 means a process in this container WAS OOM-killed."
     echo "oom_kill = 0 means it was not -- SINCE THIS CONTAINER STARTED."
   } > "$dir/oom.txt" 2>&1
+
+  # Xid, from the one kernel source that IS readable here.
+  {
+    echo "== Xid lines, this boot =="
+    journalctl -k 2>/dev/null | grep -iE "Xid" | tail -40
+    echo "== Xid count per previous boot (is it NEW?) =="
+    for b in 0 -1 -2 -3; do
+      printf "boot %s: %s\n" "$b" \
+        "$(journalctl -k -b $b 2>/dev/null | grep -ciE 'Xid' || echo 'unavailable')"
+    done
+    echo "== NOTE =="
+    echo "Xid 13 = graphics exception (illegal access from a kernel, SOFTWARE)."
+    echo "Xid 32 = corrupted push buffer stream."
+    echo "Zero in previous boots and non-zero in this one points at new code."
+  } > "$dir/xid.txt" 2>&1
+  cp "$RUN/kernel.log" "$dir/kernel.log" 2>/dev/null || true
 
   if dmesg > "$dir/dmesg.txt" 2>/dev/null && [ -s "$dir/dmesg.txt" ]; then
     tail -200 "$dir/dmesg.txt" > "$dir/dmesg.tmp" && mv "$dir/dmesg.tmp" "$dir/dmesg.txt"
@@ -236,6 +267,7 @@ d=json.load(sys.stdin)
 print('  tier:', {k:v for k,v in d['policy'].items() if 'disk' in k})" 2>/dev/null || echo "  tier: /kv unreachable"
            ;;
   stop)    pkill -f "docker logs -f .*$C" 2>/dev/null
+           pkill -f "[j]ournalctl -kf" 2>/dev/null
            pkill -f kvdiag-memsampler 2>/dev/null
            echo "  collection stopped. Nothing was restarted." ;;
   recover) echo "  *** THE ONLY COMMAND THAT RESTARTS. ***"
