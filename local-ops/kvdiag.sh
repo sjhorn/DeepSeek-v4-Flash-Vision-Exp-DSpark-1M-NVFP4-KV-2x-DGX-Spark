@@ -41,7 +41,24 @@ D=~/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark
 EV=~/kvdiag
 RUN="$EV/current"
 
-api()  { curl -s -o /dev/null -w '%{http_code}' -m 10 "$API/v1/models" 2>/dev/null; }
+# *** /v1/models IS NOT AN ENGINE LIVENESS CHECK, and that cost the one stack
+# *** dump this tool exists to take. *** It is served by the API SERVER without
+# ever touching the engine core, so it returns 200 while the core is wedged.
+# Measured 2026-10-08: the engine core sat in `queue.get()` with an empty input
+# queue and five requests outstanding, `/v1/models` answered 200, and the
+# dead-vs-hung branch below therefore concluded "DEAD (or healthy)" and sent no
+# SIGUSR1. The stacks had to be taken by hand afterwards.
+#
+# `ready()` is the cheap API-server check, kept because "the HTTP front end is
+# up" is a real and separate fact. `api()` now exercises the ENGINE with the
+# smallest possible completion, which is what "alive" has to mean for a tool
+# whose whole job is telling a hang from a death.
+ready() { curl -s -o /dev/null -w '%{http_code}' -m 10 "$API/v1/models" 2>/dev/null; }
+api()  { curl -s -o /dev/null -w '%{http_code}' -m 25 \
+           -X POST "$API/v1/chat/completions" \
+           -H 'Content-Type: application/json' \
+           -d '{"model":"claude-opus-5","max_tokens":1,"messages":[{"role":"user","content":"x"}]}' \
+           2>/dev/null; }
 mem()  { python3 -c "
 import re
 m=dict(re.findall(r'(\w+):\s+(\d+)', open('/proc/meminfo').read()))
@@ -167,9 +184,9 @@ cmd_capture() {
   # nothing and needs its Python stacks.
   local alive; alive=$(docker inspect -f '{{.State.Running}}' "$C" 2>/dev/null)
   local st; st=$(api)
-  echo "  container running=$alive  api=$st" | tee -a "$dir/state.txt"
+  echo "  container running=$alive  engine=$st  http_front=$(ready)" | tee -a "$dir/state.txt"
   if [ "$alive" = "true" ] && [ "$st" != "200" ]; then
-    echo "  => container UP but API not answering: treating as HUNG, dumping stacks"
+    echo "  => container UP, HTTP front end $(ready), but the ENGINE is not completing: HUNG, dumping stacks"
     for p in $(docker exec "$C" sh -c 'for d in /proc/[0-9]*; do c=$(tr "\0" " " < $d/cmdline 2>/dev/null); case "$c" in *VLLM*|*EngineCore*|*vllm*) echo ${d#/proc/};; esac; done' 2>/dev/null | head -6); do
       # *** THERE IS NO `kill` AND NO `ps` IN THIS IMAGE. *** The obvious
       # spelling fails with `exec: "kill": executable file not found in $PATH`,
