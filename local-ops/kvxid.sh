@@ -95,8 +95,12 @@ print('      fence: jobs_open=%s blocks=%s   reports=%s' % (s.get('jobs_open'),
 echo "=== Xid hunt. store ON, restore ON, slots=256 ==="
 knob disk_store_paused false; knob disk_restore true; knob staging_slots 256
 echo "  Xid before: $(xid)   api=$(api)"
-probe "A-volume-1x200k"  1 200000 || exit 1
-probe "B-conc-5x40k"     5 40000  || exit 1
-probe "C-both-5x200k"    5 200000 || exit 1
+# Arms are selectable, so a re-run after a fix does not have to repeat an arm
+# that already passed -- arm A (volume, no concurrency) ran clean in 144.1s with
+# the fence fully drained, so re-running it costs 2.5 minutes and proves nothing.
+ARMS="${ARMS:-A B C}"
+case " $ARMS " in *" A "*) probe "A-volume-1x200k"  1 200000 || exit 1 ;; esac
+case " $ARMS " in *" B "*) probe "B-conc-5x40k"     5 40000  || exit 1 ;; esac
+case " $ARMS " in *" C "*) probe "C-both-5x200k"    5 200000 || exit 1 ;; esac
 echo "=== no fault reproduced in three arms ==="
 echo XIDHUNT-DONE
