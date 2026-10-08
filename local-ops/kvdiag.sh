@@ -95,6 +95,34 @@ cmd_capture() {
   # kernel log. That cost a round on 2026-10-08: a worker died with no Python
   # traceback, the empty file looked like "not an OOM", and the only thing that
   # actually ruled OOM out was the memory sampler. Say which it is.
+  # *** THE OOM WITNESS THAT NEEDS NO ROOT. *** dmesg is unreadable here (no
+  # sudo on the host; no CAP_SYSLOG and no /dev/kmsg in the container, both
+  # checked 2026-10-08), so the question "was it OOM-killed?" had no answer at
+  # all when VllmWorker-0 died silently. The cgroup answers it: memory.events
+  # `oom_kill` counts processes in this cgroup killed by ANY OOM killer,
+  # global or cgroup-limit, and it is world-readable on both the host and
+  # inside the container. `docker inspect` adds OOMKilled/ExitCode/RestartCount.
+  #
+  # The caveat is stated because it bit us: these counters reset when the
+  # container's cgroup is recreated, which a restart does -- so they answer
+  # "since this boot", and a crash that already auto-restarted is past
+  # answering. That is what makes CAPTURING THEM CONTINUOUSLY the point, and
+  # why mounting /dev/kmsg or adding cap_add: [SYSLOG] in the compose file is
+  # still the real fix, to ride the next restart.
+  {
+    echo "== docker inspect =="
+    docker inspect --format 'OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}} RestartCount={{.RestartCount}} Status={{.State.Status}}' "$C" 2>&1
+    echo "== cgroup memory.events (host view) =="
+    cid=$(docker inspect -f '{{.Id}}' "$C" 2>/dev/null)
+    cat "/sys/fs/cgroup/system.slice/docker-$cid.scope/memory.events" 2>&1
+    echo "== cgroup memory.current / max =="
+    cat "/sys/fs/cgroup/system.slice/docker-$cid.scope/memory.current" 2>&1
+    cat "/sys/fs/cgroup/system.slice/docker-$cid.scope/memory.max" 2>&1
+    echo "== NOTE =="
+    echo "oom_kill > 0 means a process in this container WAS OOM-killed."
+    echo "oom_kill = 0 means it was not -- SINCE THIS CONTAINER STARTED."
+  } > "$dir/oom.txt" 2>&1
+
   if dmesg > "$dir/dmesg.txt" 2>/dev/null && [ -s "$dir/dmesg.txt" ]; then
     tail -200 "$dir/dmesg.txt" > "$dir/dmesg.tmp" && mv "$dir/dmesg.tmp" "$dir/dmesg.txt"
   else
