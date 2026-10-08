@@ -89,7 +89,19 @@ cmd_capture() {
   curl -s -m 10 "$API/metrics" > "$dir/metrics.txt" 2>&1
   cp /var/tmp/vllm-kv-flags/flags.json "$dir/flags.json" 2>/dev/null
   journalctl --since "40 min ago" --no-pager > "$dir/journal.txt" 2>&1
-  dmesg 2>/dev/null | tail -200 > "$dir/dmesg.txt"
+  # *** AN EMPTY dmesg.txt IS "WE COULD NOT LOOK", NOT "NO KERNEL MESSAGES". ***
+  # dmesg needs root here and there is no non-interactive sudo, so the obvious
+  # form writes a 0-line file -- and a 0-line file reads exactly like a clean
+  # kernel log. That cost a round on 2026-10-08: a worker died with no Python
+  # traceback, the empty file looked like "not an OOM", and the only thing that
+  # actually ruled OOM out was the memory sampler. Say which it is.
+  if dmesg > "$dir/dmesg.txt" 2>/dev/null && [ -s "$dir/dmesg.txt" ]; then
+    tail -200 "$dir/dmesg.txt" > "$dir/dmesg.tmp" && mv "$dir/dmesg.tmp" "$dir/dmesg.txt"
+  else
+    printf 'UNAVAILABLE: dmesg needs root and there is no non-interactive sudo on this box.\n%s\n' \
+      'This is an ABSENCE, not a clean kernel log -- use mem.log to reason about OOM.' \
+      > "$dir/dmesg.txt"
+  fi
 
   # *** DEAD OR HUNG? They need different evidence and this is the one call
   # that decides. A dead core leaves a traceback; a hung worker leaves
