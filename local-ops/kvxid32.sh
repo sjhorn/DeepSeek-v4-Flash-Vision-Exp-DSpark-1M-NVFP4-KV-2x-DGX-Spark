@@ -107,9 +107,39 @@ json.dump({"model": "claude-opus-5", "max_tokens": 8,
           sys.stdout)
 PY
 t0=$(date +%s)
-code=$(curl -s -o /dev/null -w '%{http_code}' -m 1800 -X POST "$API/v1/chat/completions" \
-  -H 'Content-Type: application/json' --data @/tmp/xid32-body.json)
-say "cold pass: http=$code in $(( $(date +%s) - t0 ))s"
+if [ "$MODE" = "nodrain" ]; then
+  # *** THE FIRST nodrain RUN CREATED NO OVERLAP AT ALL, and reported
+  # *** "inflight=0 jobs_open=0" as though that were the finding.
+  # The cold pass was a synchronous curl, so the drop could not fire until the
+  # request had already finished and its stores had drained -- making the mode
+  # byte-for-byte equivalent to the drain it was written to contrast with. The
+  # experiment ran, passed, and tested nothing; the mode name was the only
+  # difference. A control that cannot differ from its treatment is not a
+  # control.
+  #
+  # So background it and drop while it is demonstrably in flight, gated on the
+  # engine's own counters rather than on a sleep.
+  curl -s -o /dev/null -m 1800 -X POST "$API/v1/chat/completions" \
+    -H 'Content-Type: application/json' --data @/tmp/xid32-body.json &
+  COLDPID=$!
+  say "cold pass BACKGROUNDED (pid $COLDPID) -- waiting for a real overlap"
+  ov=0
+  for i in $(seq 1 240); do
+    n=$(inflight); j=$(jobs_open)
+    if [ "$n" != "0" ] && [ "$j" != "0" ] && [ "$j" != "-1" ]; then
+      say "OVERLAP REACHED: inflight=$n jobs_open=$j after $((i))s"; ov=1; break
+    fi
+    sleep 1
+  done
+  # ABSENT IS NOT ZERO: if the window never opened, say so loudly rather than
+  # dropping anyway and calling the clean result evidence. That is the mistake
+  # the first run made.
+  [ "$ov" = "1" ] || say "*** NO OVERLAP EVER OBSERVED -- this run tests NOTHING about the overlap hypothesis ***"
+else
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m 1800 -X POST "$API/v1/chat/completions" \
+    -H 'Content-Type: application/json' --data @/tmp/xid32-body.json)
+  say "cold pass: http=$code in $(( $(date +%s) - t0 ))s"
+fi
 
 # MODE is the whole experiment. The first run of this script drained BOTH
 # requests and transfers before dropping, and it did not reproduce -- but it
