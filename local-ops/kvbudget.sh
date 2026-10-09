@@ -46,7 +46,10 @@ echo "  disk: $(numfmt --to=iec $du_before 2>/dev/null || echo $du_before)"
 echo "=== B) budget BELOW what is held: eviction must fire ==="
 held=$(curl -s -m 25 "$STATS/kv" | python3 -c "
 import json,sys; print(int((json.load(sys.stdin)['disk'].get('bytes_held') or 0)/1e9))")
-target=$(( held > 60 ? held - 50 : 1 ))
+# A budget ~70 GB below what is held, so eviction has to do real work. Not "1
+# GB": that would ask it to evict essentially the whole index in one step, which
+# tests a pathological case rather than the operational one.
+target=$(( held > 100 ? held - 70 : 1 ))
 echo "  held ${held} GB -> setting budget ${target} GB"
 knob disk_budget_gb "$target"
 req 20000
