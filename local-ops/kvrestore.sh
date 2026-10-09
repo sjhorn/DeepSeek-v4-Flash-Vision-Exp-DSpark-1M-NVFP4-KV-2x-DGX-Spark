@@ -151,7 +151,23 @@ pass restore2
 echo "=== final ==="
 echo "  api=$(api)  preempt=$(preempt)  swapfree=$(swap)"
 echo "  disk: $(kvd)"
-curl -s -m 10 "$API/kv" | python3 -c "
-import json,sys; g=json.load(sys.stdin)['groups'][0]
-print('  group0: restore_hits=%s restore_blocks=%s restore_refused=%s'%(g.get('restore_hits'),g.get('restore_blocks'),g.get('restore_refused')))"
+# *** THIS LINE READ $API AND THE FILE'S OWN HEADER SAYS NOT TO. *** GET /kv on
+# :8888 is answered by the API SERVER process, which holds no manager, so
+# `groups` comes back EMPTY and ['groups'][0] raised IndexError -- after "DONE",
+# so every run of this harness ended with a traceback where its conclusion
+# should be. The state lives in the engine core; $STATS is the only listener in
+# it. And report an absent figure rather than raising on it: a summary that
+# crashes is a summary nobody reads.
+curl -s -m 10 "$STATS/kv" | python3 -c "
+import json, sys
+try:
+    gs = json.load(sys.stdin).get('groups') or []
+except Exception as exc:
+    print('  group0: unreadable (%s)' % exc); raise SystemExit
+if not gs:
+    print('  group0: no groups in the response -- wrong listener, or the '
+          'manager is not installed'); raise SystemExit
+g = gs[0]
+print('  group0: restore_hits=%s restore_blocks=%s restore_refused=%s'
+      % (g.get('restore_hits'), g.get('restore_blocks'), g.get('restore_refused')))"
 echo "DONE"
