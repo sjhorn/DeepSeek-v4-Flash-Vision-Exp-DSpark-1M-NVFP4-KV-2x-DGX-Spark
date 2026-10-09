@@ -23,7 +23,9 @@ STATS=http://127.0.0.1:9199
 C=deepseek-v4-flash-0731-dspark-1m-nvfp4-kv-2x-dgx-spark-vllm-dspark-1
 TOK="${1:-60000}"
 NONCE="${2:-xid32-$(date +%s)}"
-D=~/kvdiag/xid32-$(date +%H%M)
+# drain (safe, the operating procedure) | nodrain (the crash condition)
+MODE="${3:-drain}"
+D=~/kvdiag/xid32-$MODE-$(date +%H%M)
 
 say(){ echo "  $*"; }
 engine(){ curl -s -o /dev/null -w '%{http_code}' -m 120 -X POST "$API/v1/chat/completions" \
@@ -41,6 +43,7 @@ d=(json.load(sys.stdin).get('disk') or {}).get('sched') or {}
 print(-1 if not d.get('available') else int(d.get('jobs_open') or 0)+int(d.get('blocks_with_pending_jobs') or 0))" 2>/dev/null || echo -1; }
 
 mkdir -p "$D"
+say "=== MODE=$MODE  TOK=$TOK  NONCE=$NONCE ==="
 # *** STREAM FROM BEFORE THE EXPERIMENT. *** `docker logs` after the fact is
 # how two tracebacks were nearly lost today.
 nohup docker logs -f --since 0 "$C" > "$D/engine-stream.log" 2>&1 &
@@ -76,10 +79,29 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -m 1800 -X POST "$API/v1/chat/comp
   -H 'Content-Type: application/json' --data @/tmp/xid32-body.json)
 say "cold pass: http=$code in $(( $(date +%s) - t0 ))s"
 
-say "=== drain requests AND transfers before the drop ==="
-for i in $(seq 1 60); do n=$(inflight); [ "$n" = "0" ] && break; sleep 5; done
-for i in $(seq 1 60); do j=$(jobs_open); [ "$j" = "0" ] && break; sleep 5; done
-say "inflight=$(inflight)  jobs_open=$(jobs_open)"
+# MODE is the whole experiment. The first run of this script drained BOTH
+# requests and transfers before dropping, and it did not reproduce -- but it
+# also had CUDA_LAUNCH_BLOCKING=1 set and the pending-blocks fix live, so three
+# variables moved at once and the clean result attributed to none of them.
+#
+# "nodrain" is the condition the two real crashes actually had: the drop lands
+# while stores are still in flight. That matters because the drop frees GPU
+# blocks and resets the prefix cache, and an in-flight transfer holds block ids
+# the drop cannot see -- upstream records NO block ids for a load job at all,
+# which is exactly why the in-flight guard (a store-only dict) can never fire
+# for one.
+#
+# A drain is the safe operating procedure. This mode exists to break it on
+# purpose, with the log already streaming.
+if [ "$MODE" = "nodrain" ]; then
+  say "=== NOT DRAINING, deliberately -- what is in flight at the drop ==="
+  say "inflight=$(inflight)  jobs_open=$(jobs_open)   <- the overlap window"
+else
+  say "=== drain requests AND transfers before the drop ==="
+  for i in $(seq 1 60); do n=$(inflight); [ "$n" = "0" ] && break; sleep 5; done
+  for i in $(seq 1 60); do j=$(jobs_open); [ "$j" = "0" ] && break; sleep 5; done
+  say "inflight=$(inflight)  jobs_open=$(jobs_open)"
+fi
 
 say "=== THE DROP (the lever that crashed it twice) ==="
 curl -s -m 30 -X POST "$API/kv/drop_gpu_cache" -o /dev/null
