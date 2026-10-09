@@ -104,11 +104,33 @@ import json,sys; print(json.load(sys.stdin).get('disk',{}).get('stored'))" 2>/de
   echo "    WARNING: stores never settled (stored=$cur) -- not dropping"; return 1
 }
 
+# *** A STORE JOB OUTLIVES ITS REQUEST, so "no requests in flight" is NOT
+# *** "no transfers in flight". *** Stores are deferred past token sampling and
+# pumped over rounds from get_finished(), so the queue can be busy well after
+# the last request returns. On 2026-10-09 the drop fired with 2 store jobs
+# outstanding on both ranks, recycled their source blocks, and four seconds
+# later Xid 32 twice on the worker killed Worker_TP1 with `CUDA error:
+# unspecified launch failure`. The engine now refuses such a drop, but a
+# harness that waits on the wrong quantity would just see the refusal and
+# report a failed experiment -- so it waits on the right one.
+jobs_open() { curl -s -m 10 "$STATS/kv" | python3 -c "
+import json,sys
+d = (json.load(sys.stdin).get('disk') or {}).get('sched') or {}
+# ABSENT IS NOT ZERO: an unreachable scheduler must not read as drained.
+print(-1 if not d.get('available') else
+      int(d.get('jobs_open') or 0) + int(d.get('blocks_with_pending_jobs') or 0))" 2>/dev/null || echo -1; }
+
 drop() {
   # The engine MUST be idle, or live block refs make patch7 refuse.
-  local n
+  local n j
   for i in $(seq 1 60); do n=$(inflight); [ "$n" = "0" ] && break; sleep 5; done
   [ "$n" = "0" ] || { echo "    REFUSING to drop: $n request(s) in flight"; return 1; }
+  # ...AND the transfer queue must be drained, which is a different question.
+  for i in $(seq 1 60); do j=$(jobs_open); [ "$j" = "0" ] && break; sleep 5; done
+  if [ "$j" != "0" ]; then
+    echo "    REFUSING to drop: transfer queue not drained (jobs_open=$j; -1 means the scheduler is UNREACHABLE, which is not the same as zero)"
+    return 1
+  fi
   curl -s -m 30 -X POST "$API/kv/drop_gpu_cache" >/dev/null
   # one tiny request IS the scheduler step that performs the drop
   curl -s -m 60 -X POST "$API/v1/chat/completions" -H 'Content-Type: application/json' \
