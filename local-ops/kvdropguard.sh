@@ -28,10 +28,20 @@ knob(){ curl -s -m 30 -X POST "$API/kv/knob" -H 'Content-Type: application/json'
   -d "{\"name\":\"$1\",\"value\":\"$2\"}" -o /dev/null; }
 # The WORKER-side counts -- the quantity the guard added. Reported from
 # /kv/workers, which was already serving them before anything asked.
-wbusy(){ curl -s -m 15 "$STATS/kv/workers" 2>/dev/null | python3 -c "
+# *** /kv/workers IS ON THE CONTROL PLANE (:8888), NOT THE STATS LISTENER
+# *** (:9199), AND GETTING THAT WRONG PRINTED "ranks: 0".
+# :9199 answers {"error":"not found"}, which has no "ranks" key, so a reader
+# doing (d.get("ranks") or []) renders a WRONG PORT as ZERO RANKS -- and zero
+# ranks would have read as "both workers are idle", permitting exactly the drop
+# this guard exists to refuse. (In the route it is worse in the safe direction:
+# an empty rank list is treated as unreadable and refuses forever.) ABSENT IS
+# NOT ZERO, in a probe as much as anywhere, and this is the third time in one
+# session that an instrument pointed at the wrong place reported a clean zero.
+wbusy(){ curl -s -m 15 "$API/kv/workers" 2>/dev/null | python3 -c "
 import json,sys
 try: d=json.load(sys.stdin)
-except Exception: print('unreadable'); raise SystemExit
+except Exception: print('unreadable JSON'); raise SystemExit
+if 'ranks' not in d: print('unreadable: no ranks key -- wrong port or route?'); raise SystemExit
 tot=0; parts=[]
 for r in (d.get('ranks') or []):
     for h in (r.get('handlers') or []):
