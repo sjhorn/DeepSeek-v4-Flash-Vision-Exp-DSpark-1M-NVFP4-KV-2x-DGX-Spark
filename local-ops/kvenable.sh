@@ -66,12 +66,32 @@ cur=$start
 while [ "$cur" -gt "$TARGET" ]; do
   cur=$(( cur - STEP )); [ "$cur" -lt "$TARGET" ] && cur=$TARGET
   knob disk_budget_gb "$cur"
-  # One tiny request so a store happens and the budget actually acts -- the
-  # reconcile runs on a scheduler step, so an idle engine shows the OLD figure
-  # and would read exactly like a knob that failed to take.
-  curl -s -o /dev/null -m 60 -X POST "$API/v1/chat/completions" \
-    -H 'Content-Type: application/json' \
-    -d '{"model":"claude-opus-5","max_tokens":4,"messages":[{"role":"user","content":"budget step poke"}]}'
+  # *** THE POKE MUST STORE SOMETHING NEW, OR THE STEP DOES NOTHING. ***
+  # Eviction is DEMAND-DRIVEN: _enforce_budget runs only from prepare_store,
+  # for the bytes a store is making room for. The first version of this used a
+  # FIXED prompt, so after step one its blocks were already present -- nothing
+  # incoming, no enforcement -- and the knobs were accepted while
+  # `evicted` stayed None and `present` never moved. Measured: budget walked
+  # 411 -> 371 with `over=True` and not one key evicted, which would have left
+  # the whole 100 GB gap to go in a single burst on the first REAL request.
+  # The stepping was theatre.
+  #
+  # So: a unique nonce per step, and enough tokens to produce group-0 blocks
+  # (256 tokens each) worth storing. Note the eviction size is set by the GAP,
+  # not by this prompt -- `need = held + incoming - budget` -- so a small store
+  # is enough to trigger a full step's worth of eviction.
+  nonce="budget-step-${cur}-$(date +%s)"
+  body=$(python3 - "$nonce" <<'PYBODY'
+import json, sys
+n = sys.argv[1]
+filler = ("the quick brown fox jumps over the lazy dog " * 120)[:4000]
+json.dump({"model": "claude-opus-5", "max_tokens": 4,
+           "messages": [{"role": "user", "content": n + " " + filler}]},
+          sys.stdout)
+PYBODY
+)
+  curl -s -o /dev/null -m 120 -X POST "$API/v1/chat/completions" \
+    -H 'Content-Type: application/json' -d "$body"
   sleep "$SETTLE"
   state
   if [ "$(engine)" != "200" ]; then
