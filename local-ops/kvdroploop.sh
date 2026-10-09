@@ -44,6 +44,35 @@ xid(){ journalctl -k --since "-6h" 2>/dev/null | grep "Xid (" \
 xid_remote(){ ssh -o BatchMode=yes spark-da08 "journalctl -k --since \"-6h\" 2>/dev/null | grep 'Xid (' \
   | sed -E 's/^(\w+ [0-9]+ [0-9:]+).*Xid \(PCI:[^)]*\): ([0-9]+).*/\1|\2/' | sort -u | wc -l"; }
 
+# *** THE SCHEDULER-SIDE COUNT IS THE WRONG QUANTITY TO DRAIN ON, which is
+# *** what let cycle 1 at 100K kill the head on 2026-10-09 17:51.
+# `jobs_open` above reads /kv (the scheduler's `cs._jobs`). Measured during the
+# guard verification: with that at 0, each rank still held
+# DiskStoreHandler.jobs_open=1 and writes_open=5 -- five store rounds whose file
+# writes were unfinished, so their staging slots were still held and the GPU
+# copies behind them were live. Draining the scheduler and dropping is exactly
+# the sequence that faulted.
+#
+# /kv/workers is on the CONTROL PLANE (:8888). Querying :9199 answers
+# {"error":"not found"}, whose missing "ranks" key renders as zero ranks and
+# therefore as "both workers idle" -- so this reports unreadable rather than 0.
+wbusy(){ curl -s -m 15 "$API/kv/workers" 2>/dev/null | python3 -c "
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: print(-1); raise SystemExit
+if 'ranks' not in d: print(-1); raise SystemExit
+rs=d.get('ranks') or []
+if not rs: print(-1); raise SystemExit
+tot=0
+for r in rs:
+    hs=r.get('handlers')
+    if hs is None: print(-1); raise SystemExit
+    for h in hs:
+        for f in ('jobs_open','writes_open','reads_open'):
+            v=h.get(f)
+            if isinstance(v,int) and not isinstance(v,bool): tot+=v
+print(tot)" 2>/dev/null || echo -1; }
+
 # Stream from BEFORE the experiment: `docker logs` after the fact destroyed two
 # tracebacks today.
 ( docker logs -f --since 1s "$C" > "$D/engine-stream.log" 2>&1 ) &
@@ -75,7 +104,16 @@ FAULTED=0
 for c in $(seq 1 "$CYCLES"); do
   for i in $(seq 1 60); do [ "$(inflight)" = "0" ] && break; sleep 2; done
   for i in $(seq 1 60); do j=$(jobs_open); [ "$j" = "0" ] && break; sleep 2; done
-  curl -s -m 30 -X POST "$API/kv/drop_gpu_cache" -o /dev/null
+  # Drain the WORKERS too, and report if it never reaches zero rather than
+  # falling through and dropping anyway -- a loop that proceeds on timeout is
+  # how the 17:51 drop happened with a guard sitting right there.
+  wok=0
+  for i in $(seq 1 120); do w=$(wbusy); [ "$w" = "0" ] && { wok=1; break; }; sleep 2; done
+  [ "$wok" = "1" ] || say "cycle $c: WORKERS NEVER DRAINED (last=$(wbusy)) -- the drop should now REFUSE"
+  dv=$(curl -s -m 30 -X POST "$API/kv/drop_gpu_cache" | python3 -c "
+import json,sys
+d=json.load(sys.stdin); print(d.get('refused') or ('ok' if d.get('ok') else 'other'))" 2>/dev/null || echo parse-error)
+  [ "$dv" = "ok" ] || say "cycle $c: drop REFUSED ($dv) -- the guard is doing its job; this cycle tests no restore"
   # gpu_cache_epoch is acted on at the edge in new_step_starts(), so a bump on
   # an idle engine does NOTHING until some request produces a scheduler step.
   # This tiny request is that step, not a smoke test.
