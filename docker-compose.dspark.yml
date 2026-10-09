@@ -367,6 +367,23 @@ services:
       DG_JIT_NVCC_COMPILER: "${DG_JIT_NVCC_COMPILER:-/opt/env/bin/nvcc}"
       PYTORCH_CUDA_ALLOC_CONF: "${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
+      # *** A DIAGNOSTIC HOOK FOR ASYNCHRONOUS GPU FAULTS, default UNSET. ***
+      # Xid 32 killed a worker twice on 2026-10-09, each time ~4s after a
+      # gpu_cache_epoch bump, and both tracebacks pointed at an unrelated sync
+      # point -- which is what an async fault always does. The CUDA error
+      # message names the remedy itself: "For debugging consider passing
+      # CUDA_LAUNCH_BLOCKING=1". With it set, the failure is reported AT the
+      # offending launch instead of at the next synchronisation, which is the
+      # difference between a traceback that names the kernel and one that names
+      # whatever ran next.
+      #
+      # It SERIALISES every kernel launch, so it is a diagnostic and never a
+      # setting: expect a large slowdown. Empty by default so a restart without
+      # it in .env.dspark reverts to normal rather than leaving the box crippled
+      # -- the same reason PYTHONHASHSEED lives in the committed default and
+      # not in .env.dspark.
+      CUDA_LAUNCH_BLOCKING: "${CUDA_LAUNCH_BLOCKING:-}"
+
       NCCL_NET: "${NCCL_NET:-IB}"
       NCCL_IB_DISABLE: "${NCCL_IB_DISABLE:-0}"
       NCCL_IB_HCA: "${NCCL_IB_HCA}"
