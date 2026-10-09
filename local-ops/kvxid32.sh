@@ -44,6 +44,38 @@ print(-1 if not d.get('available') else int(d.get('jobs_open') or 0)+int(d.get('
 
 mkdir -p "$D"
 say "=== MODE=$MODE  TOK=$TOK  NONCE=$NONCE ==="
+
+# *** NOTHING HAS EVER MEASURED MEMORY AT A FAULT, and the log looks like it
+# *** does. offload.py:153 prints "watch MemAvailable and SwapFree" when the
+# O_DIRECT shim installs, and that advice line is the ONLY thing in the whole
+# engine log containing either word -- so grepping the two crash captures for
+# them returns a hit, from the sentence telling somebody to go and look.
+# Nothing went and looked. I read that hit as evidence and it was my own prose.
+#
+# It matters because the memory hypothesis is the only one that fits all six
+# GPU faults: Xid 32 on BOTH nodes with different channels and different intr
+# fields, plus three Xid 13s with "Data deaddead" and no drop anywhere near
+# them. NVIDIA attributes Xid 32 to driver error or SYSTEM MEMORY CORRUPTION,
+# and on a GB10 the GPU and the CPU share physical RAM -- so dropping O_DIRECT
+# (page cache now in the write path), a 256-slot pinned staging buffer and a
+# 1000 GB budget are all claims on the same pool, on a box measured at 1.49%
+# MemAvailable with NO OOM net on either node.
+#
+# A sample every 2s into a file that survives the container, so the question is
+# answerable from the evidence rather than re-run.
+( while true; do
+    printf '%s ' "$(date +%H:%M:%S)"
+    # sub() strips the colon: /proc/meminfo keys are "MemAvailable:", so
+    # emitting $1 verbatim gives "MemAvailable:=123" and the summary's
+    # /^MemAvailable=/ can never match -- it would print ABSENT for every run,
+    # reporting absence for a measurement that WAS taken. My synthetic fixture
+    # wrote the key without the colon, so it could not express the real format.
+    awk '/^MemAvailable:|^SwapFree:|^Cached:|^Dirty:|^Writeback:/{sub(/:$/,"",$1); printf "%s=%s ", $1, $2}' /proc/meminfo
+    echo
+    sleep 2
+  done ) > "$D/meminfo.log" 2>&1 &
+MEMPID=$!
+trap 'kill $MEMPID 2>/dev/null' EXIT
 # *** STREAM FROM BEFORE THE EXPERIMENT. *** `docker logs` after the fact is
 # how two tracebacks were nearly lost today.
 nohup docker logs -f --since 0 "$C" > "$D/engine-stream.log" 2>&1 &
@@ -126,4 +158,6 @@ ssh -o BatchMode=yes spark-da08 "journalctl -k --since \"-30m\"" > "$D/kernel-wo
 say "evidence in $D"
 say "Xid head=$(grep -c 'Xid' "$D/kernel-head.log")  worker=$(grep -c 'Xid' "$D/kernel-worker.log")"
 say "engine now: $(engine)"
+say "memory over the run (MemAvailable kB): min=$(awk '{for(i=1;i<=NF;i++) if ($i ~ /^MemAvailable=/) {split($i,a,"="); if (m==""||a[2]<m) m=a[2]}} END{print (m==""?"ABSENT":m)}' "$D/meminfo.log")  SwapFree min=$(awk '{for(i=1;i<=NF;i++) if ($i ~ /^SwapFree=/) {split($i,a,"="); if (m==""||a[2]<m) m=a[2]}} END{print (m==""?"ABSENT":m)}' "$D/meminfo.log")"
+say "meminfo samples: $(wc -l < "$D/meminfo.log")"
 echo "XID32-DONE"
