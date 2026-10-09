@@ -194,6 +194,50 @@ _FLAG_PREPEND = "free_queue_prepend_uncached"
 #     conversation's body evict every other agent's head, which is the failure
 #     being fixed.
 # Flag: pin_static_head.  Budget: head_pin_fraction (of the pool, per manager).
+# *** A BLOCK WITH A KV TRANSFER IN FLIGHT MUST NOT HAVE ITS LAST REFERENCE
+# *** DROPPED, and this overlay cannot see transfer state on its own. ***
+# The offload connector fences a store's blocks against reuse, but for
+# non-sliding-window blocks it registers that fence only at `request_finished`,
+# because *during* the request "ref_cnt protects them". That is sound until
+# something else manipulates ref_cnt on a different schedule -- and MNT-6a does
+# exactly that: `_release_one_protected_prompt_block` ends in `free_blocks`,
+# which at ref_cnt 0 returns the block to the free queue for reallocation. If
+# ours was the last reference and a copy is still reading from that block, the
+# copy reads reallocated memory. On a GPU that surfaces as an asynchronous
+# `Xid 13 / Data deaddead` at some unrelated sync point, which is what we saw
+# on 2026-10-09 (one fault, rank 0's worker dead a second later).
+#
+# *** DEPENDENCY INVERTED ON PURPOSE. *** This file is a whole-file overlay of
+# upstream that must be re-cut on every image bump, so it must carry as little
+# of ours as possible and must work standalone. It therefore offers a HOOK and
+# imports nothing: if nobody installs one, behaviour is exactly as before.
+#
+# *** AND IT FAILS OPEN, which is a trade worth stating. *** If the provider is
+# absent or raises, the release proceeds -- today's behaviour. The alternative,
+# skipping on not-knowing, would make the protection cap unenforceable the
+# moment the hook broke, and an unenforceable cap means memory pressure and
+# preemptions. So this is best-effort PROTECTION, not a safety property: it
+# narrows a real window, it does not close it.
+_pending_block_ids_fn = None
+
+
+def set_pending_block_ids_provider(fn) -> None:
+    """Install a callable returning block ids with a KV transfer in flight."""
+    global _pending_block_ids_fn
+    _pending_block_ids_fn = fn
+
+
+def _pending_block_ids():
+    """Block ids we must not drop the last reference to. Never raises."""
+    fn = _pending_block_ids_fn
+    if fn is None:
+        return None
+    try:
+        return fn() or None
+    except Exception:
+        return None
+
+
 _FLAG_PIN_HEAD = "pin_static_head"
 _HEAD_BOUNDARY_TOKEN_ID = int(os.environ.get("VLLM_HEAD_BOUNDARY_TOKEN_ID", "128803"))
 _HEAD_SCAN_LIMIT = 65536  # the head is ~12.6K tokens; never scan a 1M prompt
@@ -693,8 +737,14 @@ class SingleTypeKVCacheManager(ABC):
         if max_blocks is None:
             return
 
+        # Skip blocks with a transfer in flight -- see the note on
+        # `_pending_block_ids`. A skipped block is re-queued, so the cap is
+        # merely late rather than abandoned: the next protect retries it, by
+        # which time the transfer has almost certainly completed.
+        pending = _pending_block_ids()
         while len(self._protected_prompt_block_ids) > max_blocks:
-            if not self._release_one_protected_prompt_block():
+            if not self._release_one_protected_prompt_block(
+                    block_ids_to_skip=pending):
                 return
 
     def _release_one_protected_prompt_block(
