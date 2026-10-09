@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Reproduce Xid 32 with the fault made ATTRIBUTABLE, then stop.
+#
+# *** TWO EVENTS, BOTH ~4s AFTER A gpu_cache_epoch BUMP, ON DIFFERENT RANKS. ***
+# 2026-10-09 11:50 (worker) and 17:07 (head). Reading the code exhausted what
+# it could say: the load path's slot lifecycle is correct (slots return only in
+# get_finished, after the inner copy completes), check_bounds precedes every
+# submit, the load path chunks symmetrically with the store, and upstream
+# records NO block ids for a load job -- so there is nothing our pending-blocks
+# guard could have read, which is also why it never fired.
+#
+# So: reproduce it with CUDA_LAUNCH_BLOCKING=1, which reports the failure AT
+# the offending launch instead of at the next synchronisation. That is the
+# difference between a traceback naming the kernel and one naming whatever ran
+# next -- and both previous tracebacks named the latter.
+#
+# *** CAPTURES AND STOPS. Never recovers. *** Two crashes today were diagnosed
+# only because somebody happened to be watching; recovery is a separate,
+# explicit command, run after a human has looked.
+set -u
+API=http://127.0.0.1:8888
+STATS=http://127.0.0.1:9199
+C=deepseek-v4-flash-0731-dspark-1m-nvfp4-kv-2x-dgx-spark-vllm-dspark-1
+TOK="${1:-60000}"
+NONCE="${2:-xid32-$(date +%s)}"
+D=~/kvdiag/xid32-$(date +%H%M)
+
+say(){ echo "  $*"; }
+engine(){ curl -s -o /dev/null -w '%{http_code}' -m 120 -X POST "$API/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"claude-opus-5","max_tokens":1,"messages":[{"role":"user","content":"x"}]}'; }
+knob(){ curl -s -m 30 -X POST "$API/kv/knob" -H 'Content-Type: application/json' \
+  -d "{\"name\":\"$1\",\"value\":\"$2\"}" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print('  knob %-26s ok=%s ranks=%s' % ('$1', d.get('ok'),
+      [(r.get('rank'), r.get('now')) for r in d.get('ranks',[])]))"; }
+inflight(){ curl -s -m 10 "$API/metrics" | awk '/^vllm:num_requests_running\{/{r=$2} /^vllm:num_requests_waiting\{/{w=$2} END{printf "%d", (r+w)}'; }
+jobs_open(){ curl -s -m 10 "$STATS/kv" | python3 -c "
+import json,sys
+d=(json.load(sys.stdin).get('disk') or {}).get('sched') or {}
+print(-1 if not d.get('available') else int(d.get('jobs_open') or 0)+int(d.get('blocks_with_pending_jobs') or 0))" 2>/dev/null || echo -1; }
+
+mkdir -p "$D"
+# *** STREAM FROM BEFORE THE EXPERIMENT. *** `docker logs` after the fact is
+# how two tracebacks were nearly lost today.
+nohup docker logs -f --since 0 "$C" > "$D/engine-stream.log" 2>&1 &
+STREAM_PID=$!
+trap 'kill $STREAM_PID 2>/dev/null' EXIT
+
+say "=== engine must be SERVING (a real completion, not /v1/models) ==="
+[ "$(engine)" = "200" ] || { say "not serving -- refusing"; exit 1; }
+say "completion 200"
+
+say "=== is CUDA_LAUNCH_BLOCKING actually in the container? ==="
+blk=$(docker exec -i "$C" sh -c 'echo "${CUDA_LAUNCH_BLOCKING:-unset}"' 2>/dev/null)
+say "CUDA_LAUNCH_BLOCKING=$blk"
+[ "$blk" = "1" ] || say "*** WARNING: not set -- the fault will be ASYNCHRONOUS and this run buys little"
+
+say "=== arm the tier AND the drop gate (deliberately, this is the dangerous lever) ==="
+knob disk_store_paused 0
+knob disk_restore 1
+knob disk_budget_gb 1000
+knob gpu_cache_drop_allowed 1
+
+say "=== store a prefix of ~$TOK tokens, nonce=$NONCE ==="
+python3 - "$TOK" "$NONCE" > /tmp/xid32-body.json <<'PY'
+import json, sys
+n, nonce = int(sys.argv[1]), sys.argv[2]
+filler = ("alpha beta gamma delta epsilon zeta eta theta " * ((n // 8) + 2))[:n * 4]
+json.dump({"model": "claude-opus-5", "max_tokens": 8,
+           "messages": [{"role": "user", "content": nonce + " " + filler}]},
+          sys.stdout)
+PY
+t0=$(date +%s)
+code=$(curl -s -o /dev/null -w '%{http_code}' -m 1800 -X POST "$API/v1/chat/completions" \
+  -H 'Content-Type: application/json' --data @/tmp/xid32-body.json)
+say "cold pass: http=$code in $(( $(date +%s) - t0 ))s"
+
+say "=== drain requests AND transfers before the drop ==="
+for i in $(seq 1 60); do n=$(inflight); [ "$n" = "0" ] && break; sleep 5; done
+for i in $(seq 1 60); do j=$(jobs_open); [ "$j" = "0" ] && break; sleep 5; done
+say "inflight=$(inflight)  jobs_open=$(jobs_open)"
+
+say "=== THE DROP (the lever that crashed it twice) ==="
+curl -s -m 30 -X POST "$API/kv/drop_gpu_cache" -o /dev/null
+curl -s -o /dev/null -m 300 -X POST "$API/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"claude-opus-5","max_tokens":2,"messages":[{"role":"user","content":"drop step"}]}'
+sleep 3
+docker logs --since 1m "$C" 2>&1 | grep -E "prefix cache drop|drop REFUSED" | tail -1 | cut -c1-200 | sed 's/^/    /'
+
+say "=== THE RESTORE -- same prefix, GPU cache empty, disk index intact ==="
+t1=$(date +%s)
+code=$(curl -s -o /dev/null -w '%{http_code}' -m 1800 -X POST "$API/v1/chat/completions" \
+  -H 'Content-Type: application/json' --data @/tmp/xid32-body.json)
+say "restore pass: http=$code in $(( $(date +%s) - t1 ))s"
+
+say "=== CAPTURE, whatever happened. Nothing is restarted. ==="
+sleep 3
+docker logs --since 30m "$C" > "$D/engine.log" 2>&1
+ssh -o BatchMode=yes spark-da08 "docker logs --since 30m $C" > "$D/worker.log" 2>&1
+journalctl -k --since "-30m" > "$D/kernel-head.log" 2>&1
+ssh -o BatchMode=yes spark-da08 "journalctl -k --since \"-30m\"" > "$D/kernel-worker.log" 2>&1
+say "evidence in $D"
+say "Xid head=$(grep -c 'Xid' "$D/kernel-head.log")  worker=$(grep -c 'Xid' "$D/kernel-worker.log")"
+say "engine now: $(engine)"
+echo "XID32-DONE"
