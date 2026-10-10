@@ -57,7 +57,16 @@ for r in (d.get('ranks') or []):
     for h in (r.get('handlers') or []):
         o.append('r%s.%s files=%s' % (r.get('rank'), h.get('cls','?')[4:9], h.get('files')))
 print(' | '.join(o))" 2>/dev/null || echo unreadable; }
-xid(){ journalctl -k -b 2>/dev/null | grep -c "Xid (" || echo 0; }
+# *** BOTH NODES. *** This sampled the HEAD only and reported "27 -> 27, no new
+# faults" on a run the WORKER faulted during: Xid 32 on spark-da08 at 17:36:03,
+# one second before the engine error. A head-only probe on a two-node engine is
+# a false negative by construction, and it nearly published "the restore
+# completed with no faults" about a run that killed a worker. Same family as the
+# wrong-port probe that rendered "not found" as zero ranks.
+xid(){ local h w
+  h=$(journalctl -k -b 2>/dev/null | grep -c "Xid (" || echo 0)
+  w=$(ssh -o BatchMode=yes spark-da08 "journalctl -k -b 2>/dev/null | grep -c 'Xid ('" 2>/dev/null || echo -1)
+  echo "head=$h worker=$w"; }
 
 # ONE body file, written once and reused across the restart. The prompt must be
 # byte-identical in both phases or the block hashes differ and the test is about
