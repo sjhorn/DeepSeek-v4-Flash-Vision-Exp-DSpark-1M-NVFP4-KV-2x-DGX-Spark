@@ -37,24 +37,38 @@ idx(){ curl -s -m 15 "$STATS/kv" | python3 -c "
 import json,sys
 d=(json.load(sys.stdin).get('disk') or {}); i=d.get('index') or d
 print('present=%s lookup=%s hit=%s' % (i.get('present'), i.get('lookup'), i.get('hit')))" 2>/dev/null || echo unreadable; }
-ledger(){ curl -s -m 20 "$API/kv/workers" > "$1" 2>/dev/null
-  python3 -c "
+# *** THE LEDGER SHAPE, READ OFF A REAL REPLY RATHER THAN GUESSED. ***
+# My first parser looked for a "groups" map with bid_min/bid_max and printed
+# NOTHING, twice, on a run whose whole purpose was to capture index ranges --
+# an instrument failing silently on the one measurement it existed for. The
+# real shape is:
+#   {"transfers": N, "block_id_range": [lo,hi], "slot_range": [lo,hi],
+#    "recent": [[kind, group, n, bid_min, bid_max, slot_min, slot_max], ...]}
+# or, before anything moves, {"transfers": 0, "why": "...ABSENCE, not 0"}.
+ledger(){ python3 -c "
 import json,sys
 try: d=json.load(open(sys.argv[1]))
-except Exception: print('  ledger: unreadable'); raise SystemExit
-if 'ranks' not in d: print('  ledger: no ranks key'); raise SystemExit
+except Exception as e: print('  ledger: unreadable (%s)' % e); raise SystemExit
+if 'ranks' not in d: print('  ledger: no ranks key -- wrong port, or the engine is gone'); raise SystemExit
 for r in (d.get('ranks') or []):
     for h in (r.get('handlers') or []):
-        l=h.get('ledger')
-        if isinstance(l,dict):
-            for g,v in sorted((l.get('groups') or l).items() if isinstance(l.get('groups') or l, dict) else []):
-                if isinstance(v,dict):
-                    print('  r%s %s g%s n=%s bid=[%s,%s] slot=[%s,%s]' % (
-                      r.get('rank'), h.get('cls'), g, v.get('n'),
-                      v.get('bid_min'), v.get('bid_max'), v.get('slot_min'), v.get('slot_max')))" "$1"
+        l = h.get('ledger')
+        if not isinstance(l, dict): continue
+        if not l.get('transfers'):
+            print('  r%s %-16s %s' % (r.get('rank'), h.get('cls'), l.get('why') or 'no transfers'))
+            continue
+        print('  r%s %-16s transfers=%s bid=%s slot=%s' % (
+            r.get('rank'), h.get('cls'), l.get('transfers'),
+            l.get('block_id_range'), l.get('slot_range')))
+        for e in (l.get('recent') or [])[-4:]:
+            print('        last: %s' % (e,))
+" "$1"
 }
+
 xid(){ journalctl -k -b 2>/dev/null | grep "Xid (" | sed -E 's/^(\w+ [0-9]+ [0-9:]+).*Xid \(PCI:[^)]*\): ([0-9]+).*/\1|\2/' | sort -u | wc -l; }
 xidw(){ ssh -o BatchMode=yes spark-da08 "journalctl -k -b 2>/dev/null | grep 'Xid (' | sed -E 's/^(\w+ [0-9]+ [0-9:]+).*Xid \(PCI:[^)]*\): ([0-9]+).*/\1|\2/' | sort -u | wc -l"; }
+
+fetchw(){ curl -s -m 20 "$API/kv/workers" > "$1" 2>/dev/null || true; }
 
 ( docker logs -f --since 1s "$C" > "$D/engine-stream.log" 2>&1 ) & LOG=$!
 ( ssh -o BatchMode=yes spark-da08 "docker logs -f --since 1s $C" > "$D/worker-stream.log" 2>&1 ) & WLOG=$!
@@ -68,7 +82,7 @@ knob disk_restore 1
 H0=$(xid); W0=$(xidw)
 say "Xid events before: head=$H0 worker=$W0"
 say "index before: $(idx)"
-say "ledger before:"; ledger "$D/workers-before.json"
+say "ledger before:"; fetchw "$D/workers-before.json"; ledger "$D/workers-before.json"
 
 python3 - "$TOK" "$WARM" > /tmp/load13.json <<'PY'
 import json, sys
@@ -78,6 +92,19 @@ json.dump({"model": "claude-opus-5", "max_tokens": 8,
            "messages": [{"role": "user", "content": nonce + " " + filler}]}, sys.stdout)
 PY
 
+# *** POLL THE LEDGER DURING THE RESTORE. *** It lives in the WORKER's memory,
+# so the fault that destroys the worker destroys the very record kept to survive
+# an asynchronous fault -- workers-after.json came back 99 bytes of error last
+# run. Keep the newest successful snapshot on the HOST instead, so the last
+# index ranges before the fault are readable afterwards.
+( while true; do
+    curl -s -m 5 "$API/kv/workers" > "$D/workers-poll.tmp" 2>/dev/null \
+      && python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if 'ranks' in d else 1)" "$D/workers-poll.tmp" 2>/dev/null \
+      && mv "$D/workers-poll.tmp" "$D/workers-last.json"
+    sleep 1
+  done ) & POLL=$!
+trap 'kill $LOG $WLOG $POLL 2>/dev/null' EXIT
+
 say "=== THE RESTORE, as the only large request in this process ==="
 t=$(date +%s)
 body=$(curl -s -m 1800 -X POST "$API/v1/chat/completions" -H 'Content-Type: application/json' --data @/tmp/load13.json)
@@ -86,7 +113,11 @@ import json,sys
 try: print(json.load(sys.stdin).get('usage',{}).get('prompt_tokens','NONE -- the request FAILED'))
 except Exception: print('NONE -- no JSON, the request FAILED')" 2>/dev/null)"
 say "index after: $(idx)"
-say "ledger after:"; ledger "$D/workers-after.json"
+kill $POLL 2>/dev/null
+say "ledger after (live, may be unreadable if the engine died):"
+fetchw "$D/workers-after.json"; ledger "$D/workers-after.json"
+say "ledger LAST GOOD POLL before the fault (this is the one that matters):"
+ledger "$D/workers-last.json"
 H=$(xid); W=$(xidw); A=$(alive)
 say "Xid head=$H(+$((H-H0)))  worker=$W(+$((W-W0)))  engine=$A"
 sleep 3
