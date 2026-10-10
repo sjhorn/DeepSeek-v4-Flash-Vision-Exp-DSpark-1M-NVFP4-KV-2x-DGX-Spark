@@ -26,7 +26,15 @@ API=http://127.0.0.1:8888
 STATS=http://127.0.0.1:9199
 C=deepseek-v4-flash-0731-dspark-1m-nvfp4-kv-2x-dgx-spark-vllm-dspark-1
 PHASE="${1:-build}"
-CHARS="${2:-900000}"          # ~700K tokens at this generator's ratio
+# *** MEASURED RATIO, because I guessed it and was wrong by 4x. *** 900,110
+# characters of this filler produced 176,097 prompt_tokens -- 5.11 chars per
+# token, not the ~1.3 I had assumed when the comment here claimed "900000 =
+# ~700K tokens". So the first "scale test" was a 176K test wearing a 700K
+# label, and it would have been reported as the prize scale if the script had
+# not printed prompt_tokens beside the wall. Print the quantity you are
+# claiming, not the one you asked for.
+#   700K tokens ~= 3,580,000 chars   (max_model_len is 1,048,576 tokens)
+CHARS="${2:-3580000}"
 NONCE="${3:-kvscale-fixed-nonce}"
 BODY=/tmp/kvscale-body.json
 D=~/kvdiag/scale-$PHASE-$(date +%H%M); mkdir -p "$D"
