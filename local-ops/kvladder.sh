@@ -26,6 +26,7 @@ API=http://127.0.0.1:8888
 C=deepseek-v4-flash-0731-dspark-1m-nvfp4-kv-2x-dgx-spark-vllm-dspark-1
 SRC=/tmp/kvscale-body.json          # the 700K body whose prefix is on disk
 REPEATS="${REPEATS:-3}"
+STORE_PAUSED="${STORE_PAUSED:-1}"   # 1 = arm A (read alone), 0 = arm B
 RUNGS="${RUNGS:-50000 100000 200000 400000 700000}"
 CHARS_PER_TOKEN=5.111               # measured: 3,580,013 chars = 700,444 tokens
 D=~/kvdiag/ladder-$(date +%m%d-%H%M); mkdir -p "$D"
@@ -80,11 +81,15 @@ trap 'kill $LOG 2>/dev/null' EXIT
 sleep 2
 [ "$(alive)" = "200" ] || { say "engine not serving"; exit 1; }
 
-knob disk_store_paused 1      # ARM A: the read path, alone
+# ARM A (default) is the read path alone. ARM B is STORE_PAUSED=0, which adds
+# the one variable the 12:25:47 fault had and the clean runs did not -- a store
+# round in flight. One knob, one variable, run separately.
+knob disk_store_paused "$STORE_PAUSED"
 knob disk_restore 1
 knob gpu_cache_drop_allowed 1
 X0=$(xid)
-say "=== ARM A: restore alone, store PAUSED. Xid before: $X0 ==="
+ARM=$([ "$STORE_PAUSED" = "1" ] && echo "A (restore alone, store PAUSED)" || echo "B (restore WITH the store live)")
+say "=== ARM $ARM. Xid before: $X0 ==="
 say "    rungs: $RUNGS   repeats: $REPEATS"
 printf "    %-9s %-4s %-7s %-9s %-11s %s\n" rung try wall tokens off-disk Xid
 FAULTED=0
@@ -131,7 +136,7 @@ done
 knob gpu_cache_drop_allowed 0
 say ""
 if [ "$FAULTED" = "0" ]; then
-  say "=== ARM A CLEAN at every rung, $REPEATS repeats each, up to $(echo $RUNGS | awk '{print $NF}') tokens ==="
+  say "=== ARM $ARM CLEAN at every rung, $REPEATS repeats each, up to $(echo $RUNGS | awk '{print $NF}') tokens ==="
   say "    So scale ALONE does not trigger it on the read path, which makes the"
   say "    store round that was in flight at the 12:25:47 fault the next variable"
   say "    -- that is arm B, and it is one knob away."
