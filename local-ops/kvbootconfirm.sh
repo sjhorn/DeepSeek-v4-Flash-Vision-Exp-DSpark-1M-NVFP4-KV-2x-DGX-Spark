@@ -89,25 +89,69 @@ done
 BOOT=$(( $(date +%s) - t0 ))
 [ "$OK" = "1" ] || { say "*** ENGINE DID NOT COME UP in ${BOOT}s"; tail -20 "$D/start.log" | sed 's/^/    /'; exit 3; }
 say "    ENGINE UP after ${BOOT}s (one-token completion 200 -- the real probe)"
+# The index load is SERIAL, BLOCKING and the dominant new term in the boot now
+# that restore is on: it stats every key in the manifest before serving. 769,758
+# keys cost 256s of the 491s boot, measured 2026-10-11, with the core in
+# `D (disk sleep)` on `__wait_on_buffer` throughout -- busy, not hung. It is not
+# laziness that could be skipped: the framework ASSERTS on a failed load
+# (worker.py:273), so a missing file would kill the engine rather than miss, and
+# this walk is what makes that impossible.
+IDX=$(grep -oE "[0-9]{2}:[0-9]{2}:[0-9]{2}.*manifest .*keys restored" "$D/engine-stream.log" 2>/dev/null | head -1)
+[ -n "$IDX" ] && say "    index load finished at: ${IDX%% *} (serial, blocking, stats every key)"
 say "    $(upt)"
 
 say "=== 1-3. did the FILE configure it, and is the safety bound at its code default? ==="
 curl -s -m 30 "$API/kv/workers" > "$D/workers.json"
-python3 -I - "$D/workers.json" <<'PY'
+curl -s -m 30 "$API/kv" > "$D/kv.json"
+# *** WHERE "file" IS EXPECTED, AND WHERE "override" IS THE PROOF. ***
+# My first version asserted source=file on the WORKERS and flagged a perfectly
+# configured cluster as MISMATCH six times. The workers report `override`
+# because the engine core PUSHES every file-set knob to them at boot -- the
+# boot log says so in as many words: "EngineCore.collective_rpc wrapped, so a
+# knob set over HTTP reaches the scheduler as well as both workers".
+#
+# So the core is where `file` must appear, and on a worker `override` at boot is
+# EVIDENCE OF THE FAN-OUT rather than a leftover: a restart destroys both
+# processes, so an in-memory override cannot survive one. An override present on
+# a freshly booted worker can only have been written by the push.
+#
+# What must still be checked is that the worker's VALUE equals the core's --
+# that is the stale-worker-file trap, where the two nodes disagreed for four
+# days and only the fan-out hid it.
+python3 -I - "$D/kv.json" "$D/workers.json" <<'PY'
 import json, sys
-d = json.load(open(sys.argv[1]))
-want = {"disk_restore": (True, "file"), "disk_store_paused": (False, "file"),
-        "disk_budget_gb": (1000.0, "file"), "load_inflight_max": (1, "default"),
-        "load_ops_max": (2048, "default")}
+core = (json.load(open(sys.argv[1])).get("knobs") or {})
+ranks = (json.load(open(sys.argv[2])).get("ranks") or [])
 bad = []
-for r in (d.get("ranks") or []):
-    k, s = r.get("knobs") or {}, r.get("sources") or {}
-    for n, (wv, ws) in want.items():
-        gv, gs = k.get(n), s.get(n)
-        flag = "" if (gv == wv and gs == ws) else "   <-- WRONG"
-        if flag: bad.append("r%s %s=%s(%s) want %s(%s)" % (r.get("rank"), n, gv, gs, wv, ws))
-        print("    r%s %-20s %-8s source=%-9s%s" % (r.get("rank"), n, gv, gs, flag))
-print("    VERDICT: " + ("ALL FROM THE EXPECTED PLACE" if not bad else "MISMATCH -- " + "; ".join(bad)))
+# the configuration knobs: value AND source, read off the engine core
+for n, wv in (("disk_restore", True), ("disk_store_paused", False),
+              ("disk_budget_gb", 1000.0)):
+    e = core.get(n) or {}
+    v, src = e.get("value"), e.get("source")
+    ok = (v == wv and src == "file")
+    print("    core %-20s %-8s source=%-9s%s" % (n, v, src, "" if ok else "   <-- WRONG"))
+    if not ok: bad.append("core %s=%s(%s) want %s(file)" % (n, v, src, wv))
+# the safety bounds: these must come from the CODE default, not a file or an
+# override -- load_inflight_max=4 was the default that killed the engine
+for n, wv in (("load_inflight_max", 1), ("load_ops_max", 2048)):
+    e = core.get(n) or {}
+    v, src = e.get("value"), e.get("source")
+    ok = (v == wv and src == "default")
+    print("    core %-20s %-8s source=%-9s%s" % (n, v, src, "" if ok else "   <-- WRONG"))
+    if not ok: bad.append("core %s=%s(%s) want %s(default)" % (n, v, src, wv))
+# and every rank must AGREE WITH THE CORE on value
+for r in ranks:
+    k = r.get("knobs") or {}
+    for n in ("disk_restore", "disk_store_paused", "disk_budget_gb",
+              "load_inflight_max", "load_ops_max"):
+        want = (core.get(n) or {}).get("value")
+        got = k.get(n)
+        if got != want:
+            bad.append("rank %s %s=%s but core says %s" % (r.get("rank"), n, got, want))
+print("    ranks agree with the core: %s" % ("yes" if not any(
+    b.startswith("rank") for b in bad) else "NO"))
+print("    VERDICT: " + ("CONFIGURED BY THE FILE, SAFETY BOUNDS FROM CODE"
+                         if not bad else "MISMATCH -- " + "; ".join(bad)))
 PY
 
 say "=== 4. did the manifest survive the restart? ==="
@@ -138,7 +182,14 @@ X1=$(xid)
 say "    Xid: $X0 -> $X1   $([ "$X0" = "$X1" ] && echo 'NO NEW FAULTS' || echo '*** NEW FAULT ***')"
 say "    preemptions: $(m num_preemptions_total)"
 say "    engine: $(alive)"
-say "    error/refusal lines in the boot log: $(grep -ciE "traceback|died unexpectedly|unspecified launch failure|AssertionError|refus" "$D/engine-stream.log" 2>/dev/null || echo 0)"
+# *** THIS GREP MATCHED ITS OWN LOG'S PROSE. *** `-i ... refus` hit the line
+# "disk LOAD handler installed -- disk_restore=True (the handler exists either
+# way; lookup() refuses while it is off)", so a perfectly clean boot reported
+# "1 error/refusal line". A check that fails for the wrong reason is as
+# unhelpful as one that passes for it. Case-SENSITIVE failure signatures only,
+# and a real refusal is shouted (REFUSED) or a counter name (refused_), never a
+# verb in a sentence.
+say "    real failure signatures in the boot log: $(grep -cE "Traceback|died unexpectedly|unspecified launch failure|AssertionError|EngineDeadError|REFUSED|refused_[a-z]+ [1-9]" "$D/engine-stream.log" 2>/dev/null || echo 0)"
 curl -s -m 30 "$API/kv/workers" | python3 -I -c "
 import json,sys
 d=json.load(sys.stdin)
