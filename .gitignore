@@ -34,6 +34,18 @@ vllm-cache/
 !/local-ops/**/requirements.txt
 !/local-ops/dspark-dropcaches
 
+# ONE named .json, and it is CONFIGURATION rather than a capture.
+# flags.reference.json is the committed source for /var/tmp/vllm-kv-flags/flags.json,
+# the boot-time default for every policy knob -- which is per node, unversioned,
+# and was found diverged between the two nodes (head 12 keys Oct 10, worker 9
+# keys Oct 7, disagreeing about disk_restore). Versioning it is the whole point.
+#
+# Deliberately a SINGLE PATH and not `*.json`: the deny-by-default above exists
+# because captures are json/jsonl and contain full conversations, so a pattern
+# here would fail open exactly the way the comment above warns about. A second
+# config file gets a second line.
+!/local-ops/flags.reference.json
+
 # ...except these, which are DATA that happens to be .py/.md:
 #   baseline-20260914/  unpatched vLLM source + a rollback snapshot. patches/
 #                       pristine/ is the tracked source of truth for that now,

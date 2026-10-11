@@ -1,0 +1,16 @@
+{
+  "_comment": "THE INTENDED BOOT CONFIGURATION FOR BOTH NODES. The live file is /var/tmp/vllm-kv-flags/flags.json, which is per-node and NOT in git -- so this committed copy is the reviewable, recoverable source and local-ops/flags-apply.sh is what installs it. Keep them in step.",
+  "_why_not_in_flags_py_defaults": "flags.py's DEFAULTS carry a deliberate invariant, stated in its own header: an EMPTY FLAGS FILE BEHAVES EXACTLY AS TODAY, every new mechanism off, so a deploy is a no-op until somebody writes a flag. Turning the disk tier on there would break that. The code defaults stay inert; this file is the configuration. The one exception is load_inflight_max, which is a SAFETY bound and belongs in the code default precisely because inert-by-default is correct for it.",
+  "kvmgr_enabled": 1,
+  "kvmgr_control_plane": 1,
+  "kvmgr_stats_port": 9199,
+  "protect_alloc": "by_need",
+  "protected_fraction": 0.75,
+  "evict_order": "lru_tail_first",
+  "offload_allow_hybrid": 1,
+  "offload_odirect": 0,
+  "offload_verify": 0,
+  "disk_restore": 1,
+  "disk_store_paused": 0,
+  "disk_budget_gb": 1000
+}
