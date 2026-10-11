@@ -118,14 +118,29 @@ curl -s -m 30 "$API/kv" > "$D/kv.json"
 # What must still be checked is that the worker's VALUE equals the core's --
 # that is the stale-worker-file trap, where the two nodes disagreed for four
 # days and only the fan-out hid it.
-python3 -I - "$D/kv.json" "$D/workers.json" <<'PY'
+python3 -I - "$D/kv.json" "$D/workers.json" "$REPO/local-ops/flags.reference.json" <<'PY'
 import json, sys
 core = (json.load(open(sys.argv[1])).get("knobs") or {})
 ranks = (json.load(open(sys.argv[2])).get("ranks") or [])
 bad = []
-# the configuration knobs: value AND source, read off the engine core
-for n, wv in (("disk_restore", True), ("disk_store_paused", False),
-              ("disk_budget_gb", 1000.0)):
+# *** THE EXPECTED VALUES COME FROM THE COMMITTED REFERENCE, NOT A SECOND COPY
+# *** OF IT. *** They were hardcoded (disk_store_paused False, budget 1000.0)
+# and went stale the first time the reference changed -- the store was paused
+# for the ~1.1s stream stall, and this check would then have failed a correctly
+# configured cluster. Exactly the "one number, two homes" defect that let
+# flags.DEFAULTS and diskio.py's fallback drift apart hours earlier, so it gets
+# the same fix: read the declaration.
+_decl = {k: v for k, v in json.load(open(sys.argv[3])).items()
+         if not k.startswith("_")}
+_cfg = []
+for n in ("disk_restore", "disk_store_paused", "disk_budget_gb"):
+    if n not in _decl:
+        continue
+    wv = _decl[n]
+    # JSON 1/0 are the booleans these two validate to; the budget is a float
+    wv = float(wv) if n == "disk_budget_gb" else bool(wv)
+    _cfg.append((n, wv))
+for n, wv in _cfg:
     e = core.get(n) or {}
     v, src = e.get("value"), e.get("source")
     ok = (v == wv and src == "file")
@@ -133,7 +148,9 @@ for n, wv in (("disk_restore", True), ("disk_store_paused", False),
     if not ok: bad.append("core %s=%s(%s) want %s(file)" % (n, v, src, wv))
 # the safety bounds: these must come from the CODE default, not a file or an
 # override -- load_inflight_max=4 was the default that killed the engine
-for n, wv in (("load_inflight_max", 1), ("load_ops_max", 2048)):
+for n, wv in (("load_inflight_max", 1), ("load_ops_max", 2048),
+              ("store_inflight_max", 1), ("store_batch_max", 32),
+              ("store_ops_max", 2048)):
     e = core.get(n) or {}
     v, src = e.get("value"), e.get("source")
     ok = (v == wv and src == "default")
@@ -143,7 +160,8 @@ for n, wv in (("load_inflight_max", 1), ("load_ops_max", 2048)):
 for r in ranks:
     k = r.get("knobs") or {}
     for n in ("disk_restore", "disk_store_paused", "disk_budget_gb",
-              "load_inflight_max", "load_ops_max"):
+              "load_inflight_max", "load_ops_max", "store_inflight_max",
+              "store_batch_max", "store_ops_max"):
         want = (core.get(n) or {}).get("value")
         got = k.get(n)
         if got != want:
