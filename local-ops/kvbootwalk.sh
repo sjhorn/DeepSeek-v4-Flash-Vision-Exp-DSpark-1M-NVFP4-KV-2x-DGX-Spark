@@ -34,6 +34,38 @@
 # constraint. See docs/engine-kv.md.
 set -u
 
+# *** THIS SCRIPT IS DESTRUCTIVE FROM ITS FIRST PHASE: IT `down`s BOTH NODES.
+# *** TWO GUARDS, BECAUSE IT COST TWO BOOTS ON 2026-10-12 IN TEN MINUTES. ***
+#
+# Both failures were the same mistake wearing different clothes: the file was
+# made to execute from a machine that is not the head, while a boot was in
+# flight. Once by `source`-ing it to get at one pure function for a self-test,
+# once by "just running it" to check a guard. Each time the `down` reached the
+# WORKER, removed rank 1, and left rank 0 hanging in NCCL init forever -- the
+# documented head-only-restart trap, arriving from a test instead of a human.
+#
+# GUARD 1: it must be the HEAD. This is the one that would have stopped both.
+# A tool whose first act is to tear down a two-node engine has no business
+# running anywhere it cannot also start one.
+HEAD_HOST=${KVBW_HEAD:-spark-45ea}
+if [ "$(hostname -s 2>/dev/null)" != "$HEAD_HOST" ]; then
+  echo "kvbootwalk: REFUSING -- this runs ON THE HEAD ($HEAD_HOST) and this is" >&2
+  echo "  $(hostname -s 2>/dev/null || echo unknown). Its FIRST phase is a" >&2
+  echo "  \`down\` on BOTH nodes; from anywhere else that removes rank 1 and" >&2
+  echo "  hangs rank 0 in NCCL init forever. ssh to the head and run it there." >&2
+  exit 1
+fi
+
+# GUARD 2: it must not be SOURCED. `(return 0)` succeeds only in a sourced
+# file, and the subshell is what keeps the `return` from quietly ending the
+# file -- which the first version did, refusing SILENTLY, so the caller saw
+# nothing and believed the function had loaded.
+if (return 0 2>/dev/null); then
+  echo "kvbootwalk: REFUSING -- do not source this, it \`down\`s both nodes." >&2
+  echo "  To test a function from here, EXTRACT its definition and eval that." >&2
+  return 1
+fi
+
 C=${C:-deepseek-v4-flash-0731-dspark-1m-nvfp4-kv-2x-dgx-spark-vllm-dspark-1}
 WORKER=${KVBW_WORKER:-spark-da08}
 OUT=${KVBW_OUT:-$HOME/kvdiag/bootwalk-$(date -u +%m%d-%H%M)}
@@ -45,13 +77,31 @@ mkdir -p "$OUT"
 say(){ echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$OUT/run.log"; }
 
 mem(){ # one sampler line per node, the swap figure first because it is the gate
-  local h=$1 f=$2
+  # *** `local h=$1 f=$2` WAS THE BUG, AND `set -u` MADE IT TOTAL. *** There is
+  # no second argument, so every call failed with "$2: unbound variable" -- the
+  # baselines printed EMPTY and mem.log stayed at zero lines, which is this
+  # repo's own "an unreadable log must report absence, not write an empty file"
+  # trap arriving as a shell slip. The boot itself was unaffected (the boundary
+  # and walk timing do not call this), and the swap half of the first run was
+  # recovered by an external sampler, because NEVER EDIT A SHELL SCRIPT THAT IS
+  # EXECUTING: bash reads lazily by byte offset and an insert ends the run at a
+  # premature EOF with exit 0.
+  local h=$1
   if [ "$h" = "local" ]; then
     awk '/^SwapFree|^MemAvailable|^Cached:/{printf "%s=%s ", $1, $2}' /proc/meminfo
   else
     ssh -o BatchMode=yes "$h" "awk '/^SwapFree|^MemAvailable|^Cached:/{printf \"%s=%s \", \$1, \$2}' /proc/meminfo" 2>/dev/null
   fi
   echo
+}
+
+memck(){ # mem() or a named absence -- a blank reading must not read as 0
+  local v
+  v=$(mem "$1")
+  case "$v" in
+    *SwapFree*) printf '%s' "$v" ;;
+    *) printf 'UNREADABLE (no SwapFree line from %s)' "$1" ;;
+  esac
 }
 
 sample(){ # a timestamped memory line for both nodes, appended
@@ -61,8 +111,8 @@ sample(){ # a timestamped memory line for both nodes, appended
 
 say "=== kvbootwalk, reclaim mode: $RECLAIM, output $OUT"
 say "baselines BEFORE the down:"
-say "  head: $(mem local)"
-say "  wrkr: $(mem "$WORKER")"
+say "  head: $(memck local)"
+say "  wrkr: $(memck "$WORKER")"
 for h in local "$WORKER"; do
   if [ "$h" = "local" ]; then n=$(journalctl -k 2>/dev/null | grep -c Xid)
   else n=$(ssh -o BatchMode=yes "$h" 'journalctl -k 2>/dev/null | grep -c Xid'); fi
@@ -84,11 +134,15 @@ CF="-f docker-compose.dspark.yml"
 say "down on both nodes ($CF)"
 docker compose $CF down >>"$OUT/down.log" 2>&1 || true
 ssh -o BatchMode=yes "$WORKER" "cd ~/DeepSeek*; docker compose $CF down" >>"$OUT/down.log" 2>&1 || true
+# *** `wc -l` PADS ITS OUTPUT, so `[ "$n" = "0" ]` compared against a string
+# *** of spaces and a zero, and the guard refused on a perfectly clean down.
+# `$(( ))` forces the arithmetic comparison this always wanted.
 for h in local "$WORKER"; do
   if [ "$h" = "local" ]; then n=$(docker ps -q | wc -l)
   else n=$(ssh -o BatchMode=yes "$h" 'docker ps -q | wc -l'); fi
+  n=$(( n + 0 ))
   say "  containers still up on $h: $n"
-  [ "$n" = "0" ] || { say "REFUSING: a container survived the down on $h. A"
+  [ "$n" -eq 0 ] || { say "REFUSING: a container survived the down on $h. A"
     say "  head-only restart hangs rank 0 in NCCL init forever."; exit 1; }
 done
 
@@ -133,8 +187,8 @@ while :; do
       wait "$RPID" 2>/dev/null || true
       RPID=""
     fi
-    say "  head at boundary: $(mem local)"
-    say "  wrkr at boundary: $(mem "$WORKER")"
+    say "  head at boundary: $(memck local)"
+    say "  wrkr at boundary: $(memck "$WORKER")"
   fi
   if printf '%s' "$LOG" | grep -qF "$WALKDONE"; then
     WALK_AT=$(date +%s)
@@ -156,6 +210,6 @@ say "=== totals"
 say "  down -> walk done : $((WALK_AT-T0))s"
 [ -n "$BOUND_AT" ] && say "  the WALK itself   : $((WALK_AT-BOUND_AT))s   <-- the number this run exists for"
 say "  down -> API ready : $((T1-T0))s"
-say "  head after: $(mem local)"
-say "  wrkr after: $(mem "$WORKER")"
+say "  head after: $(memck local)"
+say "  wrkr after: $(memck "$WORKER")"
 say "evidence in $OUT"
