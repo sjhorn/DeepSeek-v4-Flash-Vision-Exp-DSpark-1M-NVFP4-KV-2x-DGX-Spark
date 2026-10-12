@@ -22,6 +22,7 @@ set -u
 API=http://127.0.0.1:8888      # knobs, /kv/workers -- NOT state
 STATS=http://127.0.0.1:9199    # the engine core's own listener -- state reads
 DIR=${KVJ_DIR:-$HOME/kvoffload/dspark-kv-v1}
+C=${C:-deepseek-v4-flash-0731-dspark-1m-nvfp4-kv-2x-dgx-spark-vllm-dspark-1}
 SNAP="$DIR/presence.json"
 WORKER=${KVJ_WORKER:-spark-da08}
 
@@ -50,8 +51,29 @@ files(){
     printf '  %-28s %12s records (lines)\n' "journal" "$(wc -l < "$SNAP.journal")"
   fi
   if [ -e "$SNAP.compacting" ]; then
-    printf '  %-28s %12s records (lines)  <-- A ROTATION IS IN FLIGHT\n' \
-      "compacting" "$(wc -l < "$SNAP.compacting")"
+    # *** IN FLIGHT AND LEFT OVER LOOK IDENTICAL, AND THEY WANT OPPOSITE
+    # *** READINGS. *** A `.compacting` is created by the rotate and removed
+    # only by a SUCCESSFUL snapshot write, so one surviving a kill sits there
+    # across the whole next boot -- and calling that "a rotation is in flight"
+    # is a reading of the wrong thing, which is the trap this repo keeps
+    # paying for. The discriminator is a TIMESTAMP COMPARISON against the
+    # container's StartedAt, the same instrument that settled whether a
+    # bind-mounted patch was live: a `.compacting` OLDER than the process that
+    # would have to be writing it cannot be being written.
+    local cl ct st
+    cl=$(wc -l < "$SNAP.compacting")
+    ct=$(stat -c %Y "$SNAP.compacting")
+    st=$(docker inspect -f '{{.State.StartedAt}}' "$C" 2>/dev/null)
+    if [ -n "$st" ] && st=$(date -d "$st" +%s 2>/dev/null) && [ "$ct" -lt "$st" ]; then
+      printf '  %-28s %12s records (lines)  <-- LEFT OVER from a process that died\n' \
+        "compacting" "$cl"
+      printf '  %-28s %12s\n' "" "mid-rotate: it predates this container, so nothing is writing it."
+      printf '  %-28s %12s\n' "" "It is replayed at load and dropped by the next successful snapshot,"
+      printf '  %-28s %12s\n' "" "whose rotate will DEFER once (journal_rotate_deferred) and lose nothing."
+    else
+      printf '  %-28s %12s records (lines)  <-- a rotation may be IN FLIGHT\n' \
+        "compacting" "$cl"
+    fi
   fi
 }
 
