@@ -31,6 +31,7 @@ API=http://127.0.0.1:8888
 STATS=http://127.0.0.1:9199
 SNAP=${SNAP:-$HOME/kvoffload/dspark-kv-v1/presence.json}
 W=${W:-spark-da08}
+C=${C:-deepseek-v4-flash-0731-dspark-1m-nvfp4-kv-2x-dgx-spark-vllm-dspark-1}
 N=${1:-5}            # how many files to delete on the worker
 DEADLINE=${2:-180}
 
@@ -82,6 +83,17 @@ for item in keys:
         break
 print("\n".join(out))
 PY
+# *** AND THE DELETE RUNS INSIDE THE CONTAINER, BECAUSE THE FILES ARE
+# *** ROOT-OWNED AND THERE IS NO NON-INTERACTIVE sudo. *** The container writes
+# them through the bind mount as root, so `rm` as shorn is Permission denied --
+# which the second version of this tool hit, and which its own
+# "the delete removed nothing" guard caught rather than reporting a pass.
+# kvsweep.sh deletes inside the container for exactly this reason.
+#
+# `docker exec` needs **-i**: without it stdin is silently DISCARDED, so a
+# heredoc program runs EMPTY and exits 0. That cost a delete of 229,467 files
+# that removed none while printing "done".
+sed "s|^$HOSTROOT|/kvoffload|" /tmp/kvselfheal-victims.txt > /tmp/kvselfheal-victims-container.txt
 VN=$(wc -l < /tmp/kvselfheal-victims.txt)
 [ "$VN" = "$N" ] || die "wanted $N victims, built $VN"
 say "victims (worker side only):"
@@ -93,6 +105,7 @@ sed 's/^/      /' /tmp/kvselfheal-victims.txt
 # program, exited 0, and deleted none of 229,467 files while printing "done".
 # So: assert the files are there, then assert the count FELL.
 scp -q /tmp/kvselfheal-victims.txt "$W":/tmp/kvselfheal-victims.txt || die "scp failed"
+scp -q /tmp/kvselfheal-victims-container.txt "$W":/tmp/kvselfheal-victims-container.txt || die "scp failed"
 BEFORE=$(ssh -o BatchMode=yes "$W" 'n=0; while read -r f; do [ -f "$f" ] && n=$((n+1)); done < /tmp/kvselfheal-victims.txt; echo $n')
 say "present on the worker before: $BEFORE/$N"
 [ "$BEFORE" = "$N" ] || die "only $BEFORE of $N victim files exist on the worker -- the index claims keys whose files are already gone there, which is the bug this tool tests for rather than a setup it can use"
@@ -108,7 +121,7 @@ print("%s %s %s"%(d.get("present"), d.get("verify_forgot") or 0,
                   (d.get("verify") or {}).get("verified")))')
 say "before: present/forgot/verified = $V0"
 
-ssh -o BatchMode=yes "$W" 'while read -r f; do rm -f "$f"; done < /tmp/kvselfheal-victims.txt'
+ssh -o BatchMode=yes "$W" "docker exec -i $C sh -c 'while read -r f; do rm -f \"\$f\"; done' < /tmp/kvselfheal-victims-container.txt"
 AFTER=$(ssh -o BatchMode=yes "$W" 'n=0; while read -r f; do [ -f "$f" ] && n=$((n+1)); done < /tmp/kvselfheal-victims.txt; echo $n')
 say "present on the worker after the delete: $AFTER/$N (0 is the point)"
 [ "$AFTER" = "0" ] || die "the delete removed nothing -- an exit status is not evidence that work happened"
