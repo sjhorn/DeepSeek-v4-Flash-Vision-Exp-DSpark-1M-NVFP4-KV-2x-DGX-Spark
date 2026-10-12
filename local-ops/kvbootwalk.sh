@@ -105,8 +105,11 @@ memck(){ # mem() or a named absence -- a blank reading must not read as 0
 }
 
 sample(){ # a timestamped memory line for both nodes, appended
-  printf '%s head: %s' "$(date -u +%H:%M:%S)" "$(mem local)" >> "$OUT/mem.log"
-  printf '%s wrkr: %s' "$(date -u +%H:%M:%S)" "$(mem "$WORKER")" >> "$OUT/mem.log"
+  # The `\n` is not cosmetic: without it every sample lands on ONE line, so
+  # `wc -l` reports 0 and the file reads as empty while holding the whole run.
+  # `mem()` ends without a newline by design, so the newline belongs here.
+  printf '%s head: %s\n' "$(date -u +%H:%M:%S)" "$(mem local)" >> "$OUT/mem.log"
+  printf '%s wrkr: %s\n' "$(date -u +%H:%M:%S)" "$(mem "$WORKER")" >> "$OUT/mem.log"
 }
 
 say "=== kvbootwalk, reclaim mode: $RECLAIM, output $OUT"

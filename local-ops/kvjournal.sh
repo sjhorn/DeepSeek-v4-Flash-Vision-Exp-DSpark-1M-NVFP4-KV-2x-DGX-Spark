@@ -19,6 +19,26 @@
 # meaning "wrong process". /kv/workers is the exception and lives on :8888.
 set -u
 
+# *** IT SAYS "RUNS ON THE HEAD" AND NOTHING ENFORCED IT. *** Run from the
+# laptop on 2026-10-12 it printed `date: invalid argument 's' for -I` (BSD date
+# has no -I), then "snapshot ABSENT" for a snapshot that is present on the head,
+# then "gap: CANNOT TELL". The refusal was CORRECT -- it declined to report a
+# zero it could not measure, which is the whole design -- but a reader skimming
+# three lines of absence could easily take them for findings about the system
+# rather than about where the tool was pointed. That is this project's most
+# expensive recurring mistake in its cheapest form, so it is named rather than
+# left to the docstring. Read-only either way: this refuses, it does not act.
+HEAD_HOST=${KVJ_HEAD:-spark-45ea}
+if [ "$(hostname -s 2>/dev/null)" != "$HEAD_HOST" ]; then
+  echo "kvjournal: REFUSING -- this reads the HEAD's own filesystem and the" >&2
+  echo "  engine core's listener on 127.0.0.1:9199, and this is" >&2
+  echo "  $(hostname -s 2>/dev/null || echo unknown), not $HEAD_HOST. From here" >&2
+  echo "  every path and port is absent, which would print as a snapshot that" >&2
+  echo "  does not exist and a gap that cannot be told. ssh to the head." >&2
+  echo "  (Override with KVJ_HEAD if the head is ever renamed.)" >&2
+  exit 1
+fi
+
 API=http://127.0.0.1:8888      # knobs, /kv/workers -- NOT state
 STATS=http://127.0.0.1:9199    # the engine core's own listener -- state reads
 DIR=${KVJ_DIR:-$HOME/kvoffload/dspark-kv-v1}
