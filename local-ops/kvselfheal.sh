@@ -63,11 +63,35 @@ WBASE="${BASE_HOST%_r0}_r1"
 say "engine's view: $BASE"
 say "worker tree (host path): $WBASE"
 
-# -- pick victims from the FRONT of the snapshot --------------------------
-python3 -I - "$SNAP" "$WBASE" "$N" > /tmp/kvselfheal-victims.txt <<'PY'
+# -- pick victims JUST AHEAD OF THE LIVE SWEEP CURSOR ---------------------
+# *** "THE FRONT OF THE SNAPSHOT" WAS WRONG, AND THE FIRST RUN PROVED IT. ***
+# The background sweep walks `_present` in insertion order and had been running
+# since boot, so by the time the files were deleted the cursor was already at
+# ~56,000 -- past them -- and it will not return until it wraps all 922,992
+# keys, which is hours. The test reported FAIL with the engine alive and nothing
+# forgotten, which is exactly what its own failure text said to suspect.
+#
+# `_present`'s insertion order IS presence.json's order for every
+# manifest-loaded key, and the cursor is published, so the victims are taken at
+# `cursor + MARGIN`: far enough ahead that the delete lands before the sweep
+# arrives, close enough that it arrives within the deadline.
+CURSOR=$(curl -s -m 20 "$STATS/kv" | python3 -I -c '
+import json, sys
+d = json.load(sys.stdin).get("disk") or {}
+v = d.get("verify") or {}
+c = v.get("cursor")
+print("UNREADABLE" if c is None else c)')
+case "$CURSOR" in ""|*[!0-9]*) die "could not read verify.cursor off :9199 ($CURSOR) -- without it this tool cannot know where the sweep is, and guessing is what made the first run report a false FAIL";; esac
+MARGIN=${MARGIN:-200}
+say "sweep cursor at $CURSOR; taking victims at +$MARGIN"
+python3 -I - "$SNAP" "$WBASE" "$N" "$CURSOR" "$MARGIN" > /tmp/kvselfheal-victims.txt <<'PY'
 import json, sys
 snap, wbase, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
-keys = json.load(open(snap))["keys"][: n * 4]
+start = int(sys.argv[4]) + int(sys.argv[5])
+allkeys = json.load(open(snap))["keys"]
+if start + n * 4 > len(allkeys):
+    start = 0          # wrapped: the snapshot's front is ahead of the cursor
+keys = allkeys[start: start + n * 4]
 out = []
 for item in keys:
     hexkey = item if isinstance(item, str) else item[0]
