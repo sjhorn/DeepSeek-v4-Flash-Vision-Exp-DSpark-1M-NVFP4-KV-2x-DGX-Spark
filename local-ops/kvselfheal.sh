@@ -49,8 +49,18 @@ fp = d.get("fingerprint") or {}
 b = fp.get("base_path")
 print(b if b else "")')
 [ -n "$BASE" ] || die "could not read the fingerprint base_path off :9199 -- is this the head, and is the engine up?"
-WBASE="${BASE%_r0}_r1"
-say "worker tree: $WBASE"
+# *** TRANSLATE THE CONTAINER PATH TO THE HOST PATH, and this tool's first
+# *** version did not -- which is the whole reason it refuses rather than
+# *** reporting. *** The engine publishes `/kvoffload/...` because that is the
+# bind mount INSIDE the container; the host sees `$HOME/kvoffload/...`. Deleting
+# from the container path on the host removes nothing, and a tool that then
+# printed a pass would have "proved" the self-heal against five files it never
+# touched. kvsweep.sh translates the same pair for the same reason.
+HOSTROOT=${HOSTROOT:-$HOME/kvoffload}
+BASE_HOST="${BASE/#\/kvoffload/$HOSTROOT}"
+WBASE="${BASE_HOST%_r0}_r1"
+say "engine's view: $BASE"
+say "worker tree (host path): $WBASE"
 
 # -- pick victims from the FRONT of the snapshot --------------------------
 python3 -I - "$SNAP" "$WBASE" "$N" > /tmp/kvselfheal-victims.txt <<'PY'
