@@ -75,3 +75,38 @@ b02f18a8bf5b3fe016a5756d4868dfe0ba98c8d89bb128ecc6b55d28621cf66f    2149  vllm/v
 # offloading_connector.py is flattened to one filename rather than nesting
 # distributed/kv_transfer/kv_connector/v1/ for a single reference file.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Added 2026-10-12 for the cross-rank presence verification (Phase 2 of the
+# disk-tier bulletproofing). REFERENCE ONLY -- not derived into any mount.
+#
+# *** IT IS HERE BECAUSE A DESIGN RESTS ON IT, and reasoning about it from
+# memory would have been reasoning about the wrong thing. *** The plan needed
+# three answers that only this file can give, and two of them changed the
+# design:
+#
+#   1. A BLOCKING collective_rpc WITH AN execute_model FUTURE OUTSTANDING IS
+#      SAFE, because `FutureWrapper.result()` drains the futures_queue oldest
+#      first (`while not self.done(): self.futures_queue.pop()
+#      ._wait_for_response()`). Ordering is preserved by construction. The cost
+#      is latency, not corruption: our blocking call forces the outstanding
+#      model step to be awaited inline. `--async-scheduling` is on, so there
+#      normally IS one.
+#   2. `timeout=None` MEANS FOREVER. `deadline = None if timeout is None`, and
+#      that becomes `mq.dequeue(timeout=None)`. A rank whose disk is in D-state
+#      -- exactly what the verification defends against -- would block the
+#      engine core with NO collective pending, so no NCCL watchdog can end it:
+#      a hung engine with no traceback, worse than the crash it replaces.
+#   3. A TimeoutError DOES NOT SET `is_failed`, and is therefore
+#      UNRECOVERABLE. `_wait_for_response` catches it onto the future, which is
+#      then popped -- leaving the worker's eventual response UNCLAIMED on an
+#      ordered response MessageQueue. Every later dequeue is off by one, so the
+#      engine receives a verification dict where it expects a
+#      ModelRunnerOutput. Swallowing it is silent corruption; the only honest
+#      response is to make it fatal with our own line naming the cause.
+#
+# Also pinned here: collective_rpc asserts `rpc_broadcast_mq is not None`
+# ("should not be called on follower node") -- fine, the engine core is on the
+# head -- and it returns a LIST of per-rank results when `unique_reply_rank` is
+# omitted, which is what a cross-rank check needs.
+2cca69138a2fdfe0c08cc3b3767964f63ae24e3f5bfbb2ac6826fa70c295458f    1037  vllm/v1/executor/multiproc_executor.py
