@@ -1,3 +1,20 @@
-# Allow the DSpark start script to reclaim page cache during model load.
-# Scoped to exactly one command; no other privileges granted.
-shorn ALL=(root) NOPASSWD: /usr/sbin/sysctl -qw vm.drop_caches=3, /usr/sbin/sysctl -w vm.drop_caches=3
+# Allow the DSpark start script to reclaim cache during model load and the
+# manifest walk. Scoped to an EXPLICIT LIST of commands; no other privileges.
+#
+# *** THE VALUE IS PART OF THE AUTHORISATION, WHICH IS WHY THIS FILE HAD TO
+# *** CHANGE FOR KVBW_DROP TO MEAN ANYTHING. The rule used to name `=3` only,
+# so `kvbootwalk.sh`'s `sudo -n sysctl -qw vm.drop_caches=1` probe needed a
+# password, `sudo -n` refused it, and the run started with NO reclaim at all
+# while the script had faithfully selected value 1 -- the value declared in two
+# homes, which is how they disagree. It warned loudly and said the run measured
+# a different thing, which is the only reason the boot was not misread.
+#
+# 1 frees the page cache, 2 frees dentries and inodes, 3 does both. All three
+# are listed because the walk experiment needs 1 while the start script's own
+# loop has always used 3.
+#
+# ENUMERATED RATHER THAN GLOBBED, deliberately: `sysctl -w vm.drop_caches=*`
+# looks like the same rule and is not -- sudo's wildcards do not stop at the
+# `=`, so a pattern that loose is a passwordless root write to arbitrary kernel
+# tunables. Three literal values grant exactly what is needed.
+shorn ALL=(root) NOPASSWD: /usr/sbin/sysctl -qw vm.drop_caches=1, /usr/sbin/sysctl -w vm.drop_caches=1, /usr/sbin/sysctl -qw vm.drop_caches=2, /usr/sbin/sysctl -w vm.drop_caches=2, /usr/sbin/sysctl -qw vm.drop_caches=3, /usr/sbin/sysctl -w vm.drop_caches=3
