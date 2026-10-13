@@ -102,7 +102,7 @@ say "=== PHASE: $PHASE ==="
 say "manifest this boot: $(docker logs "$C" 2>&1 | grep -oE 'presence.json -- [0-9]+ keys restored, [0-9]+ pruned' | tail -1)"
 say "index before:  $(idx)"
 say "handlers:      $(hb)"
-H0=$(m external_prefix_cache_hits_total); B0=$(m DSPARK_DISK_to_GPU); X0=$(xid)
+H0=$(m external_prefix_cache_hits_total); B0=$(m "^vllm:kv_offload_total_bytes_total[{].*DSPARK_DISK_to_GPU"); X0=$(xid)
 say "hits before=$H0  disk->gpu before=$B0  Xid lines=$X0"
 
 t=$(date +%s)
@@ -112,12 +112,15 @@ TOK=$(echo "$resp" | python3 -c "
 import json,sys
 try: print(json.load(sys.stdin).get('usage',{}).get('prompt_tokens','FAILED'))
 except Exception: print('FAILED')" 2>/dev/null)
-H1=$(m external_prefix_cache_hits_total); B1=$(m DSPARK_DISK_to_GPU)
+H1=$(m external_prefix_cache_hits_total); B1=$(m "^vllm:kv_offload_total_bytes_total[{].*DSPARK_DISK_to_GPU")
 say ""
 say "  wall            = ${WALL}s"
 say "  prompt_tokens   = $TOK"
 say "  external hits   : $H0 -> $H1"
-say "  DSPARK_DISK_to_GPU: $B0 -> $B1"
+# *** THE _total SERIES, ANCHORED. *** `m DSPARK_DISK_to_GPU` kept the LAST
+# line carrying the label, which is `..._bytes_created` -- a Unix timestamp
+# that reads as a plausible 1.79 GB, and was published as the 700K read figure.
+say "  DSPARK_DISK_to_GPU bytes: $B0 -> $B1  (kv_offload_total_bytes_total)"
 say "  index after     : $(idx)"
 say "  handlers after  : $(hb)"
 say "  preemptions     : $(m num_preemptions_total)   (non-zero is the revert signal)"
