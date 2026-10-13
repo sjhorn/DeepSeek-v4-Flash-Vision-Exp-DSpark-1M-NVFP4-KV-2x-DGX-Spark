@@ -216,5 +216,12 @@ for r in (d.get('ranks') or []):
         print('    r%s %-16s files=%-7s sat=%-6s errors=%s' % (r.get('rank'), h.get('cls'),
               h.get('files'), h.get('saturations'), h.get('errors')))
 "
+# *** RE-ARM THE CAPTURE THIS TOOL DESTROYED. *** Its first phase `down`s both
+# nodes, which kills all four `docker logs -f` streams. See kvstream.sh's
+# all-start comment for why this cannot be left to memory.
+say "re-arming the capture streams (the down killed all four)"
+bash "$(dirname "${BASH_SOURCE[0]}")/kvstream.sh" all-start 2>&1 | sed 's/^/  /' \
+  || say "WARNING: capture NOT fully armed -- a fault on this boot will lose its traceback"
+
 say "evidence: $D"
 echo "KVBOOTCONFIRM-DONE boot=${BOOT}s wall=${W}s http=$code xid=$X0->$X1 restored=$REST"

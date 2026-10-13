@@ -233,4 +233,14 @@ say "  down -> walk done : $((WALK_AT-T0))s"
 say "  down -> API ready : $((T1-T0))s"
 say "  head after: $(memck local)"
 say "  wrkr after: $(memck "$WORKER")"
+# *** RE-ARM THE CAPTURE WE DESTROYED. *** The `down` in this script's first
+# phase kills all four `docker logs -f` streams, and leaving the re-arm to
+# human memory has failed on every restart it was tried on -- including this
+# run, where the streams sat dead from the teardown until somebody noticed,
+# with both of the previous two first-post-boot restores having faulted. The
+# tool that spends the boot is the tool that owes the capture.
+say "re-arming the capture streams (the down killed all four)"
+bash "$(dirname "${BASH_SOURCE[0]}")/kvstream.sh" all-start 2>&1 | sed 's/^/  /' \
+  || say "WARNING: capture NOT fully armed -- a fault on this boot will lose its traceback"
+
 say "evidence in $OUT"

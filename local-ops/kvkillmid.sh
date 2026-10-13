@@ -75,3 +75,15 @@ while :; do
   }
   sleep 0.02
 done
+
+# *** THE CAPTURE IS NOW DEAD AND THIS TOOL CANNOT FIX IT. *** The SIGKILL took
+# both containers, so all four `docker logs -f` streams are gone -- and unlike
+# the restart tools, recovery here is a SEPARATE, EXPLICIT command by design
+# (the whole point is a frozen tree to predict from). So there is no container
+# to attach a stream to and arming one here would fail or, worse, appear to
+# succeed. Naming the command is the honest version.
+echo
+echo "kvkillmid: THE CAPTURE DIED WITH THE CONTAINERS. After you recover with"
+echo "           ./start-deepseek-v4-flash-dspark.sh, re-arm all four streams:"
+echo "               bash local-ops/kvstream.sh all-start"
+echo "           and gate on it -- all-check exits non-zero if any is missing."

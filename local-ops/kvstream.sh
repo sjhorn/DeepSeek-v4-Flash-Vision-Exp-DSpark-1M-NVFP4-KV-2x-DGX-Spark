@@ -61,6 +61,68 @@ mkdir -p "$OUT"
 
 running() { pgrep -f "[k]vtap-${STREAM}" >/dev/null 2>&1; }
 
+# *** THE CLUSTER-WIDE FORMS, AND WHY THEY EXIST AT ALL. ***
+#
+# This script has always been correct: `running()` has the `-f` that an
+# `exec -a` tag needs, the bracket pattern cannot match itself, and `status`
+# prints the FILE beside the process because two earlier versions lied by
+# reporting only one. None of that stopped the capture being dead through
+# three restarts, and the reason is ERGONOMIC rather than a defect here:
+# asking the right question properly cost FOUR ssh invocations with the right
+# env var set each time, while a wrong one-liner -- `pgrep -af kvtap-` -- looks
+# like a single command. So the wrong instinct was cheaper than the right tool,
+# and it won repeatedly, including once by the author of the rule against it
+# (that ad-hoc pattern matched its OWN command line and reported two streams
+# where none were armed).
+#
+# `all-start` and `all-check` make the correct question the cheap one: both
+# streams on both nodes in one call. **`all-check` EXITS NON-ZERO** when any of
+# the four is down, so a caller can gate on it instead of reading prose -- a
+# gate that prints its verdict instead of exiting on it is not a gate.
+WORKER=${KVSTREAM_WORKER:-spark-da08}
+REPO=${KVSTREAM_REPO:-$HOME/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark}
+
+# One node, both streams. `local` runs here; anything else goes over ssh.
+_both_on() {
+  local host="$1" verb="$2"
+  if [ "$host" = local ]; then
+    for s in faults producer; do
+      echo "  [$(hostname -s) $s]"
+      STREAM="$s" bash "$0" "$verb" 2>&1 | sed 's/^/  /'
+    done
+  else
+    for s in faults producer; do
+      echo "  [$host $s]"
+      ssh -o BatchMode=yes "$host" \
+        "cd '$REPO' && STREAM=$s bash local-ops/kvstream.sh $verb" 2>&1 | sed 's/^/  /'
+    done
+  fi
+}
+
+# Is EACH stream armed on one node? Answers per stream, never as a total --
+# break-verification caught the total version passing with one stream dead,
+# because each stream contributes TWO matches (the `bash -c` wrapper and the
+# `exec -a`'d `docker logs`), so "4 processes" and "2 streams, one of them
+# doubled" are indistinguishable from a count alone. A guard that cannot fail
+# reads as coverage.
+#
+# Prints one line per stream: "<stream> <n>", with n = -1 for UNREADABLE.
+# Arithmetic, and NOT `pgrep -c || echo 0`: `pgrep -c` exits 1 on an empty
+# count, so that idiom yields "0\n0" and the empty case -- the one being tested
+# for -- can never compare equal to 0.
+_armed_on() {
+  local host="$1" s n
+  for s in faults producer; do
+    if [ "$host" = local ]; then
+      n=$(pgrep -f "[k]vtap-$s" 2>/dev/null | wc -l)
+    else
+      n=$(ssh -o BatchMode=yes "$host" "pgrep -f '[k]vtap-$s' 2>/dev/null | wc -l" 2>/dev/null)
+    fi
+    case "$n" in ''|*[!0-9[:space:]]*) echo "$s -1" ;; *) echo "$s $(( n + 0 ))" ;; esac
+  done
+}
+
+
 case "${1:-start}" in
 start)
   if running; then
@@ -80,11 +142,41 @@ start)
   ;;
 status) running && echo "  streaming" || echo "  NOT streaming" ;;
 stop)   pkill -f "[k]vtap-${STREAM}" && echo "  stopped" || echo "  was not running" ;;
-*)      echo "usage: STREAM=producer|faults $0 start|status|stop" >&2; exit 2;;
+all-start)
+  # *** CALL THIS AT THE END OF ANYTHING THAT RESTARTS THE ENGINE. *** The
+  # capture dies with the container, so the tool that spends the boot is the
+  # tool that must restore it; leaving it to memory has failed every time.
+  echo "=== arming all four streams (both nodes)"
+  _both_on local  start
+  _both_on "$WORKER" start
+  exec bash "$0" all-check
+  ;;
+all-check)
+  echo "=== capture state, both nodes (each of faults+producer must be armed)"
+  T=0
+  for h in local "$WORKER"; do
+    label=$([ "$h" = local ] && hostname -s || echo "$h")
+    while read -r st n; do
+      if [ "$n" -lt 0 ]; then
+        echo "  $label $st: UNREADABLE -- not zero, and not a pass"; T=1
+      elif [ "$n" -ge 1 ]; then
+        echo "  $label $st: armed ($n proc)"
+      else
+        echo "  $label $st: *** NOT ARMED ***"; T=1
+      fi
+    done <<< "$(_armed_on "$h")"
+  done
+  [ "$T" -eq 0 ] && echo "CAPTURE ARMED: all four streams" \
+                 || echo "*** CAPTURE INCOMPLETE -- evidence will be lost ***"
+  exit $T
+  ;;
+*)      echo "usage: STREAM=producer|faults $0 start|status|stop   |   $0 all-start|all-check" >&2; exit 2;;
 esac
 
 # The EFFECT, beside the process state. Reporting only one of them is how both
 # earlier versions of this script managed to lie.
+case "${1:-start}" in all-start|all-check) exit 0 ;; esac
+
 if [ -f "$LOG" ]; then
   echo "  file: $LOG  $(wc -c < "$LOG") bytes, $(wc -l < "$LOG") lines"
   tail -2 "$LOG" | cut -c1-150 | sed 's/^/    /'
