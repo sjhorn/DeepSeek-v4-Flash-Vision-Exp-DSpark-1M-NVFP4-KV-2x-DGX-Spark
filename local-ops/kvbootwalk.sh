@@ -73,6 +73,24 @@ BOUNDARY='init engine (profile, create kv cache, warmup model) took'
 WALKDONE='keys restored'
 RECLAIM=${KVBW_RECLAIM:-boundary}   # boundary | off | always
 
+# *** THE VALUE IS THE WHOLE EXPERIMENT, which is why it is a knob now. ***
+# 1 frees the PAGE CACHE, 2 frees DENTRIES AND INODES, 3 does both. The first
+# run of this script used 3, matching the start script's own loop, and measured
+# the walk at 182.1s against 394.4s -- 212s bought, and PAID FOR in 4.38 GB of
+# the head's swap headroom, which does not come back. The arithmetic that
+# explains it: 923,119 files x ~1 KB of dentry+inode is ~0.95 GB, and it FITS
+# inside the 2.02 GB `Cached` measured at the boundary -- so the structure the
+# walk depends on is small, survives the 400 GB weight read, and the walk
+# builds it itself. Dropping it every 2 seconds was destroying what the walk
+# had just read. So the configuration this argues for is DROP=1: keep
+# reclaiming page cache (the swap protection, which is what the start script's
+# loop is FOR) and stop dropping the dentries the walk lives on.
+DROP=${KVBW_DROP:-3}                # 1 page cache | 2 dentries+inodes | 3 both
+case "$DROP" in 1|2|3) ;; *)
+  echo "kvbootwalk: REFUSING -- KVBW_DROP must be 1, 2 or 3 (got '$DROP')." >&2
+  exit 1 ;;
+esac
+
 mkdir -p "$OUT"
 say(){ echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$OUT/run.log"; }
 
@@ -152,15 +170,15 @@ done
 # --- our own reclaim loop, if asked for ---------------------------------
 RPID=""
 if [ "$RECLAIM" != "off" ]; then
-  if sudo -n sysctl -qw vm.drop_caches=3 2>/dev/null; then
+  if sudo -n sysctl -qw vm.drop_caches=$DROP 2>/dev/null; then
     (
       while :; do
-        sync; sudo -n sysctl -qw vm.drop_caches=3 2>/dev/null || true
-        ssh -o BatchMode=yes "$WORKER" "sync; sudo -n sysctl -qw vm.drop_caches=3" >/dev/null 2>&1 || true
+        sync; sudo -n sysctl -qw vm.drop_caches=$DROP 2>/dev/null || true
+        ssh -o BatchMode=yes "$WORKER" "sync; sudo -n sysctl -qw vm.drop_caches=${DROP}" >/dev/null 2>&1 || true
         sleep 2
       done
     ) & RPID=$!
-    say "our reclaim loop started, pid $RPID (stops at: $RECLAIM)"
+    say "our reclaim loop started, pid $RPID (drop_caches=$DROP, stops at: $RECLAIM)"
   else
     say "WARNING: no passwordless sudo for drop_caches -- reclaim NOT running, so"
     say "         this run measures a DIFFERENT thing from the baseline boots."
