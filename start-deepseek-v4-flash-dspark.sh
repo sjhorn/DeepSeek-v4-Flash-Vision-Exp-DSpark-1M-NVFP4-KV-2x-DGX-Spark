@@ -177,7 +177,7 @@ if compgen -G "$SCRIPT_DIR/patches/anthropic_*.py" >/dev/null; then
   if [ -d "$SCRIPT_DIR/packages/vllm-kvmgr/src/kvmgr" ]; then
     ssh "$WORKER_HOST" "mkdir -p ${REMOTE_WORKER_DIR}/packages/vllm-kvmgr/src ${REMOTE_WORKER_DIR}/packages/vllm-kvmgr/deploy"
     scp -r "$SCRIPT_DIR/packages/vllm-kvmgr/src/kvmgr" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/packages/vllm-kvmgr/src/"
-    scp -r "$SCRIPT_DIR"/packages/vllm-kvmgr/deploy/kvmgr-*.dist-info "${WORKER_HOST}:${REMOTE_WORKER_DIR}/packages/vllm-kvmgr/deploy/"
+    scp -r "$SCRIPT_DIR"/packages/vllm-kvmgr/deploy/*.dist-info "${WORKER_HOST}:${REMOTE_WORKER_DIR}/packages/vllm-kvmgr/deploy/"
   fi
 fi
 if [ "$COMPOSE_VISION" = "1" ]; then
