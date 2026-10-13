@@ -159,6 +159,15 @@ the dated narrative are in the proxy repo (`~/dev/python/vllm-proxy`): `docs/kv/
 `docs/kv/engine-rules.md` there. **Nothing here is a reason to restart without the per-restart
 confirmation above.**
 
+**The package's home is its own repo, `~/dev/python/vllm-kvmgr`** (since 2026-10-13, full history
+carried over, releases are tags: `v0.1.0` the pre-package layout, `v0.2.0` the standalone package).
+`packages/vllm-kvmgr/` here is a **squashed `git subtree` copy** of one tag, kept as a real copy
+because the nodes are deployed by pushing this repo and the compose bind-mounts it. **Do not edit
+the copy.** Change the package there, run its tests, tag, then from this root:
+`git subtree pull --prefix=packages/vllm-kvmgr ~/dev/python/vllm-kvmgr <tag> --squash`, then
+deploy as usual. Its `--with-dspark-patches` test mode needs
+`KVMGR_DSPARK_REPO=<this checkout>` when run from there.
+
 **State, 2026-10-13:** store and restore **on by default** from committed
 `local-ops/flags.reference.json`; 700K restores in 11s across a restart (598s cold, **54x**); a
 conversational prefix comes back at 98.7%; the presence journal survives SIGKILL including

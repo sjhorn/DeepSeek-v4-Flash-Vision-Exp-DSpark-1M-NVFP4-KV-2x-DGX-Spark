@@ -47,7 +47,7 @@ way. Classes are taken from each script's source (what it executes), not from it
 | `kvdropguard.sh` | **ACTUATOR** | proves the drop guard fires under a real overlap |
 | `kvstallcheck.sh`, `kvnumpy.sh` | **ACTUATOR** | negative control for the stall deadline; makes the numpy producer name itself |
 
-The package's own offline tests are in `packages/vllm-kvmgr/tests/` (`run-all.sh`, both modes).
+The package's own offline tests are in `packages/vllm-kvmgr/tests/` (`run-all.sh`, both modes). The package itself lives in `~/dev/python/vllm-kvmgr`; the copy here is a squashed subtree, not to be edited.
 
 ## Prefix-cache and prompt tooling
 
