@@ -1,7 +1,8 @@
-# local-ops — local-only operational tooling (untracked, gitignored)
+# local-ops — local-only operational tooling
 
 Lives in the repo so it survives reboots and `/tmp` wipes, and so head/worker copies stay in
-step with the Mac. Ignored via `/local-ops/` in `.gitignore` — never commit it upstream.
+step with the Mac. Scripts are tracked on `local/main`; their output is not (`.gitignore` denies
+everything here and allows `*.py`, `*.sh`, `*.md` back). Never push it upstream.
 
 | File | Purpose |
 |---|---|
@@ -11,9 +12,42 @@ step with the Mac. Ignored via `/local-ops/` in `.gitignore` — never commit it
 | `sweep.sh` | Config sweep: `./sweep.sh 12:default 12:72 6:default 4:default` — restarts per config and records KV tokens, concurrency, graph GiB, capture max/count, boot time, throughput to `sweep_results.tsv`. |
 | `loadtest.sh` | Light concurrent load: N short requests, samples scheduler state. `./loadtest.sh 12 600` |
 | `install-sudoers.sh` | Installs `dspark-dropcaches` to `/etc/sudoers.d/` and validates with `visudo -c`; self-removes the file if validation fails. Run with sudo on both nodes. Already done 2026-09-13; re-run after a node rebuild. |
-| `kv-offload-probe.md` | Runbook for the native disk-offload probe (`TieringOffloadingSpec` + `fs_python` tier). Prepared, not yet run. |
+| `kv-offload-probe.md` | Runbook for the native disk-offload probe (`TieringOffloadingSpec` + `fs_python` tier). **Historical**: that spec cannot capture rank 1's half on this topology; the tier that works is our own (`packages/vllm-kvmgr/`). |
 | `sweep_results.tsv` | Results of the 2026-09-13 config sweep. Read the header caveats before trusting any column. |
 
+## KV disk tier tools — read the CLASS before running anything as a check
+
+**A tool whose name reads like a check can be an actuator.** `kvbootconfirm.sh` cost a boot that
+way. Classes are taken from each script's source (what it executes), not from its name:
+
+- **READ-ONLY** — reads state, changes nothing.
+- **PROBE** — sends a small request of its own; changes no knob, file or container.
+- **ACTUATOR** — sets knobs, drops caches, deletes files, kills or restarts containers, or drives
+  heavy load. Ask before running one against the live engine.
+
+| Tool | Class | What it does |
+|---|---|---|
+| `kvjournal.sh` | READ-ONLY | journal state, the nameable-key gap, a rotation watch; leftover vs in-flight `.compacting` |
+| `kvstream.sh` | READ-ONLY on the engine | `all-start` / `all-check` arm and check the four capture streams (faults, producer × both nodes); exits non-zero naming a dead stream |
+| `flags-apply.sh` | READ-ONLY (`verify`, the default) / ACTUATOR (`apply`) | diff / install `flags.reference.json` as the boot configuration on both nodes (merges; takes effect at the next boot) |
+| `kv-flags.sh` | READ-ONLY with no args / ACTUATOR with args | read or write the flags FILE on both nodes |
+| `kvmgr-flag.sh` | READ-ONLY with no args / ACTUATOR with args | effective values; with args, writes and waits for the engine to confirm |
+| `kvwait.sh` | PROBE | waits for a restart to complete, with one-token completions |
+| `kvdeterm.sh` | PROBE | is an output divergence non-determinism or wrong KV |
+| `kvdiag.sh` | READ-ONLY for `start`/`capture`/`status`/`stop`; ACTUATOR for `arm`/`disarm`/`probe`/`soak`/`recover` | evidence collection. **`recover` restarts both nodes AND rewrites the flags file with the tier OFF** (`disk_restore=0`, `disk_store_paused=1`) — run `flags-apply.sh apply` afterwards |
+| `kvbootconfirm.sh` | **ACTUATOR — restarts both nodes** | `down` on both, start, confirm the boot config took effect |
+| `kvbootwalk.sh` | **ACTUATOR — restarts both nodes** | measures the boot walk against the start script's cache reclaim; refuses off the head |
+| `kvkillmid.sh` | **ACTUATOR — SIGKILLs both containers** | crash test mid-compaction; leaves the cluster dead by design |
+| `kvselfheal.sh` | **ACTUATOR — deletes worker files** | proves the self-heal |
+| `kvsweep.sh` | READ-ONLY (default) / **ACTUATOR (`apply`)** | finds / deletes files no index key names |
+| `kvxid.sh`, `kvxid32.sh`, `kvdroploop.sh`, `kvbisect.sh`, `kvload13.sh`, `kvladder.sh` | **ACTUATOR** | fault hunts: knobs, drops and load built to reproduce an Xid. They stop on the first fault |
+| `kvscale.sh`, `kvboth.sh`, `kvconc.sh`, `kvoverlap.sh`, `kvsmall.sh`, `kvinflight.sh` | **ACTUATOR** | restore experiments at scale (700K) with knob changes |
+| `kvrestore.sh`, `kvrecheck.sh`, `kvprefix.sh`, `kvconverge.sh`, `kvloadrounds.sh` | **ACTUATOR** | restore experiments; most drop the GPU cache, which is gated off (`gpu_cache_drop_allowed`) |
+| `kvbudget.sh`, `kvenable.sh` | **ACTUATOR** | walk the byte budget; can evict tens of thousands of files |
+| `kvdropguard.sh` | **ACTUATOR** | proves the drop guard fires under a real overlap |
+| `kvstallcheck.sh`, `kvnumpy.sh` | **ACTUATOR** | negative control for the stall deadline; makes the numpy producer name itself |
+
+The package's own offline tests are in `packages/vllm-kvmgr/tests/` (`run-all.sh`, both modes).
 
 ## Prefix-cache and prompt tooling
 

@@ -450,7 +450,7 @@ them: [`PREFIX-CACHE.md`](PREFIX-CACHE.md#concurrent-siblings)):
 
 **Not established here.** No measurement is attached to this entry because it reports a number
 rather than changing one — decode, prompt and cache behaviour are untouched. Whether the per-turn
-rows actually settle the eviction-vs-invalidation question is the open work in `MERGE.md`, and is
+rows actually settle the eviction-vs-invalidation question is the open work in `docs/history/2026-09-20-MERGE-proposal.md`, and is
 not yet done.
 
 <a id="api-15"></a>

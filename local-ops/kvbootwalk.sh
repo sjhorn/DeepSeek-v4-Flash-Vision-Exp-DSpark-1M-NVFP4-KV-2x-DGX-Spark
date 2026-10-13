@@ -31,7 +31,7 @@
 # measurement was extrapolated onto a cold boot and the boot refuted it. The
 # conservative prior is NO saving: the 400 GB weight read evicts the dentry
 # cache on its own, at which point the reclaim was never the binding
-# constraint. See docs/engine-kv.md.
+# constraint. See ~/dev/python/vllm-proxy/docs/kv/history/.
 set -u
 
 # *** THIS SCRIPT IS DESTRUCTIVE FROM ITS FIRST PHASE: IT `down`s BOTH NODES.

@@ -61,7 +61,7 @@ Since 2026-09-20 it is a real branch:
 
 ## Open proposals
 
-`MERGE.md` at the repo root is a **proposal, not a record** — unifying the prefill/prefix-cache
+`docs/history/2026-09-20-MERGE-proposal.md` (formerly `MERGE.md` at the root) is a **proposal, not a record** — unifying the prefill/prefix-cache
 observability stack across this repo, `sparkstats` and `vllm-proxy`. Nothing in it has been
 executed. It is tracked so the proposal does not evaporate; move anything that gets built into the
 doc for the thing it changes.
