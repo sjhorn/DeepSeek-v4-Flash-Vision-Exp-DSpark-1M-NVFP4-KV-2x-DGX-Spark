@@ -60,7 +60,7 @@ b02f18a8bf5b3fe016a5756d4868dfe0ba98c8d89bb128ecc6b55d28621cf66f    2149  vllm/v
 # are REFERENCE ONLY, added 2026-10-07. They are NOT derived into any mount and
 # appear in no diff under patches/generated/ -- nothing here patches them.
 #
-# They are the contract `local-ops/kvharness/test_phase0_disk.py` pins, because
+# They are the contract `packages/vllm-kvmgr/tests/test_phase0_disk.py` pins, because
 # we are writing our own OffloadingSpec: upstream's tiering offload consolidates
 # every rank's KV shard into ONE SHARED HOST memory region, which is single-host
 # TP by construction, while ours is one rank per node. Measured: every .bin on

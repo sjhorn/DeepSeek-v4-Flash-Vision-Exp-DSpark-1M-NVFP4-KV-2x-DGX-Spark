@@ -43,7 +43,7 @@ Nothing in a filename tells you this, so here is the map. It is the same set
 | `mnt10-scheduler.py` | `MNT-10` — **and carries `IMG-3` forward**, see below | `v1/core/sched/scheduler.py` |
 | `prefill_plugin/` | `PLG-14b` | *added*, not mounted over anything |
 | `PLG-KV` | — | *added* `site-packages/kvmgr/` + its `.dist-info` | `kvmgr_enabled` in the **flags file** (**off**); `kvmgr_stats_port` is **0**, i.e. binds nothing | remove the two compose mount lines | our own KV manager for **KV group 0** (full MLA, 256-token blocks), registered into `spec_manager_map` as a SUBCLASS rather than a fourth whole-file overlay. Overrides only the protected-set budget and the eviction victim, and routes both through the flags file so they move **without a restart** — which matters because a restart costs a measured 672–795 s cold prefill, and `VLLM_PROTECTED_PROMPT_BLOCKS_FRACTION` is `os.environ`-only today. **With `kvmgr_enabled` false every override calls `super()`**, so the switch is upstream's code path rather than our policy at defaults — and it is read PER CALL, because the manager class is chosen once at engine start and a class swap could never be hot. Also carries the per-group counters (hit/miss/**partial**, protect, evict by cause, victim rule) that make eviction observed rather than inferred | [`KVMGR-PHASE0-20261007.md`](KVMGR-PHASE0-20261007.md) |
-| `kvmgr_plugin/` | `PLG-KV` | *added*, not mounted over anything |
+| `packages/vllm-kvmgr/` | `PLG-KV` | *added*, not mounted over anything (moved from `patches/kvmgr_plugin/` 2026-10-13) |
 
 **The names stay as they are.** Renaming to `mnt6-…` would touch every reference in
 [`status/INCIDENTS.md`](status/INCIDENTS.md), [`status/BOOT-METRICS.md`](status/BOOT-METRICS.md),

@@ -164,8 +164,11 @@ services:
       # override calls super(), i.e. patch6 unmodified. The switch is read PER
       # CALL rather than at registration, because the manager class is chosen
       # once while the engine starts -- so a class swap could never be hot.
-      - ./patches/kvmgr_plugin/kvmgr:/opt/env/lib/python3.12/site-packages/kvmgr:ro
-      - ./patches/kvmgr_plugin/kvmgr-0.1.dist-info:/opt/env/lib/python3.12/site-packages/kvmgr-0.1.dist-info:ro
+      # The package lives in packages/vllm-kvmgr/ (src layout). The dist-info is
+      # the one `pip install` would write, generated from pyproject.toml by
+      # packages/vllm-kvmgr/deploy/gen-dist-info.py and checked by the tests.
+      - ./packages/vllm-kvmgr/src/kvmgr:/opt/env/lib/python3.12/site-packages/kvmgr:ro
+      - ./packages/vllm-kvmgr/deploy/kvmgr-0.1.dist-info:/opt/env/lib/python3.12/site-packages/kvmgr-0.1.dist-info:ro
       # Targeted DEBUG logging, off unless VLLM_LOGGING_CONFIG_PATH is set below.
       # gpu_worker.py:628 computes the two --kv-cache-memory-bytes suggestions and
       # the full memory decomposition (weights / peak activation / non-torch /

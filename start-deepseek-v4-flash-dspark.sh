@@ -166,11 +166,19 @@ if compgen -G "$SCRIPT_DIR/patches/anthropic_*.py" >/dev/null; then
   # leave the compose mounting paths that do not exist, Docker would create empty
   # directories for them in site-packages, and `import kvmgr` would then find an
   # empty package. Same belt and braces as prefill_plugin above.
-  for plg in kvmgr_plugin safetensors_e8m0_plugin; do
+  for plg in safetensors_e8m0_plugin; do
     if [ -d "$SCRIPT_DIR/patches/$plg" ]; then
       scp -r "$SCRIPT_DIR/patches/$plg" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/"
     fi
   done
+  # kvmgr moved to packages/vllm-kvmgr/ (2026-10-13). Only the two directories
+  # the compose mounts are synced -- not its tests, which are ~2 MB of vendored
+  # vLLM source the worker never reads.
+  if [ -d "$SCRIPT_DIR/packages/vllm-kvmgr/src/kvmgr" ]; then
+    ssh "$WORKER_HOST" "mkdir -p ${REMOTE_WORKER_DIR}/packages/vllm-kvmgr/src ${REMOTE_WORKER_DIR}/packages/vllm-kvmgr/deploy"
+    scp -r "$SCRIPT_DIR/packages/vllm-kvmgr/src/kvmgr" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/packages/vllm-kvmgr/src/"
+    scp -r "$SCRIPT_DIR"/packages/vllm-kvmgr/deploy/kvmgr-*.dist-info "${WORKER_HOST}:${REMOTE_WORKER_DIR}/packages/vllm-kvmgr/deploy/"
+  fi
 fi
 if [ "$COMPOSE_VISION" = "1" ]; then
   scp "$VISION_COMPOSE_FILE" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/docker-compose.vision-exp.yml"
