@@ -191,7 +191,25 @@ if [ "$kv_head" != "$kv_worker" ]; then
   echo "REFUSING: vllm-kvmgr differs between nodes (head=$kv_head worker=$kv_worker). Push the same commit to both." >&2
   exit 1
 fi
-echo "vllm-kvmgr: ${kv_head:0:12} on both nodes"
+# *** AND THE DIST-INFO THE COMPOSE NAMES MUST EXIST ON BOTH NODES. *** The
+# commit check above cannot see it: on 2026-10-14 a DSpark push carried a
+# compose naming vllm_kvmgr-0.4.3.dist-info to nodes whose kvmgr checkout had
+# only 0.4.2's. Docker creates a missing bind source as an EMPTY directory, so
+# the next boot would have started with no kvmgr entry point -- no disk tier and
+# no load_wait_compute, i.e. the Xid 32 race back -- and nothing would have
+# failed. Found by reading the nodes before a restart, not by a boot.
+kv_dist="$(grep -o 'vllm-kvmgr/deploy/vllm_kvmgr-[0-9][0-9.]*\.dist-info' "$COMPOSE_FILE" | head -1 | sed 's#.*/##')"
+if [ -z "$kv_dist" ]; then
+  echo "REFUSING: cannot find the vllm_kvmgr-*.dist-info mount in $COMPOSE_FILE" >&2
+  exit 1
+fi
+if [ ! -f "$KVMGR_HEAD_DIR/deploy/$kv_dist/entry_points.txt" ] \
+   || ! ssh "$WORKER_HOST" "test -f $REMOTE_WORKER_DIR/../vllm-kvmgr/deploy/$kv_dist/entry_points.txt" 2>/dev/null; then
+  echo "REFUSING: the compose mounts $kv_dist, but it is missing on a node (kvmgr ${kv_head:0:12})." >&2
+  echo "  Push the vllm-kvmgr commit that generated it, or the DSpark commit that names the dist-info kvmgr has." >&2
+  exit 1
+fi
+echo "vllm-kvmgr: ${kv_head:0:12} on both nodes, $kv_dist present on both"
 if [ "$COMPOSE_VISION" = "1" ]; then
   scp "$VISION_COMPOSE_FILE" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/docker-compose.vision-exp.yml"
 fi
