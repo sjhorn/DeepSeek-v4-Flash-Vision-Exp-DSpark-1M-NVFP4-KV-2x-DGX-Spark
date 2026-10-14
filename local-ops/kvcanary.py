@@ -4,6 +4,7 @@
     python3 local-ops/kvcanary.py prime            # send once (fresh compute); must echo
     python3 local-ops/kvcanary.py check            # send again; PASS needs echo AND a restore
     python3 local-ops/kvcanary.py check --evict    # first push the canary off the GPU via the kvrace pool
+    python3 local-ops/kvcanary.py locate           # the canary's group-0 keys and each rank's file (kvmgr >= 0.4.7)
     python3 local-ops/kvcanary.py --selftest       # offline, against a fake engine
 
 CLASS: PROBE for `prime` and `check` (one ~7K-token request each). `check --evict`
@@ -49,6 +50,8 @@ OUT = os.environ.get("KVCANARY_OUT", os.path.expanduser("~/kvdiag/kvcanary"))
 MODEL = os.environ.get("KVCANARY_MODEL", "claude-opus-5")
 PROMPT_SHA = "780b3d81520d730a"     # sha256[:16] of kvcanary/prompt.txt -- refuse anything else
 KVRACE_DIR = os.path.expanduser("~/kvdiag/kvrace")
+STATS = os.environ.get("KVCANARY_STATS", "http://127.0.0.1:9199")   # kvmgr_stats_port, engine core
+HOST_TIER = os.environ.get("KVCANARY_HOST_TIER", "/home/shorn/kvoffload")  # the host side of /kvoffload
 
 
 def load_prompt():
@@ -117,6 +120,7 @@ def ask(text: str, timeout=600):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             js = json.loads(r.read())
             reply = js["choices"][0]["message"].get("content") or ""
+            ask.last_id = js.get("id")
             return 200, reply, (js.get("usage") or {}).get("prompt_tokens"), time.time() - t
     except urllib.error.HTTPError as e:
         return e.code, "", None, time.time() - t
@@ -166,12 +170,65 @@ def run(mode: str, a) -> int:
         v, why = verdict(echo_ok=echo_ok, hits_delta=hd, blocks_delta=bd, prompt_tokens=pt,
                          min_hit_frac=a.min_hit_frac, status=st)
     res = {"mode": mode, "verdict": v, "why": why, "echo_ok": echo_ok, "reply": reply[:200],
+           "response_id": getattr(ask, "last_id", None),
            "prompt_tokens": pt, "seconds": round(sec, 2), "ext_hits_delta": hd, "load_blocks_delta": bd,
            "prompt_sha": PROMPT_SHA, "evicted": bool(getattr(a, "evict", False))}
     log(f"{mode.upper()} {v.upper()}: {why}")
     log(json.dumps(res))
     json.dump(res, open(os.path.join(OUT, f"{stamp}-{mode}.json"), "w"), indent=1)
     return {"pass": 0, "norestore": 3, "wrong": 4}.get(v, 2)
+
+
+# ---------------------------------------------------------------- locate (Gate B)
+def pick_request(requests: list, want_tokens: int, tol: float = 0.05):
+    """The most recent request within tol of the canary's prompt size. Pure.
+    The list is the engine core's (live first, then finished newest-last), so
+    the LAST match is the newest."""
+    hits = [r for r in requests if isinstance(r.get("num_tokens"), int)
+            and abs(r["num_tokens"] - want_tokens) <= tol * want_tokens]
+    return hits[-1] if hits else None
+
+
+def candidates(group: dict) -> list:
+    """Three blocks to corrupt, by position: the sentinel's (earliest), the
+    middle, and the last. Pure. Host paths for the WORKER (rank 1)."""
+    rows = group.get("keys") or []
+    if not rows:
+        return []
+    picks = {"early (holds the sentinel)": rows[0], "middle": rows[len(rows) // 2], "last": rows[-1]}
+    out = []
+    for why, r in picks.items():
+        wp = (r.get("path") or {}).get("1")
+        out.append({"which": why, "i": r.get("i"), "tokens": r.get("tokens"), "key": r.get("key"),
+                    "worker_path_container": wp,
+                    "worker_path_host": wp.replace("/kvoffload", HOST_TIER, 1) if wp else None,
+                    "in_index": r.get("in_index"), "verified": r.get("verified")})
+    return out
+
+
+def locate(want_tokens: int = 8449) -> int:
+    try:
+        lst = json.loads(urllib.request.urlopen(STATS + "/kv/keys", timeout=20).read())
+    except Exception as e:
+        print(f"UNREADABLE: GET {STATS}/kv/keys failed ({e!r}) -- needs kvmgr >= 0.4.7 with diag_request_keys")
+        return 2
+    req = pick_request(lst.get("requests") or [], want_tokens)
+    if not req:
+        print(f"NOT FOUND: no request within 5% of {want_tokens} tokens among "
+              f"{[(r.get('req'), r.get('num_tokens')) for r in (lst.get('requests') or [])][-8:]} -- run `prime` first")
+        return 3
+    try:
+        det = json.loads(urllib.request.urlopen(f"{STATS}/kv/keys?req={req['req']}&group=0", timeout=20).read())
+    except Exception as e:
+        print(f"UNREADABLE: the request's keys ({e!r})"); return 2
+    g = next((x for x in det.get("groups") or [] if x.get("group") == 0), None)
+    if not g:
+        print("NO GROUP 0 in the answer:", json.dumps(det)[:300]); return 2
+    out = {"req": req["req"], "num_tokens": det.get("num_tokens"), "group": 0,
+           "block_tokens": g.get("block_tokens"), "num_keys": g.get("num_keys"),
+           "truncated": g.get("truncated"), "candidates": candidates(g)}
+    print(json.dumps(out, indent=1))
+    return 0
 
 
 # ---------------------------------------------------------------- selftest
@@ -238,6 +295,19 @@ def selftest() -> int:
     eq("...and the `_created` series was not read as hits (the documented trap)",
        ext_hits() == state["hits"], True)
     srv.shutdown()
+    # locate: pure parts
+    rq = [{"req": "a", "num_tokens": 120000}, {"req": "canary-old", "num_tokens": 8449},
+          {"req": "b", "num_tokens": 900}, {"req": "canary-new", "num_tokens": 8450}]
+    eq("pick_request: the NEWEST request near the canary's size", pick_request(rq, 8449)["req"], "canary-new")
+    eq("pick_request: none near the size -> None", pick_request([{"req": "x", "num_tokens": 100}], 8449), None)
+    grp = {"keys": [{"i": i, "tokens": [i * 256, (i + 1) * 256], "key": "k%d" % i,
+                     "path": {"0": "/kvoffload/dspark-kv-v1/h/k%d" % i, "1": "/kvoffload/dspark-kv-v1/w/k%d" % i},
+                     "in_index": True, "verified": True} for i in range(33)]}
+    c = candidates(grp)
+    eq("candidates: early, middle, last by block index", [x["i"] for x in c], [0, 16, 32])
+    eq("*** candidates name the WORKER's file (rank 1), on the host side of the mount ***",
+       c[1]["worker_path_host"], "/home/shorn/kvoffload/dspark-kv-v1/w/k16")
+    eq("candidates of an empty group -> []", candidates({"keys": []}), [])
     print("SELFTEST " + ("GREEN" if T == 0 else "RED"))
     return T
 
@@ -248,11 +318,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("prime")
+    sub.add_parser("locate")
     c = sub.add_parser("check"); c.add_argument("--evict", action="store_true")
     c.add_argument("--min-hit-frac", type=float, default=0.5)
     a = ap.parse_args()
     if not hasattr(a, "min_hit_frac"):
         a.min_hit_frac = 0.5; a.evict = False
+    if a.cmd == "locate":
+        return locate()
     return run(a.cmd, a)
 
 
