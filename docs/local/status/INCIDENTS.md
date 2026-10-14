@@ -10,6 +10,27 @@ The boot-metrics section for the recovery boot after the watchdog incident lives
 > Moved verbatim from `STATUS.md` during the 2026-09-20 doc split.
 
 ## Incidents
+### Xid 32 on the worker, then 25 minutes of one-node Docker restarts (2026-10-14 06:21)
+
+**Symptom.** Engine unavailable 06:21:48–06:46:41 UTC (24m53s): ~10 minutes of client hangs, then
+500/502/503. **Root cause of the fault: unknown** — one `Xid 32 ... channel 0x7 intr0 00040000`
+on spark-da08, nothing else in the kernel log, with the worker's LOAD ledger logging in the same
+second and 50 store jobs outstanding. **Root cause of the length: ours.** The head sat out NCCL's
+600s collective timeout, and `restart: unless-stopped` restarted each node ALONE three times (worker
+06:21:53 into a hung engine, head 06:32:55, worker again 06:39:50, which paired by luck).
+
+**Fix.** `restart: "no"`; `local-ops/systemd/engine-supervisor.sh` on the head does `down` on both
+plus the start script within ~10s of an abnormal exit, after saving the evidence to
+`~/kvdiag/supervisor/<ts>/`. kvmgr v0.3.0 writes a line per GPU transfer BEFORE submitting it
+(`/kvoffload/diag/ledger-r<rank>.jsonl`), so the next Xid's open entries name its transfer.
+`spark-memwatch` logs swap/PSI/oom_kill; swap is 64 GiB. Deployed 2026-10-14 09:38.
+
+**Signature next time.** `journalctl --user -u engine-supervisor` on the head says
+`RESTARTING BOTH NODES: worker[exited ...]`; the evidence directory holds both logs, both kernel
+logs and the ledger tails. **Do not also run `watchdog-dspark.sh`** — the supervisor holds while it
+runs, but the watchdog knows nothing of the supervisor (see the four-watchdog incident below).
+Full write-up: vllm-proxy `docs/kv/history/2026-10-14-xid-outage.md`.
+
 ### The boot sentinel survived the boot — `set -e` aborted its own cleanup (2026-09-20)
 
 **Found by the test restart that was meant to confirm the sentinel works.** It did work: 363s cold
