@@ -292,8 +292,18 @@ if [ "$DROP_CACHES_ON_START" = "1" ]; then
     HEAD_CID=$(COMPOSE_DISABLE_ENV_FILE=1 docker compose --env-file "$ENV_FILE" "${COMPOSE_ARGS[@]}" ps -q vllm-dspark 2>/dev/null | head -1)
     (
       while ! curl -fsS --max-time 2 "$API_URL" >/dev/null 2>&1; do
-        if [ "$DROP_CACHES_UNTIL" = graphs ] && [ -n "$HEAD_CID" ] \
-           && docker logs --since "$DROP_T0" "$HEAD_CID" 2>&1 | grep -q "Graph capturing finished"; then
+        # *** COUNT, never `grep -q`. *** This script runs under `set -o
+        # pipefail`, and `grep -q` exits at the first match and closes the pipe:
+        # `docker logs` (still writing a long boot log) dies of SIGPIPE, the
+        # pipeline reads as FAILED, and the stop condition is false exactly when
+        # the marker is there. That is what the first boot with this change did --
+        # 108 drops through the whole walk -- and a one-line stub never showed it.
+        # `grep -c` reads to the end; `|| true` covers grep's exit 1 on zero.
+        seen=0
+        if [ "$DROP_CACHES_UNTIL" = graphs ] && [ -n "$HEAD_CID" ]; then
+          seen=$(docker logs --since "$DROP_T0" "$HEAD_CID" 2>&1 | grep -c "Graph capturing finished" || true)
+        fi
+        if [ "$(( ${seen:-0} + 0 ))" -ge 1 ]; then
           echo "Startup cache reclaim: stopped at graph capture ($(date -u +%H:%M:%S)Z) -- the disk-index walk runs on warm caches."
           break
         fi
