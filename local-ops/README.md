@@ -12,7 +12,7 @@ everything here and allows `*.py`, `*.sh`, `*.md` back). Never push it upstream.
 | `sweep.sh` | Config sweep: `./sweep.sh 12:default 12:72 6:default 4:default` — restarts per config and records KV tokens, concurrency, graph GiB, capture max/count, boot time, throughput to `sweep_results.tsv`. |
 | `loadtest.sh` | Light concurrent load: N short requests, samples scheduler state. `./loadtest.sh 12 600` |
 | `install-sudoers.sh` | Installs `dspark-dropcaches` to `/etc/sudoers.d/` and validates with `visudo -c`; self-removes the file if validation fails. Run with sudo on both nodes. Already done 2026-09-13; re-run after a node rebuild. |
-| `kv-offload-probe.md` | Runbook for the native disk-offload probe (`TieringOffloadingSpec` + `fs_python` tier). **Historical**: that spec cannot capture rank 1's half on this topology; the tier that works is our own (`packages/vllm-kvmgr/`). |
+| `kv-offload-probe.md` | Runbook for the native disk-offload probe (`TieringOffloadingSpec` + `fs_python` tier). **Historical**: that spec cannot capture rank 1's half on this topology; the tier that works is our own (`~/dev/python/vllm-kvmgr`). |
 | `sweep_results.tsv` | Results of the 2026-09-13 config sweep. Read the header caveats before trusting any column. |
 
 ## KV disk tier tools — read the CLASS before running anything as a check
@@ -47,7 +47,7 @@ way. Classes are taken from each script's source (what it executes), not from it
 | `kvdropguard.sh` | **ACTUATOR** | proves the drop guard fires under a real overlap |
 | `kvstallcheck.sh`, `kvnumpy.sh` | **ACTUATOR** | negative control for the stall deadline; makes the numpy producer name itself |
 
-The package's own offline tests are in `packages/vllm-kvmgr/tests/` (`run-all.sh`, both modes). The package itself lives in `~/dev/python/vllm-kvmgr`; the copy here is a squashed subtree, not to be edited.
+The package and its offline tests live in their own repo, `~/dev/python/vllm-kvmgr` (`tests/run-all.sh`, both modes).
 
 ## Prefix-cache and prompt tooling
 

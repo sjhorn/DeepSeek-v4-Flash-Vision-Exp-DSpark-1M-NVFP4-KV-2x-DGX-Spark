@@ -23,7 +23,7 @@ same facts were restated in two places and drifted apart.
 | pull from upstream, or judge an upstream change | `docs/local/UPSTREAM.md` |
 | **know whether a change needs a restart, or can be made live** | `docs/local/RUNTIME-SURFACE.md` |
 | find a tool in `local-ops/` | `docs/local/TOOLING.md` |
-| **work on the KV manager or the disk tier** | **"KV disk tier" below**, then `packages/vllm-kvmgr/README.md`; **classify a `kv*` tool before running it**: `local-ops/README.md` |
+| **work on the KV manager or the disk tier** | **"KV disk tier" below**, then `~/dev/python/vllm-kvmgr/README.md`; **classify a `kv*` tool before running it**: `local-ops/README.md` |
 | know the current config, KV pool, node versions | `docs/local/status/CONFIG.md` |
 | compare this boot to the last | `docs/local/status/BOOT-METRICS.md` |
 | recognise a failure we have already had | `docs/local/status/INCIDENTS.md` |
@@ -59,6 +59,8 @@ commit.** See `docs/local/TOOLING.md`.
 
 ```bash
 git push head local/main && git push worker local/main
+# and, when kvmgr changed, from ~/dev/python/vllm-kvmgr:
+#   git push head main && git push worker main
 # then: both nodes must report the new commit and 0 dirty.
 # scripts/check-local-patches.sh reports what the RUNNING container has, which a
 # push does NOT change — git replaces files, and a single-file bind mount keeps
@@ -150,23 +152,21 @@ Two habits that have already paid for themselves here:
 - **Record the negative results too.** "`max` effort is worse than `high`", "MNT-5 is inert under
   `thinking:false`", "`NCCL_IB_MERGE_NICS` is a non-event" each stop a future repeat of the work.
 
-## KV disk tier (`packages/vllm-kvmgr/`)
+## KV disk tier (`~/dev/python/vllm-kvmgr`)
 
 Our own KV manager for group 0 plus a disk-backed prefix cache, shipped as one `vllm.general_plugins`
-package. **Read `packages/vllm-kvmgr/README.md` first.** The current picture, the measurements and
+package. **Read that repo's `README.md` first.** The current picture, the measurements and
 the dated narrative are in the proxy repo (`~/dev/python/vllm-proxy`): `docs/kv/overview.md`,
 `docs/kv/measurements.md`, `docs/kv/history/`. The verbatim long form of every rule below is
 `docs/kv/engine-rules.md` there. **Nothing here is a reason to restart without the per-restart
 confirmation above.**
 
-**The package's home is its own repo, `~/dev/python/vllm-kvmgr`** (since 2026-10-13, full history
-carried over, releases are tags: `v0.1.0` the pre-package layout, `v0.2.0` the standalone package).
-`packages/vllm-kvmgr/` here is a **squashed `git subtree` copy** of one tag, kept as a real copy
-because the nodes are deployed by pushing this repo and the compose bind-mounts it. **Do not edit
-the copy.** Change the package there, run its tests, tag, then from this root:
-`git subtree pull --prefix=packages/vllm-kvmgr ~/dev/python/vllm-kvmgr <tag> --squash`, then
-deploy as usual. Its `--with-dspark-patches` test mode needs
-`KVMGR_DSPARK_REPO=<this checkout>` when run from there.
+**The package is NOT in this repo.** It is its own repo, `~/dev/python/vllm-kvmgr` (full history,
+releases tagged `v0.1.0`, `v0.2.0`, …), deployed by push to `/home/shorn/vllm-kvmgr` on **both**
+nodes, beside this checkout. The compose mounts `../vllm-kvmgr/src/kvmgr` and its generated
+dist-info, and the start script **refuses** unless both nodes hold it at the same commit. So a
+deploy that touches kvmgr is a push of **both** repos. Its `--with-dspark-patches` test mode needs
+`KVMGR_DSPARK_REPO=<this checkout>`.
 
 **State, 2026-10-13:** store and restore **on by default** from committed
 `local-ops/flags.reference.json`; 700K restores in 11s across a restart (598s cold, **54x**); a

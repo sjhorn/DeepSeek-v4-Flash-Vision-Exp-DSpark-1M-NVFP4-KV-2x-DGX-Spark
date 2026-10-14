@@ -171,15 +171,27 @@ if compgen -G "$SCRIPT_DIR/patches/anthropic_*.py" >/dev/null; then
       scp -r "$SCRIPT_DIR/patches/$plg" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/"
     fi
   done
-  # kvmgr moved to packages/vllm-kvmgr/ (2026-10-13). Only the two directories
-  # the compose mounts are synced -- not its tests, which are ~2 MB of vendored
-  # vLLM source the worker never reads.
-  if [ -d "$SCRIPT_DIR/packages/vllm-kvmgr/src/kvmgr" ]; then
-    ssh "$WORKER_HOST" "mkdir -p ${REMOTE_WORKER_DIR}/packages/vllm-kvmgr/src ${REMOTE_WORKER_DIR}/packages/vllm-kvmgr/deploy"
-    scp -r "$SCRIPT_DIR/packages/vllm-kvmgr/src/kvmgr" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/packages/vllm-kvmgr/src/"
-    scp -r "$SCRIPT_DIR"/packages/vllm-kvmgr/deploy/*.dist-info "${WORKER_HOST}:${REMOTE_WORKER_DIR}/packages/vllm-kvmgr/deploy/"
-  fi
 fi
+
+# kvmgr (PLG-KV) is its own repo since 2026-10-14, deployed by `git push` to
+# ../vllm-kvmgr on BOTH nodes; the compose mounts it from there. Nothing is
+# copied here -- the script REFUSES instead, for two reasons: a missing
+# directory is created EMPTY by Docker, so `import kvmgr` finds an empty
+# package (the trap above), and two different commits would run two
+# different kvmgrs on the two ranks.
+KVMGR_HEAD_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/vllm-kvmgr"
+kv_head="$(git -C "$KVMGR_HEAD_DIR" rev-parse HEAD 2>/dev/null || true)"
+kv_worker="$(ssh "$WORKER_HOST" "test -f $REMOTE_WORKER_DIR/../vllm-kvmgr/src/kvmgr/__init__.py && git -C $REMOTE_WORKER_DIR/../vllm-kvmgr rev-parse HEAD" 2>/dev/null || true)"
+if [ ! -f "$KVMGR_HEAD_DIR/src/kvmgr/__init__.py" ] || [ -z "$kv_head" ] || [ -z "$kv_worker" ]; then
+  echo "REFUSING: vllm-kvmgr missing (head='${kv_head:-none}' worker='${kv_worker:-none}')." >&2
+  echo "  Deploy it first: git push head main && git push worker main, from ~/dev/python/vllm-kvmgr" >&2
+  exit 1
+fi
+if [ "$kv_head" != "$kv_worker" ]; then
+  echo "REFUSING: vllm-kvmgr differs between nodes (head=$kv_head worker=$kv_worker). Push the same commit to both." >&2
+  exit 1
+fi
+echo "vllm-kvmgr: ${kv_head:0:12} on both nodes"
 if [ "$COMPOSE_VISION" = "1" ]; then
   scp "$VISION_COMPOSE_FILE" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/docker-compose.vision-exp.yml"
 fi
