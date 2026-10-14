@@ -30,8 +30,15 @@ last submit open, so read open entries against the Xid time, never as a bare
 count. Files from kvmgr >= 0.3.1 also carry `gpu_loads`/`gpu_stores`/`ops`
 on each submit; those are printed when present and not reconstructed.
 
-Records are grouped by pid, because a restarted process numbers its transfers
-from 0 again and appends to the same file.
+Records are grouped by BOOT (kvmgr >= 0.4.1 writes `boot` on every line).
+Lines from before it fall back to the pid, which is NOT unique: inside a
+container the worker gets the same pid every boot (126 on the head, 2026-10-14),
+so two pre-0.4.1 boots merge -- the report says so when it has to fall back.
+
+From kvmgr 0.4.1 each load submit also carries `in_step` (destination blocks
+in this rank's current block table; null with `in_step_why` when unreadable,
+never 0), `req` and `req_in_step`. `--xid` prints them, and the summary counts
+loads that landed on blocks the running step uses -- the 12:43 hypothesis.
 """
 from __future__ import annotations
 
@@ -55,18 +62,23 @@ def load(path: str) -> list[dict]:
     return out
 
 
+def ident(r: dict):
+    """The process a record belongs to: its boot, or ("pid", pid) before 0.4.1."""
+    return r.get("boot") or ("pid", r.get("pid"))
+
+
 def concurrency(recs: list[dict]) -> dict:
     """Per kind: histogram of 'transfers of this kind open at submit,
     including itself', its max, and how many submits had company. Pure."""
     open_: dict = {}
     hist = {"load": collections.Counter(), "store": collections.Counter()}
     for r in recs:
-        k = (r.get("kind"), r.get("inner"))
+        k = (str(ident(r)), r.get("kind"), r.get("inner"))
         if r.get("ev") == "submit":
             open_[k] = r
             kind = r.get("kind")
             if kind in hist:
-                hist[kind][sum(1 for (kk, _i) in open_ if kk == kind)] += 1
+                hist[kind][sum(1 for (_b, kk, _i) in open_ if kk == kind)] += 1
         elif r.get("ev") == "done":
             open_.pop(k, None)
     out = {}
@@ -81,7 +93,7 @@ def concurrency(recs: list[dict]) -> dict:
 def open_entries(recs: list[dict]) -> list[dict]:
     open_: dict = {}
     for r in recs:
-        k = (r.get("kind"), r.get("inner"))
+        k = (str(ident(r)), r.get("kind"), r.get("inner"))
         if r.get("ev") == "submit":
             open_[k] = r
         elif r.get("ev") == "done":
@@ -110,7 +122,7 @@ def fmt(r: dict, t0: float | None) -> str:
     if r.get("ev") == "done":
         return f"  {rel} done   {r.get('kind'):5} inner={r.get('inner')} ok={r.get('ok')}"
     extra = ""
-    for k in ("gpu_loads", "gpu_stores", "ops"):
+    for k in ("gpu_loads", "gpu_stores", "ops", "in_step", "in_step_why", "req_in_step"):
         if k in r:
             extra += f" {k}={r[k]}"
     return (f"  {rel} submit {r.get('kind'):5} inner={r.get('inner')} job={r.get('job')} "
@@ -119,22 +131,35 @@ def fmt(r: dict, t0: float | None) -> str:
 
 
 def report(recs: list[dict], xid: float | None, pid: int | None) -> None:
-    pids = collections.Counter(r.get("pid") for r in recs)
-    print(f"records {len(recs)}; by pid: {dict(pids)}")
-    if pid is None:
+    ids = collections.Counter(str(ident(r)) for r in recs)
+    print(f"records {len(recs)}; by boot: {dict(ids)}")
+    if pid is not None:
+        sel = [r for r in recs if r.get("pid") == pid]
+        who = f"pid {pid}"
+    else:
         if xid is not None:
             before = [r for r in recs if r.get("ts", 0) <= xid + 1]
-            pid = before[-1].get("pid") if before else None
+            want = ident(before[-1]) if before else None
         else:
-            pid = recs[-1].get("pid") if recs else None
-    sel = [r for r in recs if r.get("pid") == pid]
-    print(f"pid {pid}: {len(sel)} records")
+            want = ident(recs[-1]) if recs else None
+        sel = [r for r in recs if ident(r) == want]
+        who = f"boot {want}"
+    print(f"{who}: {len(sel)} records")
+    if sel and not sel[-1].get("boot"):
+        print("  NOTE: pre-0.4.1 lines have no `boot`; grouped by pid, which a container "
+              "reuses every boot, so several boots may be MERGED here")
     if not sel:
         print("  ABSENT: no records for that pid -- not a clean run, nothing was read")
         return
     for kind, c in concurrency(sel).items():
         print(f"  {kind:5} submits={c['submits']} max_on_gpu={c['max']} "
               f"with_company={c['with_company']} hist={c['hist']}")
+    loads = [r for r in sel if r.get("ev") == "submit" and r.get("kind") == "load"]
+    if any("in_step" in r for r in loads):
+        known = [r for r in loads if r.get("in_step") is not None]
+        hit = [r for r in known if r["in_step"] > 0]
+        print(f"  loads onto blocks the running step uses: {len(hit)} of {len(known)} "
+              f"readable ({len(loads) - len(known)} unreadable -- absent, not 0)")
     ov = [r for r in sel if r.get("overlap")]
     print(f"  overlaps: {len(ov)} of {sum(1 for r in sel if r.get('ev') == 'submit')} submits")
     for r in ov[-10:]:
@@ -182,6 +207,11 @@ def selftest() -> int:
        [("load", 4)])
     eq("open entries before t=3.5: loads 1,2,3",
        [r["inner"] for r in open_entries([r for r in recs if r["ts"] <= 3.5])], [1, 2, 3])
+    two = [dict(sub(1, "load", 1), boot="a"), dict(sub(1, "load", 2), boot="b"),
+           dict(done(1, "load", 3), boot="b")]
+    eq("*** same pid, same inner, two BOOTS: boot a's load stays open ***",
+       [r["boot"] for r in open_entries(two)], ["a"])
+    eq("pre-0.4.1 lines fall back to pid", ident({"pid": 7}), ("pid", 7))
     eq("--xid parses the short-precise form",
        parse_xid("2026-10-14 10:12:17.387186"), 1791972737.387186)
     with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
