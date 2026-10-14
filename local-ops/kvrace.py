@@ -62,7 +62,29 @@ LEDGER = os.environ.get("KVRACE_LEDGER", "/home/shorn/kvoffload/diag/ledger-r0.j
 MODEL = os.environ.get("KVRACE_MODEL", "claude-opus-5")
 CHARS_PER_TOKEN = 5.11          # measured for FILLER (kvscale.sh)
 FILLER = "alpha beta gamma delta epsilon zeta eta theta "
-GROUP0_CAP_TOKENS = 2_097_152   # 8,192 blocks x 256 (CLAUDE.md KV table)
+# *** NOT a constant, and the first version's was wrong. *** It assumed 2,097,152
+# (group 0's manager cap from CLAUDE.md), built a 3.0M-token pool, and the first
+# live run restored all 30 prefixes once and then hit the GPU on every revisit:
+# the engine's actual KV cache is 3,377,409 tokens ("GPU KV cache size" in its
+# boot log). The run stopped creating its condition after one pass. The pool
+# must exceed the REAL capacity, so it is read from the engine each time.
+GROUP0_CAP_TOKENS = None        # set by kv_capacity_tokens(); the selftest overrides it
+POOL_OVER_CAP = 1.5             # pool >= 1.5x capacity, so other users' prefixes cannot make it fit
+ENGINE_TAG = "dspark-vllm-deepseek-v4-flash-0731-dspark-1m-nvfp4-kv-2x-dgx-spark-vllm-dspark-1"
+
+
+def kv_capacity_tokens():
+    """The engine's GPU KV cache size in tokens, from its most recent boot log
+    line; None if it cannot be read (and then build/run refuse)."""
+    if GROUP0_CAP_TOKENS is not None:
+        return GROUP0_CAP_TOKENS
+    try:
+        out = subprocess.run(["bash", "-c", f"journalctl -a -t {ENGINE_TAG} --since=-24h --no-pager -o cat "
+                              "| grep -o 'GPU KV cache size: [0-9,]* tokens' | tail -1"],
+                             capture_output=True, text=True, timeout=60).stdout
+        return int(out.split(":")[1].split("tokens")[0].replace(",", "").strip())
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------- pure parts
@@ -85,7 +107,7 @@ def tokens_ok(got, want: int, tol: float = 0.10) -> bool:
 
 def verdict(*, loads: int, target: int, xid0: tuple, xid: tuple, last_status,
             open_load_age, stuck_s: float, slow, slow_s: float, restores_seen: int,
-            visits: int) -> tuple[str, str]:
+            visits: int, visits_since_restore: int = 0, pool: int = 30) -> tuple[str, str]:
     """(state, why). state: continue | clean | xid | stuck | slow | http | unreadable | nocondition.
     Order matters: an incident outranks reaching the target in the same tick."""
     if xid is None or xid0 is None or None in xid or None in xid0:
@@ -102,8 +124,15 @@ def verdict(*, loads: int, target: int, xid0: tuple, xid: tuple, last_status,
         if restores_seen == 0:
             return "nocondition", "target reached but no restore was observed -- the run did not create its condition"
         return "clean", f"{loads} loads with no incident"
-    if visits >= 2 * 30 and restores_seen == 0:
+    if visits >= 2 * pool and restores_seen == 0:
         return "nocondition", f"{visits} visits and no loads -- the pool is not being restored (still on GPU?)"
+    # *** RESTORES THAT STOP are the same failure, later. *** The first live run
+    # restored the whole pool once, then a full pass added +0 loads -- the pool
+    # fit in the GPU -- and this check did not exist, so it would have looped
+    # for ever reporting nothing. A full pass with no restore ends the run.
+    if visits_since_restore >= pool:
+        return "nocondition", (f"{visits_since_restore} visits (a full pass of the pool) without a restore -- "
+                               "the pool fits in the GPU cache; build a larger one")
     return "continue", ""
 
 
@@ -230,9 +259,14 @@ def cmd_build(a) -> int:
     os.makedirs(os.path.join(DIR, "bodies"), exist_ok=True)
     total = a.n * a.tokens
     fp = open(os.path.join(DIR, "build.log"), "a")
-    log(fp, f"build: {a.n} prefixes x {a.tokens} tokens = {total:,} (group-0 GPU cap {GROUP0_CAP_TOKENS:,})")
-    if total <= GROUP0_CAP_TOKENS * 1.2:
-        log(fp, "REFUSING: the pool must exceed the GPU cap by >20% or visits will hit the GPU, not disk")
+    cap = kv_capacity_tokens()
+    if cap is None:
+        log(fp, "REFUSING: cannot read the engine's GPU KV cache size from its log"); return 2
+    log(fp, f"build: {a.n} prefixes x {a.tokens} tokens = {total:,} (engine GPU KV cache {cap:,} tokens)")
+    if total < cap * POOL_OVER_CAP:
+        need = int(cap * POOL_OVER_CAP / a.tokens) + 1
+        log(fp, f"REFUSING: the pool must be >= {POOL_OVER_CAP}x the GPU cache or revisits hit the GPU, "
+                f"not disk -- use --n {need} or more")
         return 2
     meta = {"n": a.n, "tokens": a.tokens, "prefixes": []}
     for i in range(a.n):
@@ -304,7 +338,16 @@ def cmd_run(a) -> int:
         t.start()
     time.sleep(3)
 
-    visits = restores = 0
+    cap = kv_capacity_tokens()
+    pool_tokens = len(bodies) * meta["tokens"]
+    if cap is None or pool_tokens < cap * POOL_OVER_CAP:
+        log(fp, f"REFUSING: pool {pool_tokens:,} tokens vs GPU KV cache {cap} -- must be >= {POOL_OVER_CAP}x; "
+                "rebuild with a larger --n")
+        stop.set()
+        if a.arm in ("on", "off") and prev and prev[0] is not None:
+            set_knob("load_wait_compute", prev[0])
+        return 2
+    visits = restores = since_restore = 0
     state, why = "continue", ""
     walls = []
     t0 = time.time()
@@ -318,13 +361,17 @@ def cmd_run(a) -> int:
             got = led.loads - before
             if got > 0:
                 restores += 1
+                since_restore = 0
                 walls.append(sec)
+            else:
+                since_restore += 1
             if visits % 10 == 0 or st != 200:
                 log(fp, f"  visit {visits}: HTTP {st} {sec:.1f}s, +{got} loads (total {led.loads}, g0 {led.g0}), "
                         f"restores {restores}, decoders ok/bad {dec_stats['n']-dec_stats['bad']}/{dec_stats['bad']}")
             state, why = verdict(loads=led.loads, target=a.loads, xid0=xid0, xid=xid_counts(),
                                  last_status=st, open_load_age=led.oldest_open_age(), stuck_s=a.stuck_s,
-                                 slow=sec, slow_s=a.slow_s, restores_seen=restores, visits=visits)
+                                 slow=sec, slow_s=a.slow_s, restores_seen=restores, visits=visits,
+                                 visits_since_restore=since_restore, pool=len(bodies))
     finally:
         stop.set()
         restored = None
@@ -402,6 +449,9 @@ def selftest() -> int:
     eq("*** target reached with NO restores -> nocondition, not clean ***",
        v(**{**base, "loads": 100, "restores_seen": 0})[0], "nocondition")
     eq("60 visits and no loads -> nocondition", v(**{**base, "visits": 60, "restores_seen": 0, "loads": 0})[0], "nocondition")
+    eq("*** restores that STOP: a full pass with none -> nocondition (the first live run) ***",
+       v(**{**base, "visits": 60, "restores_seen": 30, "visits_since_restore": 30, "pool": 30})[0], "nocondition")
+    eq("a partial pass without a restore is normal", v(**{**base, "visits_since_restore": 12, "pool": 30})[0], "continue")
     eq("prompt_tokens within 10% ok", tokens_ok(104000, 100000), True)
     eq("prompt_tokens 30% off refused", tokens_ok(130000, 100000), False)
     eq("prompt_tokens missing refused", tokens_ok(None, 100000), False)
@@ -477,10 +527,10 @@ def selftest() -> int:
     import contextlib
     import io
     with contextlib.redirect_stdout(io.StringIO()):
-        rc_small = cmd_build(args(n=2, tokens=1000))
-    eq("*** build REFUSES a pool that fits in the GPU cap ***", rc_small, 2)
-    global GROUP0_CAP_TOKENS
-    cap, GROUP0_CAP_TOKENS = GROUP0_CAP_TOKENS, 1000
+        global GROUP0_CAP_TOKENS
+        cap, GROUP0_CAP_TOKENS = GROUP0_CAP_TOKENS, 1000
+        rc_small = cmd_build(args(n=1, tokens=1000))
+    eq("*** build REFUSES a pool under 1.5x the GPU cache ***", rc_small, 2)
     with contextlib.redirect_stdout(io.StringIO()):
         eq("build: 5 x 1000 tokens against a 1000-token cap succeeds", cmd_build(args()), 0)
 
