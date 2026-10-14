@@ -318,15 +318,13 @@ mid-compaction; every key is verified on both ranks at boot; runtime verificatio
   Python traceback. The tell is repeated `shm_broadcast: No available shared memory broadcast block`
   and then nothing. The head can instead die on its own **dequeue** deadline (29 min) when the
   worker process is gone.
-- **Xid 32 recurs, always beside disk-tier transfers, and is not proven ours.** Two came on the
-  first large restore after a boot (~10s after the boot check), but **2026-10-14 06:21:48 came 16.5h
-  into a boot**: the worker's LOAD ledger logged in the fault's second with 50 stores outstanding.
-  So "first restore after a boot" does not explain the class. Leading hypothesis, unproven: a load
-  writes a GPU block another transfer is using. kvmgr v0.3.0 writes
-  `/kvoffload/diag/ledger-r<rank>.jsonl` BEFORE every submit (the open entries for the dead pid
-  are what the GPU had) and counts `LEDGER OVERLAP` on `/kv/workers`. Read both after the next
-  Xid; the supervisor copies the ledger tails into `~/kvdiag/supervisor/<ts>/`. Write-up:
-  vllm-proxy `docs/kv/history/2026-10-14-xid-outage.md`.
+- **Xid 32 -- CAUSE FOUND AND DEMONSTRATED, 2026-10-14: a disk->GPU load copy racing the forward
+  pass.** vLLM 0.21's copy handler makes only STORES `wait_stream(compute)`; with `--async-scheduling`
+  a load could run alongside the step still using its destination blocks (Xid 32 with several
+  `intr` words, and once a hang with no Xid). **Fix: kvmgr `load_wait_compute=1` (v0.4.2, the code
+  default).** 3,270+ loads clean with it on; `local-ops/kvrace.py run --arm off` reproduced Xid 32
+  in 36 loads. **Never set `load_wait_compute=0` on a serving engine.** Write-up: vllm-proxy
+  `docs/kv/history/2026-10-14-xid-outage.md`.
 - **The store and restore paths must not both run at full tilt in one pass**: a restore took 574.9s
   with the store live and 3.3s paused, both sharing a saturated staging pool. Measure a read with
   writes off. (Separate 256-slot load and store pools are deployed now.)
