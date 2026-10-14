@@ -27,6 +27,7 @@ way. Classes are taken from each script's source (what it executes), not from it
 
 | Tool | Class | What it does |
 |---|---|---|
+| `kvledger.py` | READ-ONLY | reads kvmgr's write-ahead ledger (`~/kvoffload/diag/ledger-r<rank>.jsonl`): per-kind GPU concurrency (`max_on_gpu`), overlaps, and with `--xid "<UTC from journalctl -k -o short-precise>"` the open entries at a fault. `--selftest` |
 | `kvjournal.sh` | READ-ONLY | journal state, the nameable-key gap, a rotation watch; leftover vs in-flight `.compacting` |
 | `kvstream.sh` | READ-ONLY on the engine | `all-start` / `all-check` arm and check the four capture streams (faults, producer × both nodes); exits non-zero naming a dead stream |
 | `flags-apply.sh` | READ-ONLY (`verify`, the default) / ACTUATOR (`apply`) | diff / install `flags.reference.json` as the boot configuration on both nodes (merges; takes effect at the next boot) |

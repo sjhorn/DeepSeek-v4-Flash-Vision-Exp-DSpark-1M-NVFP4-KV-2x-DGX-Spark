@@ -193,6 +193,11 @@ mid-compaction; every key is verified on both ranks at boot; runtime verificatio
 - **`load_ops_max=2048` and `load_inflight_max=1`.** Inflight 4 killed the engine (Xid 32) with ops
   pinned at 2048; 1 and 2 restore 700K in the same 12s, so the safe value is free. Bounding one
   call's descriptors is necessary and **not** sufficient — concurrency is an independent variable.
+  **BUT UNTIL kvmgr's ask1 FIX LANDS, `load_inflight_max` DOES NOT BOUND THE GPU STAGE** (found
+  2026-10-14 after the 12:12 Xid). `_pump` counts only rounds already on the GPU, and `_collect`
+  submits every finished file read at once: up to **7** loads were on the GPU that boot, while
+  stores stayed at 1. So "1 is safe" was never measured with the bound in force. Check with
+  `local-ops/kvledger.py <ledger> ` (`max_on_gpu`).
 - **`PYTHONHASHSEED=20261007` in the committed compose default, never changed.** It roots the
   block-hash chain; unset, every boot's hashes differ and the disk is a permanent miss; changed,
   every file is orphaned. sha256 hashing never warns about it.
