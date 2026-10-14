@@ -18,7 +18,9 @@
 # HEAD ONLY. Every 10s it reads both containers' state (the worker's over ssh).
 #
 #   TRIGGER  a container that EXISTS and exited abnormally (exit code not 0 or
-#            143, or OOMKilled) or is `dead`, on either node.
+#            143, or OOMKilled) or is `dead`, on either node; OR one exited
+#            with ANY code while the other is still running (a half pair --
+#            vLLM exits 0 when its engine core dies, measured 2026-10-14).
 #   REBOOT   containers stopped BY THEIR HOST'S SHUTDOWN -- exited, with FinishedAt
 #            at most 10 min before that host's boot time -- are started again
 #            the same way (both nodes), so a deliberate reboot brings the engine
@@ -106,6 +108,16 @@ decide() {
   [ "$boot" = 1 ] && { echo "hold a boot is in progress (sentinel fresh)"; return; }
   case "$head" in absent|unreadable) ;; *) abnormal "$head" && crashed="head[$head]";; esac
   case "$worker" in absent|unreadable) ;; *) abnormal "$worker" && crashed="${crashed:+$crashed }worker[$worker]";; esac
+  # *** HALF A PAIR IS A DEAD ENGINE, WHATEVER THE EXIT CODE. *** 2026-10-14
+  # 12:12 CEST: Xid 32 on the head, and the head container exited with code 0 --
+  # vLLM shuts itself down cleanly once its engine core is dead -- so the first
+  # version of this read it as a deliberate stop and left the worker running
+  # alone. One exited and one running cannot serve, so it restarts both. Two
+  # exited cleanly is still a deliberate stop; use ~/.engine-hold to stop one.
+  if [ -z "$crashed" ]; then
+    [ "$hs" = exited ] && [ "$ws" = running ] && ! by_boot "$head" && crashed="head[$head; worker still running]"
+    [ "$ws" = exited ] && [ "$hs" = running ] && ! by_boot "$worker" && crashed="worker[$worker; head still running]"
+  fi
   # A reboot stopped one or both, and nothing is missing or unreadable: the
   # same two-node start. Unreadable waits (a node still booting is unreadable).
   if [ -z "$crashed" ] && [ "$hs" != absent ] && [ "$ws" != absent ] \

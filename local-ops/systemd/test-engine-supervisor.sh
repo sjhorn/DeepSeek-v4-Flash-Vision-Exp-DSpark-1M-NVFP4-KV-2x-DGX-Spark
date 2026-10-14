@@ -38,8 +38,10 @@ is "OOMKilled with exit 0 -> restart"            restart "$RUN" "exited 0 true" 
 is "dead -> restart"                             restart "dead 0 false" "$RUN" 0 0 0 0 0 2
 is "both crashed -> ONE restart verdict"         restart "exited 1 false" "exited 1 false" 0 0 0 0 0 2
 # ---- not a trigger
-is "*** exit 0 is a clean stop -> not restart ***" other "$RUN" "exited 0 false" 0 0 0 0 0 2
-is "exit 143 (SIGTERM, docker stop) -> not restart" other "exited 143 false" "$RUN" 0 0 0 0 0 2
+is "*** both exited 0 is a deliberate stop -> not restart ***" other "exited 0 false" "exited 0 false" 0 0 0 0 0 2
+is "both exited 143 (docker stop) -> not restart" other "exited 143 false" "exited 143 false" 0 0 0 0 0 2
+is "*** HEAD exited 0 with the worker running (the 12:12 Xid) -> restart ***" restart "exited 0 false 1791972743 1791218329" "running 0 false -62135596800 1791216240" 0 0 0 0 0 2
+is "worker exited 143 with the head running -> restart (half a pair)" restart "$RUN" "exited 143 false" 0 0 0 0 0 2
 is "*** worker ABSENT (somebody ran down) -> left alone ***" absent "$RUN" "absent" 0 0 0 0 0 2
 is "both absent -> left alone"                   absent  absent absent 0 0 0 0 0 2
 is "*** worker UNREADABLE (ssh failed) -> not a crash ***" unreadable "$RUN" unreadable 0 0 0 0 0 2
@@ -59,8 +61,8 @@ BYBOOT="exited 143 false $((BT - 30)) $BT"        # stopped 30s before its host 
 is "*** both stopped by their reboot -> restart (auto-start) ***" restart "$BYBOOT" "$BYBOOT" 0 0 0 0 0 2
 is "only the worker rebooted (head still running) -> restart both" restart "$RUN" "$BYBOOT" 0 0 0 0 0 2
 is "exit 0 by the reboot counts too"              restart "exited 0 false $((BT - 5)) $BT" "$BYBOOT" 0 0 0 0 0 2
-is "*** a docker stop with NO reboot after it -> stays down ***" other "$RUN" "exited 143 false $((BT + 3600)) $BT" 0 0 0 0 0 2
-is "*** stopped 11 min before the boot -> not by the reboot ***" other "exited 143 false $((BT - 660)) $BT" "$RUN" 0 0 0 0 0 2
+is "*** a docker stop of BOTH with NO reboot after it -> stays down ***" other "exited 143 false $((BT + 3600)) $BT" "exited 143 false $((BT + 3600)) $BT" 0 0 0 0 0 2
+is "*** stopped 11 min before the boot -> not by the reboot ***" other "exited 143 false $((BT - 660)) $BT" "exited 143 false $((BT - 660)) $BT" 0 0 0 0 0 2
 is "running containers carry a zero-time FinishedAt -> ok" ok "running 0 false -62135596800 $BT" "running 0 false -62135596800 $BT" 0 0 0 0 0 2
 is "*** reboot-stopped but the other node still unreadable -> wait ***" unreadable "$BYBOOT" unreadable 0 0 0 0 0 2
 is "reboot-stopped but the other ABSENT (somebody ran down) -> left alone" absent "$BYBOOT" absent 0 0 0 0 0 2
