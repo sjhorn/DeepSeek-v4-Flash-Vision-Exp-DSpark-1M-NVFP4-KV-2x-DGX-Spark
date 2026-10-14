@@ -78,6 +78,21 @@ r=$(decide "$RUN" "$BYBOOT" 0 0 0 0 0 2)
 case "$r" in *"worker[stopped by its reboot]"*) P=$((P+1)); echo "PASS  a reboot start says so in its reason";;
   *) T=1; echo "FAIL  reboot reason missing: $r";; esac
 
+# ---- wedge detection (capture only)
+wv() { wedge_verdict "$@" | cut -d" " -f1; }
+iw() { local n=$1 want=$2; shift 2; local g; g=$(wv "$@"); if [ "$g" = "$want" ]; then P=$((P+1)); echo "PASS  $n"; else T=1; echo "FAIL  $n  got $g want $want [$(wedge_verdict "$@")]"; fi; }
+iw "*** a load open 201s (the 14:36 wedge) -> capture ***" capture 0 201 0 0 90
+iw "kvmgr STALLED line alone -> capture"                    capture 1 ""  0 0 90
+iw "a load open 30s is normal -> none"                      none    0 30  0 0 90
+iw "no open load, no stall -> none"                         none    0 ""  0 0 90
+iw "*** already captured this boot -> none (once per boot) ***" none 1 500 1 0 90
+iw "*** hold file -> none ***"                               none    1 500 0 1 90
+iw "unreadable age with no stall -> none, not a capture"    none    0 "x" 0 0 90
+iw "exactly at the threshold -> capture"                    capture 0 90  0 0 90
+err=$( { wedge_verdict 0 "x" 0 0 90; wedge_verdict 0 "" 0 0 90; } 2>&1 >/dev/null )
+[ -z "$err" ] && { P=$((P+1)); echo "PASS  unreadable ages are refused by the guard, not by a shell error"; } \
+              || { T=1; echo "FAIL  wedge_verdict wrote to stderr: $err"; }
+
 # ---- the crash names the node
 r=$(decide "$RUN" "exited 1 false" 0 0 0 0 0 2)
 case "$r" in *"worker[exited 1 false]"*) P=$((P+1)); echo "PASS  the reason names the worker and its exit";;

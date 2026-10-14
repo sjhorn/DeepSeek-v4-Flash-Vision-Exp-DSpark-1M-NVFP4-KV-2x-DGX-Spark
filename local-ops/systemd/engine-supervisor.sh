@@ -36,6 +36,10 @@
 #   BEFORE   both containers' last 2,000 log lines, inspect, kernel log and the
 #            kvmgr ledger tails go to ~/kvdiag/supervisor/<ts>/ -- the `down`
 #            removes the containers, and the evidence with them.
+#   WEDGE    both containers running but a load open >= 90s (ledger) or kvmgr
+#            logged STORE PATH STALLED: capture once per boot with kvwedge.sh,
+#            and do NOT restart (NCCL ends a wedge at ~11 min; then the crash
+#            path restarts). Added 2026-10-14 after a 14:36 wedge read `ok`.
 #   AFTER    kvstream.sh all-start re-arms the four capture streams (READ-ONLY
 #            on the engine; NOT kvdiag.sh arm, which turns the store path on).
 #
@@ -62,6 +66,8 @@ OK_EVERY=${OK_EVERY:-60}
 MAX_RESTARTS=${MAX_RESTARTS:-2}
 WINDOW=${WINDOW:-21600}
 LEDGER_DIR=${LEDGER_DIR:-$HOME/kvoffload/diag}
+WEDGE_LOAD_S=${WEDGE_LOAD_S:-90}
+TAG=dspark-vllm-$NAME
 
 # The actuators from local-ops/README.md, plus every script that starts or
 # stops the engine. Bracketed so pgrep cannot match its own argv; and no tag
@@ -134,6 +140,21 @@ decide() {
   [ "$hs" = running ] && [ "$ws" = running ] && { echo "ok both running"; return; }
   [ "$hs" = absent ] || [ "$ws" = absent ] && { echo "absent head[$head] worker[$worker] -- somebody ran down; left alone"; return; }
   echo "other head[$head] worker[$worker]"
+}
+# wedge_verdict STALLED OPEN_LOAD_AGE_S CAPTURED HOLD THRESHOLD_S
+#   STALLED: 1 if kvmgr logged "STORE PATH STALLED" this boot; OPEN_LOAD_AGE_S: age
+#   of the oldest load the ledger shows open ("" = none / unreadable); CAPTURED: 1 if
+#   this boot's wedge was already captured. Prints "capture <why>" or "none".
+#   Capture only -- it never restarts: NCCL ends a wedge at ~11 min and the crash
+#   path takes over. (2026-10-14 14:36: both GPUs stuck on one load, supervisor `ok`.)
+wedge_verdict() {
+  local stalled=$1 age=$2 captured=$3 hold=$4 thr=$5
+  [ "$hold" = 1 ] && { echo "none"; return; }
+  [ "$captured" = 1 ] && { echo "none"; return; }
+  case "$age" in ""|*[!0-9]*) age=-1 ;; esac
+  if [ "$age" -ge "$thr" ]; then echo "capture a load has been open ${age}s"; return; fi
+  [ "$stalled" = 1 ] && { echo "capture kvmgr logged STORE PATH STALLED"; return; }
+  echo "none"
 }
 # ---- END decide ----
 
@@ -227,6 +248,45 @@ restart_both() {
     || warn "capture streams NOT fully armed -- see $d/streams.out"
 }
 
+# THE WEDGE PROBES. Both read-only and cheap: the tail of the head's ledger, and
+# the head engine's journal since this container started.
+# *** ONLY LOADS SUBMITTED SINCE THIS CONTAINER STARTED. *** The first version
+# read the ledger's last boot, and right after a restart -- before the new boot
+# has written a line -- that is the PREVIOUS boot, whose stuck load then reads
+# as "open 1,097s": a false wedge capture after every crash recovery. Found by
+# running the probe on the head mid-boot, 2026-10-14.
+oldest_open_load_age() {
+  local f st; f=$(ls "$LEDGER_DIR"/ledger-r*.jsonl 2>/dev/null | head -1) || return
+  [ -n "$f" ] || return
+  # `date -d ""` is TODAY'S MIDNIGHT and exits 0 -- so an unreadable StartedAt
+  # must stop here, or every load since midnight comes back as "open".
+  st=$(docker inspect -f "{{.State.StartedAt}}" "$NAME" 2>/dev/null) || return
+  [ -n "$st" ] || return
+  st=$(date -d "$st" +%s 2>/dev/null) || return
+  tail -n 3000 "$f" | STARTED="$st" python3 -c '
+import sys,json,time,os
+st=float(os.environ["STARTED"])
+L=[]
+for l in sys.stdin:
+    try:
+        r=json.loads(l)
+        if r.get("ts",0)>=st: L.append(r)
+    except Exception: pass
+if not L: sys.exit()
+b=L[-1].get("boot"); op={}
+for r in L:
+    if r.get("boot")!=b or r.get("kind")!="load": continue
+    if r.get("ev")=="submit": op[r["inner"]]=r["ts"]
+    else: op.pop(r.get("inner"),None)
+if op: print(int(time.time()-min(op.values())))' 2>/dev/null
+}
+stalled_this_boot() {
+  local since; since=$(docker inspect -f "{{.State.StartedAt}}" "$NAME" 2>/dev/null | cut -c1-19 | tr T " ")
+  [ -n "$since" ] || { echo 0; return; }
+  journalctl -a -t "$TAG" --since "$since" --no-pager -o cat 2>/dev/null | grep -q "STORE PATH STALLED" && echo 1 || echo 0
+}
+boot_id() { docker inspect -f "{{.State.StartedAt}}" "$NAME" 2>/dev/null; }
+
 log "engine-supervisor on $(hostname -s): worker=$WORKER_HOST every ${POLL}s; hold=$HOLD; limit $MAX_RESTARTS restarts per ${WINDOW}s"
 last_verdict=""; last_verdict_full=""; last_ok=0
 while :; do
@@ -250,6 +310,15 @@ while :; do
              fi ;;
     *)       [ "$out" != "$last_verdict_full" ] && { [ "$verdict" = locked ] && crit "$out" || warn "$out"; } ;;
   esac
+  if [ "$verdict" = ok ]; then
+    cap=0; [ "$(cat "$STATE/wedge-captured" 2>/dev/null)" = "$(boot_id)" ] && cap=1
+    w=$(wedge_verdict "$(stalled_this_boot)" "$(oldest_open_load_age)" "$cap" "$h" "$WEDGE_LOAD_S")
+    if [ "${w%% *}" = capture ]; then
+      boot_id > "$STATE/wedge-captured"
+      warn "WEDGE suspected (${w#capture }) with both containers running -- capturing evidence (kvwedge.sh), NOT restarting; NCCL ends a wedge at ~11 min"
+      ( "$REPO/local-ops/kvwedge.sh" capture "supervisor: ${w#capture }" 2>&1 | while IFS= read -r l; do echo "<6>kvwedge: $l"; done ) &
+    fi
+  fi
   last_verdict=$verdict; last_verdict_full=$out
   sleep "$POLL"
 done
