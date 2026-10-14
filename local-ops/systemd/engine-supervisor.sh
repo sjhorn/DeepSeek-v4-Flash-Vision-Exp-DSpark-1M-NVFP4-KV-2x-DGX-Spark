@@ -40,6 +40,9 @@
 #            logged STORE PATH STALLED: capture once per boot with kvwedge.sh,
 #            and do NOT restart (NCCL ends a wedge at ~11 min; then the crash
 #            path restarts). Added 2026-10-14 after a 14:36 wedge read `ok`.
+#   LIVENESS both running but the API down >= 3 min (container past a 15-min
+#            boot grace), or a load open >= 3 min: the same two-node restart.
+#            Added 2026-10-14 after a dead engine sat in `running` containers.
 #   AFTER    kvstream.sh all-start re-arms the four capture streams (READ-ONLY
 #            on the engine; NOT kvdiag.sh arm, which turns the store path on).
 #
@@ -164,6 +167,30 @@ wedge_verdict() {
   if [ "$age" -ge "$thr" ]; then echo "capture a load has been open ${age}s"; return; fi
   [ "$stalled" = 1 ] && { echo "capture kvmgr logged STORE PATH STALLED"; return; }
   echo "none"
+}
+# live_verdict API_DOWN_S CONTAINER_AGE_S OPEN_LOAD_AGE_S HOLD BOOTING  (both containers running)
+#   -> "restart <why>" | "none". Pure.
+# *** A DEAD ENGINE IN A RUNNING CONTAINER. *** 2026-10-14 17:16 CEST: a
+# poll-thread load faulted (Xid 32), the engine core died, and the API stopped
+# answering -- but the API process did not exit, both containers read
+# `running`, and the supervisor said `ok` until a human restarted it. The 14:36
+# wedge was the same blindness. Two signals that do not misfire under load:
+#   - /v1/models failing for >= LIVE_API_S while the container is past a boot
+#     grace (a slow manual start must not look dead);
+#   - a load open >= LIVE_LOAD_S (one copy takes well under a second; the
+#     wedge capture already fired at WEDGE_LOAD_S).
+# Not a one-token completion: it can queue for minutes behind a long prefill.
+live_verdict() {
+  local down=$1 age=$2 load=$3 hold=$4 boot=$5
+  [ "$hold" = 1 ] || [ "$boot" = 1 ] && { echo none; return; }
+  case "$down" in ""|*[!0-9]*) down=0 ;; esac
+  case "$age" in ""|*[!0-9]*) age=0 ;; esac
+  case "$load" in ""|*[!0-9]*) load=-1 ;; esac
+  if [ "$load" -ge "${LIVE_LOAD_S:-180}" ]; then echo "restart a load has been open ${load}s -- the engine is wedged"; return; fi
+  if [ "$down" -ge "${LIVE_API_S:-180}" ] && [ "$age" -ge "${BOOT_GRACE_S:-900}" ]; then
+    echo "restart the API has not answered for ${down}s with both containers running -- the engine is dead"; return
+  fi
+  echo none
 }
 # ---- END decide ----
 
@@ -297,7 +324,7 @@ stalled_this_boot() {
 boot_id() { docker inspect -f "{{.State.StartedAt}}" "$NAME" 2>/dev/null; }
 
 log "engine-supervisor on $(hostname -s): worker=$WORKER_HOST every ${POLL}s; hold=$HOLD; limit $MAX_RESTARTS restarts per ${WINDOW}s"
-last_verdict=""; last_verdict_full=""; last_ok=0
+last_verdict=""; last_verdict_full=""; last_ok=0; api_down_since=""
 while :; do
   if [ -e "$HOLD" ] && [ -e "$STATE/lockout" ]; then
     rm -f "$STATE/lockout"; : > "$STATE/restarts"
@@ -320,6 +347,28 @@ while :; do
     *)       [ "$out" != "$last_verdict_full" ] && { [ "$verdict" = locked ] && crit "$out" || warn "$out"; } ;;
   esac
   if [ "$verdict" = ok ]; then
+    # liveness: the API, and the oldest open load
+    if curl -s -o /dev/null -m 5 -w "%{http_code}" localhost:8888/v1/models 2>/dev/null | grep -q 200; then
+      api_down_since=""
+    else
+      [ -n "$api_down_since" ] || api_down_since=$now
+    fi
+    down=0; [ -n "$api_down_since" ] && down=$(( now - api_down_since ))
+    cstart=$(date -d "$(docker inspect -f "{{.State.StartedAt}}" "$NAME" 2>/dev/null)" +%s 2>/dev/null || echo "$now")
+    lv=$(live_verdict "$down" "$(( now - cstart ))" "$(oldest_open_load_age)" "$h" "$b")
+    if [ "${lv%% *}" = restart ]; then
+      if [ "$l" = 1 ]; then crit "LIVENESS: ${lv#restart } -- but LOCKED OUT; not restarting"
+      elif [ "$(recent_restarts)" -ge "$MAX_RESTARTS" ]; then touch "$STATE/lockout"; crit "LIVENESS: ${lv#restart } -- limit reached; LOCKED OUT"
+      else
+        # evidence first, synchronously: the restart destroys it
+        if [ "$(cat "$STATE/wedge-captured" 2>/dev/null)" != "$(boot_id)" ]; then
+          boot_id > "$STATE/wedge-captured"
+          warn "LIVENESS: ${lv#restart } -- capturing evidence (kvwedge.sh) before the restart"
+          timeout 300 "$REPO/local-ops/kvwedge.sh" capture "supervisor liveness: ${lv#restart }" 2>&1 | while IFS= read -r ln; do echo "<6>kvwedge: $ln"; done
+        fi
+        restart_both "LIVENESS: ${lv#restart }"; api_down_since=""; last_verdict=""; continue
+      fi
+    fi
     cap=0; [ "$(cat "$STATE/wedge-captured" 2>/dev/null)" = "$(boot_id)" ] && cap=1
     w=$(wedge_verdict "$(stalled_this_boot)" "$(oldest_open_load_age)" "$cap" "$h" "$WEDGE_LOAD_S")
     if [ "${w%% *}" = capture ]; then

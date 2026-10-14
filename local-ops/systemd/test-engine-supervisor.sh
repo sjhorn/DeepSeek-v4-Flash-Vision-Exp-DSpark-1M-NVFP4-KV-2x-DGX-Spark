@@ -95,6 +95,19 @@ err=$( { wedge_verdict 0 "x" 0 0 90; wedge_verdict 0 "" 0 0 90; } 2>&1 >/dev/nul
 [ -z "$err" ] && { P=$((P+1)); echo "PASS  unreadable ages are refused by the guard, not by a shell error"; } \
               || { T=1; echo "FAIL  wedge_verdict wrote to stderr: $err"; }
 
+# ---- liveness (both containers running)
+lv() { live_verdict "$@" | cut -d" " -f1; }
+il() { local n=$1 want=$2; shift 2; local g; g=$(lv "$@"); if [ "$g" = "$want" ]; then P=$((P+1)); echo "PASS  $n"; else T=1; echo "FAIL  $n  got $g want $want [$(live_verdict "$@")]"; fi; }
+il "*** API down 200s, container 1h old (the 17:16 state) -> restart ***" restart 200 3600 "" 0 0
+il "API down 100s -> not yet"                                   none    100 3600 "" 0 0
+il "*** API down 600s but container only 5 min old (still booting) -> none ***" none 600 300 "" 0 0
+il "*** a load open 200s (the 14:36 wedge) -> restart ***"      restart 0 3600 200 0 0
+il "a load open 60s is normal under load -> none"                none    0 3600 60 0 0
+il "*** hold file -> none, whatever the signals ***"             none    900 3600 900 1 0
+il "boot sentinel fresh -> none"                                 none    900 3600 900 0 1
+il "unreadable ages -> none, not a restart"                      none    x 3600 x 0 0
+err=$( { live_verdict x y z 0 0; } 2>&1 >/dev/null ); [ -z "$err" ] && { P=$((P+1)); echo "PASS  live_verdict: unreadable inputs raise no shell errors"; } || { T=1; echo "FAIL  live_verdict stderr: $err"; }
+
 # ---- the crash names the node
 r=$(decide "$RUN" "exited 1 false" 0 0 0 0 0 2)
 case "$r" in *"worker[exited 1 false]"*) P=$((P+1)); echo "PASS  the reason names the worker and its exit";;
