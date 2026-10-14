@@ -254,13 +254,31 @@ COMPOSE_DISABLE_ENV_FILE=1 NODE_RANK=0 HEADLESS= docker compose --env-file "$ENV
 # reclaimable and the repeated full-cache walks are pure overhead).
 # Set DROP_CACHES_ON_START=0 to disable. Requires passwordless sudo for
 # `sysctl -w vm.drop_caches=3` on both nodes; skipped with a warning if absent.
+#
+# *** AND IT STOPS AT GRAPH CAPTURE, NOT AT THE API (2026-10-14). *** The drop
+# protects the model load and the KV-pool sizing, which are both done when the
+# head logs "Graph capturing finished". The disk-index walk starts seconds
+# later, and it ran its whole length (9-11 min, the largest share of every boot
+# and every supervisor recovery) against dentry/inode caches dropped every 2s,
+# so every one of its ~5 stats per key per rank went to disk. The earlier
+# finding "no value buys both walk speed and swap protection" compared HOW MUCH
+# to drop (1 vs 3), not WHEN to stop. DROP_CACHES_UNTIL=api restores the old
+# behaviour for an A/B; the boot log records which one ran.
 DROP_CACHES_ON_START="${DROP_CACHES_ON_START:-1}"
+DROP_CACHES_UNTIL="${DROP_CACHES_UNTIL:-graphs}"
 DROP_PID=""
 if [ "$DROP_CACHES_ON_START" = "1" ]; then
   if sudo -n sysctl -qw vm.drop_caches=3 2>/dev/null; then
-    echo "Startup cache reclaim: active on both nodes (stops when API is ready)."
+    echo "Startup cache reclaim: active on both nodes (stops at ${DROP_CACHES_UNTIL})."
+    DROP_T0=$(date -u +%Y-%m-%dT%H:%M:%S)
+    HEAD_CID=$(COMPOSE_DISABLE_ENV_FILE=1 docker compose --env-file "$ENV_FILE" "${COMPOSE_ARGS[@]}" ps -q vllm-dspark 2>/dev/null | head -1)
     (
       while ! curl -fsS --max-time 2 "$API_URL" >/dev/null 2>&1; do
+        if [ "$DROP_CACHES_UNTIL" = graphs ] && [ -n "$HEAD_CID" ] \
+           && docker logs --since "$DROP_T0" "$HEAD_CID" 2>&1 | grep -q "Graph capturing finished"; then
+          echo "Startup cache reclaim: stopped at graph capture ($(date -u +%H:%M:%S)Z) -- the disk-index walk runs on warm caches."
+          break
+        fi
         sync; sudo -n sysctl -qw vm.drop_caches=3 2>/dev/null || true
         ssh "$WORKER_HOST" "sync; sudo -n sysctl -qw vm.drop_caches=3" >/dev/null 2>&1 || true
         sleep 2
