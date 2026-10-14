@@ -117,8 +117,10 @@ Ask again.
 recovery.** A user unit on the head (`local-ops/systemd/engine-supervisor.sh`) restarts BOTH nodes
 on its own when either container has EXITED ABNORMALLY (not 0/143, or OOMKilled, or `dead`) — the
 documented recovery, `down` on both then the start script, within ~10s instead of a 10-minute NCCL
-hang and Docker's one-node restarts. It never acts on an absent container (somebody ran `down`), an
-unreadable one, or while `~/.engine-hold` exists, an actuator from `local-ops/README.md` runs, or a
+hang and Docker's one-node restarts. It also starts the engine after a **deliberate reboot**:
+containers stopped by their host's shutdown (exited, `FinishedAt` at most 10 min before that host's
+boot time) get the same two-node start, since `restart: "no"` means nothing else would. It never
+acts on an absent container (somebody ran `down`), an unreadable one, or while `~/.engine-hold` exists, an actuator from `local-ops/README.md` runs, or a
 boot is in progress; and it stops after 2 restarts in 6 hours. **It changes nothing above for humans
 or Claude: a planned restart is still asked for, every time — and `touch ~/.engine-hold` before it
 and before any experiment that might kill a container, `rm` after.** `journalctl --user -u

@@ -53,6 +53,29 @@ is "one restart already in the window -> still restart" restart "$RUN" "exited 1
 is "*** two in the window -> limit, not restart ***" limit "$RUN" "exited 1 false" 0 0 0 2 0 2
 is "*** locked out -> locked, not restart, even with 0 recent ***" locked "$RUN" "exited 1 false" 0 0 0 0 1 2
 is "locked out but healthy -> ok"                ok      "$RUN" "$RUN" 0 0 0 0 1 2
+# ---- a reboot (state = "<status> <code> <oom> <finished_epoch> <host_btime>")
+BT=1792000000
+BYBOOT="exited 143 false $((BT - 30)) $BT"        # stopped 30s before its host booted
+is "*** both stopped by their reboot -> restart (auto-start) ***" restart "$BYBOOT" "$BYBOOT" 0 0 0 0 0 2
+is "only the worker rebooted (head still running) -> restart both" restart "$RUN" "$BYBOOT" 0 0 0 0 0 2
+is "exit 0 by the reboot counts too"              restart "exited 0 false $((BT - 5)) $BT" "$BYBOOT" 0 0 0 0 0 2
+is "*** a docker stop with NO reboot after it -> stays down ***" other "$RUN" "exited 143 false $((BT + 3600)) $BT" 0 0 0 0 0 2
+is "*** stopped 11 min before the boot -> not by the reboot ***" other "exited 143 false $((BT - 660)) $BT" "$RUN" 0 0 0 0 0 2
+is "running containers carry a zero-time FinishedAt -> ok" ok "running 0 false -62135596800 $BT" "running 0 false -62135596800 $BT" 0 0 0 0 0 2
+is "*** reboot-stopped but the other node still unreadable -> wait ***" unreadable "$BYBOOT" unreadable 0 0 0 0 0 2
+is "reboot-stopped but the other ABSENT (somebody ran down) -> left alone" absent "$BYBOOT" absent 0 0 0 0 0 2
+is "*** the hold file outranks a reboot start ***"  hold    "$BYBOOT" "$BYBOOT" 1 0 0 0 0 2
+is "a reboot start counts toward the limit"        limit   "$BYBOOT" "$BYBOOT" 0 0 0 2 0 2
+is "*** RUNNING with a pre-boot FinishedAt (docker keeps the last run's) -> ok, never restarted ***" ok "running 0 false $((BT - 30)) $BT" "running 0 false $((BT - 30)) $BT" 0 0 0 0 0 2
+# Short (3-field) and zero-time states must be refused by the guard, not by a
+# shell error that happens to evaluate false.
+err=$( { decide "exited 143 false" "running 0 false -62135596800 $BT" 0 0 0 0 0 2 >/dev/null; } 2>&1 )
+[ -z "$err" ] && { P=$((P+1)); echo "PASS  short and zero-time states raise no shell errors"; } \
+              || { T=1; echo "FAIL  decide wrote to stderr: $err"; }
+r=$(decide "$RUN" "$BYBOOT" 0 0 0 0 0 2)
+case "$r" in *"worker[stopped by its reboot]"*) P=$((P+1)); echo "PASS  a reboot start says so in its reason";;
+  *) T=1; echo "FAIL  reboot reason missing: $r";; esac
+
 # ---- the crash names the node
 r=$(decide "$RUN" "exited 1 false" 0 0 0 0 0 2)
 case "$r" in *"worker[exited 1 false]"*) P=$((P+1)); echo "PASS  the reason names the worker and its exit";;

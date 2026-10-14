@@ -19,6 +19,11 @@
 #
 #   TRIGGER  a container that EXISTS and exited abnormally (exit code not 0 or
 #            143, or OOMKilled) or is `dead`, on either node.
+#   REBOOT   containers stopped BY THEIR HOST'S SHUTDOWN -- exited, with FinishedAt
+#            at most 10 min before that host's boot time -- are started again
+#            the same way (both nodes), so a deliberate reboot brings the engine
+#            back. A `docker stop` with no reboot after it stays down. (Decided
+#            2026-10-14: compose is `restart: "no"`, so nothing else would.)
 #   NOT      a container that is ABSENT (somebody ran `down`): logged, left alone.
 #            A state it cannot READ (ssh failed): logged, left alone -- an
 #            unreadable worker is not a dead one.
@@ -62,10 +67,11 @@ LEDGER_DIR=${LEDGER_DIR:-$HOME/kvoffload/diag}
 ACTUATORS='[k]v(bootconfirm|bootwalk|killmid|selfheal|xid|xid32|droploop|bisect|load13|ladder|scale|both|conc|overlap|small|inflight|restore|recheck|prefix|converge|loadrounds|budget|enable|dropguard|stallcheck|numpy)\.sh|[k]vsweep\.sh +apply|[k]vdiag\.sh +(arm|disarm|probe|soak|recover)|[f]lags-apply\.sh +apply|[s]tart-deepseek-v4-flash-dspark|[s]top-deepseek-v4-flash-dspark|[u]pdate-and-restart\.sh|[s]witch-model\.sh|[w]atchdog-dspark\.sh|[d]eploy-serving-patch\.sh|local-ops/[s]weep\.sh'
 
 # ---- BEGIN decide (pure: no I/O; extracted by the test, never sourced) ----
-# abnormal "<status> <exitcode> <oomkilled>" -> 0 if it is a crash
+# A state is "<status> <exitcode> <oomkilled> <finished_epoch> <host_btime>".
+# abnormal STATE -> 0 if it is a crash
 abnormal() {
-  local st code oom
-  read -r st code oom <<< "$1"
+  local st code oom _rest
+  read -r st code oom _rest <<< "$1"
   case "$st" in
     dead) return 0 ;;
     exited)
@@ -75,11 +81,23 @@ abnormal() {
   esac
 }
 
+# by_boot STATE -> 0 if the container was stopped by its host's shutdown:
+# exited, and finished in the 10 minutes before the host booted. A crash after
+# the boot finishes AFTER btime and is abnormal() instead.
+by_boot() {
+  local st code oom fin bt
+  read -r st code oom fin bt <<< "$1"
+  [ "$st" = exited ] || return 1
+  case "$fin$bt" in *[!0-9]*|"") return 1 ;; esac
+  [ "$fin" -gt 0 ] && [ "$fin" -le "$bt" ] && [ $(( bt - fin )) -le 600 ]
+}
+
 # decide HEAD WORKER HOLD ACTUATOR BOOTING RECENT LOCKED MAX
 #   HEAD, WORKER: "<status> <exitcode> <oomkilled>" | "absent" | "unreadable"
 #   HOLD, ACTUATOR, BOOTING, LOCKED: 0|1    RECENT: restarts in the window
 # Prints "<verdict> <reason>"; verdict is one of
 #   ok | hold | restart | limit | locked | unreadable | absent | other
+# (a reboot-stopped engine yields `restart` too: the action is the same)
 decide() {
   local head=$1 worker=$2 hold=$3 act=$4 boot=$5 recent=$6 locked=$7 max=$8
   local hs=${head%% *} ws=${worker%% *} crashed=""
@@ -88,6 +106,13 @@ decide() {
   [ "$boot" = 1 ] && { echo "hold a boot is in progress (sentinel fresh)"; return; }
   case "$head" in absent|unreadable) ;; *) abnormal "$head" && crashed="head[$head]";; esac
   case "$worker" in absent|unreadable) ;; *) abnormal "$worker" && crashed="${crashed:+$crashed }worker[$worker]";; esac
+  # A reboot stopped one or both, and nothing is missing or unreadable: the
+  # same two-node start. Unreadable waits (a node still booting is unreadable).
+  if [ -z "$crashed" ] && [ "$hs" != absent ] && [ "$ws" != absent ] \
+     && [ "$hs" != unreadable ] && [ "$ws" != unreadable ]; then
+    by_boot "$head" && crashed="head[stopped by its reboot]"
+    by_boot "$worker" && crashed="${crashed:+$crashed }worker[stopped by its reboot]"
+  fi
   if [ -n "$crashed" ]; then
     [ "$locked" = 1 ] && { echo "locked $crashed crashed; locked out after $max restarts -- create and remove the hold file to re-enable"; return; }
     [ "$recent" -ge "$max" ] && { echo "limit $crashed crashed; $recent restarts already in the window"; return; }
@@ -116,11 +141,16 @@ set +a
 : "${WORKER_HOST:?WORKER_HOST unset in .env.dspark}"
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 "$WORKER_HOST")
 
-# The probe, run locally and on the worker. docker failing prints `unreadable`;
+# The probe, run locally and on the worker. FinishedAt is an RFC 3339 STRING in
+# docker's inspect data (`.State.FinishedAt.Unix` is a template error, which the
+# first version shipped and which read as `unreadable` -- safe, and useless). docker failing prints `unreadable`;
 # a container docker does not list prints `absent`.
 PROBE='out=$(docker ps -a --filter "name=^'"$NAME"'$" --format x) || { echo unreadable; exit 0; }
 [ -z "$out" ] && { echo absent; exit 0; }
-docker inspect -f "{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}" '"$NAME"' 2>/dev/null || echo unreadable'
+bt=$(awk "/^btime/{print \$2}" /proc/stat)
+s=$(docker inspect -f "{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}} {{.State.FinishedAt}}" '"$NAME"' 2>/dev/null) || { echo unreadable; exit 0; }
+set -- $s; fin=$(date -d "$4" +%s 2>/dev/null) || fin=x
+echo "$1 $2 $3 $fin $bt"'
 
 state_head()   { bash -c "$PROBE"; }
 state_worker() { local o; o=$("${SSH[@]}" "bash -c '$PROBE'" 2>/dev/null) || o=""; echo "${o:-unreadable}"; }
