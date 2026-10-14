@@ -340,7 +340,11 @@ def cmd_run(a) -> int:
 
     cap = kv_capacity_tokens()
     pool_tokens = len(bodies) * meta["tokens"]
-    if cap is None or pool_tokens < cap * POOL_OVER_CAP:
+    if cap is not None and pool_tokens < cap * POOL_OVER_CAP and getattr(a, "allow_small_pool", False):
+        log(fp, f"NOTE: pool {pool_tokens:,} tokens < {POOL_OVER_CAP}x the GPU cache ({cap:,}); running anyway "
+                "(--allow-small-pool: other traffic is expected to hold enough of the cache). The "
+                "restores-stopped check ends the run if revisits start hitting the GPU.")
+    elif cap is None or pool_tokens < cap * POOL_OVER_CAP:
         log(fp, f"REFUSING: pool {pool_tokens:,} tokens vs GPU KV cache {cap} -- must be >= {POOL_OVER_CAP}x; "
                 "rebuild with a larger --n")
         stop.set()
@@ -593,6 +597,8 @@ def main() -> int:
     r.add_argument("--decoders", type=int, default=3); r.add_argument("--decode-tokens", type=int, default=2048)
     r.add_argument("--stuck-s", type=float, default=60); r.add_argument("--slow-s", type=float, default=180)
     r.add_argument("--ledger", default=LEDGER)
+    r.add_argument("--allow-small-pool", action="store_true",
+                   help="run with a pool under 1.5x the GPU cache, when other traffic occupies enough of it")
     sub.add_parser("status")
     a = ap.parse_args()
     if a.cmd != "status" and os.uname().nodename.split(".")[0] != "spark-45ea" and not os.environ.get("KVRACE_API"):
