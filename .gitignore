@@ -33,6 +33,8 @@ vllm-cache/
 !/local-ops/**/*.md
 !/local-ops/**/requirements.txt
 !/local-ops/dspark-dropcaches
+# user systemd units (spark-memwatch, engine-supervisor) -- tooling, not output
+!/local-ops/systemd/*.service
 
 # ONE named .json, and it is CONFIGURATION rather than a capture.
 # flags.reference.json is the committed source for /var/tmp/vllm-kv-flags/flags.json,

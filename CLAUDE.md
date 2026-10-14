@@ -113,6 +113,17 @@ Triggers, and what each must record:
 a plan, or an earlier approval in the same session, does **not** carry over to the next restart.
 Ask again.
 
+**The ONE standing exception: `engine-supervisor` (approved 2026-10-14), and only for crash
+recovery.** A user unit on the head (`local-ops/systemd/engine-supervisor.sh`) restarts BOTH nodes
+on its own when either container has EXITED ABNORMALLY (not 0/143, or OOMKilled, or `dead`) — the
+documented recovery, `down` on both then the start script, within ~10s instead of a 10-minute NCCL
+hang and Docker's one-node restarts. It never acts on an absent container (somebody ran `down`), an
+unreadable one, or while `~/.engine-hold` exists, an actuator from `local-ops/README.md` runs, or a
+boot is in progress; and it stops after 2 restarts in 6 hours. **It changes nothing above for humans
+or Claude: a planned restart is still asked for, every time — and `touch ~/.engine-hold` before it
+and before any experiment that might kill a container, `rm` after.** `journalctl --user -u
+engine-supervisor` says what it did and why; its evidence is in `~/kvdiag/supervisor/<ts>/`.
+
 When asking, state all four:
 
 1. **the goal** — what question the restart answers, or what it deploys;
@@ -306,7 +317,8 @@ mid-compaction; every key is verified on both ranks at boot; runtime verificatio
   writes off. (Separate 256-slot load and store pools are deployed now.)
 - **Docker's auto-restart cannot recover a two-node engine.** A head restarted alone hangs in NCCL
   init forever; the tell is the worker's much older uptime. Recovery is `down` on both, then the
-  start script.
+  start script. **So the compose says `restart: "no"` (2026-10-14) and `engine-supervisor` does that
+  recovery** — see "Restarting the cluster" above for its scope and the hold file.
 - **Make a hang dumpable before you need it**: `faulthandler.register(SIGUSR1)` needs no ptrace,
   but `chain=True` chains to SIGUSR1's default action, which is TERMINATE. **And verify the target
   pid is present and armed before signalling** — a pid from a log prefix killed the core once.

@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# engine-supervisor.sh -- a COORDINATED restart of both nodes when either engine dies.
+#
+# CLASS: ACTUATOR -- RESTARTS BOTH NODES, but only on an ABNORMAL EXIT, and it
+# is the ONE standing exception to "ask before every restart" (approved
+# 2026-10-14, scoped to crash recovery). Humans and Claude still ask, and put
+# `touch ~/.engine-hold` around any planned work.
+#
+# WHY. 2026-10-14 06:21:48: Xid 32 killed the worker's rank. The head then hung
+# ten minutes on an NCCL sync with the dead rank and died, and Docker's
+# `restart: unless-stopped` brought each node back SEPARATELY. They happened to
+# pair up; on 2026-10-10 the same mechanism left rank 0 hanging in NCCL init
+# for ever. Clients saw ~20 minutes of hangs and then 500/502/503. Compose now
+# says `restart: "no"`, and this does the documented recovery instead -- `down`
+# on BOTH nodes, then the start script -- within ~10s of the death, so the
+# outage is the boot and nothing more.
+#
+# HEAD ONLY. Every 10s it reads both containers' state (the worker's over ssh).
+#
+#   TRIGGER  a container that EXISTS and exited abnormally (exit code not 0 or
+#            143, or OOMKilled) or is `dead`, on either node.
+#   NOT      a container that is ABSENT (somebody ran `down`): logged, left alone.
+#            A state it cannot READ (ssh failed): logged, left alone -- an
+#            unreadable worker is not a dead one.
+#   HOLD     ~/.engine-hold exists; or an actuator from local-ops/README.md is
+#            running; or the start script's boot sentinel is fresh.
+#   LIMIT    at most 2 restarts in 6 hours. Then CRITICAL and NO action until
+#            the hold file is created and removed (which clears the count).
+#   BEFORE   both containers' last 2,000 log lines, inspect, kernel log and the
+#            kvmgr ledger tails go to ~/kvdiag/supervisor/<ts>/ -- the `down`
+#            removes the containers, and the evidence with them.
+#   AFTER    kvstream.sh all-start re-arms the four capture streams (READ-ONLY
+#            on the engine; NOT kvdiag.sh arm, which turns the store path on).
+#
+#   journalctl --user -u engine-supervisor
+#
+# The verdict is the pure function `decide` between the BEGIN/END markers.
+# local-ops/systemd/test-engine-supervisor.sh EXTRACTS it to a temp file and
+# tests it -- this file is never sourced, because sourcing runs it.
+#
+# The unit runs a COPY of this file (ExecStartPre): bash reads a script lazily
+# by byte offset, and a push that edits a running script makes it exit 0
+# having done nothing.
+set -u
+
+REPO=${DSPARK_REPO:-$HOME/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark}
+NAME=${ENGINE_CONTAINER:-deepseek-v4-flash-0731-dspark-1m-nvfp4-kv-2x-dgx-spark-vllm-dspark-1}
+HOLD=${ENGINE_HOLD:-$HOME/.engine-hold}
+STATE=${ENGINE_SUPERVISOR_STATE:-$HOME/.local/state/engine-supervisor}
+EVIDENCE=${ENGINE_SUPERVISOR_EVIDENCE:-$HOME/kvdiag/supervisor}
+SENTINEL=${BOOT_SENTINEL:-/tmp/dspark-booting}
+SENTINEL_MAX_AGE=${SENTINEL_MAX_AGE:-900}
+POLL=${POLL:-10}
+OK_EVERY=${OK_EVERY:-60}
+MAX_RESTARTS=${MAX_RESTARTS:-2}
+WINDOW=${WINDOW:-21600}
+LEDGER_DIR=${LEDGER_DIR:-$HOME/kvoffload/diag}
+
+# The actuators from local-ops/README.md, plus every script that starts or
+# stops the engine. Bracketed so pgrep cannot match its own argv; and no tag
+# here appears in THIS script's name, which is how a bracket gets defeated.
+ACTUATORS='[k]v(bootconfirm|bootwalk|killmid|selfheal|xid|xid32|droploop|bisect|load13|ladder|scale|both|conc|overlap|small|inflight|restore|recheck|prefix|converge|loadrounds|budget|enable|dropguard|stallcheck|numpy)\.sh|[k]vsweep\.sh +apply|[k]vdiag\.sh +(arm|disarm|probe|soak|recover)|[f]lags-apply\.sh +apply|[s]tart-deepseek-v4-flash-dspark|[s]top-deepseek-v4-flash-dspark|[u]pdate-and-restart\.sh|[s]witch-model\.sh|[w]atchdog-dspark\.sh|[d]eploy-serving-patch\.sh|local-ops/[s]weep\.sh'
+
+# ---- BEGIN decide (pure: no I/O; extracted by the test, never sourced) ----
+# abnormal "<status> <exitcode> <oomkilled>" -> 0 if it is a crash
+abnormal() {
+  local st code oom
+  read -r st code oom <<< "$1"
+  case "$st" in
+    dead) return 0 ;;
+    exited)
+      [ "${oom:-false}" = true ] && return 0
+      case "${code:-}" in 0|143) return 1 ;; *) return 0 ;; esac ;;
+    *) return 1 ;;
+  esac
+}
+
+# decide HEAD WORKER HOLD ACTUATOR BOOTING RECENT LOCKED MAX
+#   HEAD, WORKER: "<status> <exitcode> <oomkilled>" | "absent" | "unreadable"
+#   HOLD, ACTUATOR, BOOTING, LOCKED: 0|1    RECENT: restarts in the window
+# Prints "<verdict> <reason>"; verdict is one of
+#   ok | hold | restart | limit | locked | unreadable | absent | other
+decide() {
+  local head=$1 worker=$2 hold=$3 act=$4 boot=$5 recent=$6 locked=$7 max=$8
+  local hs=${head%% *} ws=${worker%% *} crashed=""
+  [ "$hold" = 1 ] && { echo "hold hold file present"; return; }
+  [ "$act" = 1 ] && { echo "hold an actuator is running"; return; }
+  [ "$boot" = 1 ] && { echo "hold a boot is in progress (sentinel fresh)"; return; }
+  case "$head" in absent|unreadable) ;; *) abnormal "$head" && crashed="head[$head]";; esac
+  case "$worker" in absent|unreadable) ;; *) abnormal "$worker" && crashed="${crashed:+$crashed }worker[$worker]";; esac
+  if [ -n "$crashed" ]; then
+    [ "$locked" = 1 ] && { echo "locked $crashed crashed; locked out after $max restarts -- create and remove the hold file to re-enable"; return; }
+    [ "$recent" -ge "$max" ] && { echo "limit $crashed crashed; $recent restarts already in the window"; return; }
+    echo "restart $crashed crashed"; return
+  fi
+  [ "$hs" = unreadable ] || [ "$ws" = unreadable ] && { echo "unreadable head[$head] worker[$worker]"; return; }
+  [ "$hs" = running ] && [ "$ws" = running ] && { echo "ok both running"; return; }
+  [ "$hs" = absent ] || [ "$ws" = absent ] && { echo "absent head[$head] worker[$worker] -- somebody ran down; left alone"; return; }
+  echo "other head[$head] worker[$worker]"
+}
+# ---- END decide ----
+
+log()  { echo "<6>$*"; }
+warn() { echo "<4>WARNING $*"; }
+crit() { echo "<2>CRITICAL $*"; }
+
+if [ "$(hostname -s)" != spark-45ea ]; then
+  crit "engine-supervisor runs on the HEAD (spark-45ea) only; this is $(hostname -s). Refusing."
+  exit 1
+fi
+
+set -a
+# shellcheck disable=SC1091
+. "$REPO/.env.dspark" || { crit "cannot read $REPO/.env.dspark"; exit 1; }
+set +a
+: "${WORKER_HOST:?WORKER_HOST unset in .env.dspark}"
+SSH=(ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 "$WORKER_HOST")
+
+# The probe, run locally and on the worker. docker failing prints `unreadable`;
+# a container docker does not list prints `absent`.
+PROBE='out=$(docker ps -a --filter "name=^'"$NAME"'$" --format x) || { echo unreadable; exit 0; }
+[ -z "$out" ] && { echo absent; exit 0; }
+docker inspect -f "{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}" '"$NAME"' 2>/dev/null || echo unreadable'
+
+state_head()   { bash -c "$PROBE"; }
+state_worker() { local o; o=$("${SSH[@]}" "bash -c '$PROBE'" 2>/dev/null) || o=""; echo "${o:-unreadable}"; }
+
+mkdir -p "$STATE" "$EVIDENCE"
+touch "$STATE/restarts"
+
+recent_restarts() {
+  local now; now=$(date +%s)
+  awk -v c=$(( now - WINDOW )) '$1>c{n++} END{print n+0}' "$STATE/restarts"
+}
+
+booting() {
+  [ -e "$SENTINEL" ] || return 1
+  local m; m=$(stat -c %Y "$SENTINEL" 2>/dev/null) || return 1
+  [ $(( $(date +%s) - m )) -lt "$SENTINEL_MAX_AGE" ]
+}
+
+actuator_running() {
+  pgrep -f -- "$ACTUATORS" >/dev/null 2>&1
+  case $? in 0) return 0 ;; 1) return 1 ;; *) return 0 ;; esac   # pgrep error: assume busy
+}
+
+capture() {   # capture DIR -- evidence BEFORE the down removes it
+  local d=$1
+  docker inspect "$NAME" > "$d/head-inspect.json" 2>&1
+  docker logs --tail 2000 "$NAME" > "$d/head.log" 2>&1
+  "${SSH[@]}" "docker inspect $NAME" > "$d/worker-inspect.json" 2>&1
+  "${SSH[@]}" "docker logs --tail 2000 $NAME" > "$d/worker.log" 2>&1
+  # An unreadable log must say so, not leave an empty file that reads as clean.
+  journalctl -k --since=-30min --no-pager > "$d/kernel-head.txt" 2>&1 \
+    || echo "UNREADABLE: journalctl -k failed on the head" >> "$d/kernel-head.txt"
+  "${SSH[@]}" "journalctl -k --since=-30min --no-pager" > "$d/kernel-worker.txt" 2>&1 \
+    || echo "UNREADABLE: journalctl -k failed on the worker" >> "$d/kernel-worker.txt"
+  # The write-ahead ledger: the open entries for the dead pid name the transfer.
+  for f in "$LEDGER_DIR"/ledger-r*.jsonl; do
+    [ -e "$f" ] && tail -n 4000 "$f" > "$d/head-$(basename "$f")"
+  done
+  "${SSH[@]}" "for f in $LEDGER_DIR/ledger-r*.jsonl; do [ -e \$f ] && echo \$f; done" 2>/dev/null |
+    while read -r f; do "${SSH[@]}" "tail -n 4000 $f" > "$d/worker-$(basename "$f")" 2>&1; done
+}
+
+restart_both() {
+  local why=$1 ts d rc
+  ts=$(date -u +%Y%m%dT%H%M%SZ); d="$EVIDENCE/$ts"; mkdir -p "$d"
+  echo "$why" > "$d/reason"
+  date +%s >> "$STATE/restarts"
+  crit "RESTARTING BOTH NODES: $why. Evidence -> $d"
+  capture "$d"
+  log "evidence captured ($(du -sh "$d" | cut -f1)); down on both nodes"
+  (cd "$REPO" && ./stop-deepseek-v4-flash-dspark.sh) > "$d/stop.out" 2>&1; rc=$?
+  log "stop exited $rc"
+  (cd "$REPO" && ./start-deepseek-v4-flash-dspark.sh) > "$d/start.out" 2>&1; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    crit "start script exited $rc -- see $d/start.out. The next poll decides again; the restart is counted."
+    return
+  fi
+  # An exit status is not evidence that work happened: read the effect.
+  log "start exited 0; head[$(state_head)] worker[$(state_worker)]"
+  bash "$REPO/local-ops/kvstream.sh" all-start > "$d/streams.out" 2>&1 \
+    && log "capture streams re-armed" \
+    || warn "capture streams NOT fully armed -- see $d/streams.out"
+}
+
+log "engine-supervisor on $(hostname -s): worker=$WORKER_HOST every ${POLL}s; hold=$HOLD; limit $MAX_RESTARTS restarts per ${WINDOW}s"
+last_verdict=""; last_verdict_full=""; last_ok=0
+while :; do
+  if [ -e "$HOLD" ] && [ -e "$STATE/lockout" ]; then
+    rm -f "$STATE/lockout"; : > "$STATE/restarts"
+    log "lockout CLEARED by the hold file; restart count reset"
+  fi
+  h=0; [ -e "$HOLD" ] && h=1
+  a=0; actuator_running && a=1
+  b=0; booting && b=1
+  l=0; [ -e "$STATE/lockout" ] && l=1
+  hs=$(state_head); ws=$(state_worker)
+  out=$(decide "$hs" "$ws" "$h" "$a" "$b" "$(recent_restarts)" "$l" "$MAX_RESTARTS")
+  verdict=${out%% *}; reason=${out#* }
+  now=$(date +%s)
+  case "$verdict" in
+    restart) restart_both "$reason"; last_verdict=""; continue ;;
+    limit)   touch "$STATE/lockout"; crit "NOT restarting: $reason. LOCKED OUT -- touch then rm $HOLD to re-enable." ;;
+    ok)      if [ "$last_verdict" != ok ] || [ $(( now - last_ok )) -ge "$OK_EVERY" ]; then
+               log "ok head[$hs] worker[$ws]"; last_ok=$now
+             fi ;;
+    *)       [ "$out" != "$last_verdict_full" ] && { [ "$verdict" = locked ] && crit "$out" || warn "$out"; } ;;
+  esac
+  last_verdict=$verdict; last_verdict_full=$out
+  sleep "$POLL"
+done

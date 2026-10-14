@@ -3,7 +3,13 @@ services:
     image: ${DSPARK_VLLM_IMAGE:-vllm-dspark-runtime:dspark-nvfp4-stage-c}
     network_mode: host
     ipc: host
-    restart: unless-stopped
+    # *** "no", AND NEVER A DOCKER RESTART POLICY, because Docker restarts ONE
+    # *** node. *** Two ranks are one engine: a rank restarted alone hangs in
+    # NCCL init for ever (2026-10-10), or by luck pairs up again after a
+    # ten-minute NCCL timeout on the survivor (2026-10-14, ~20 minutes of client
+    # hangs then 500/502/503). Crash recovery is local-ops/systemd/
+    # engine-supervisor.sh on the head: `down` on BOTH, then the start script.
+    restart: "no"
     shm_size: "64gb"
 
     # Log to the journal, not to the container's json-file.

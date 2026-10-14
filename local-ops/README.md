@@ -46,6 +46,11 @@ way. Classes are taken from each script's source (what it executes), not from it
 | `kvbudget.sh`, `kvenable.sh` | **ACTUATOR** | walk the byte budget; can evict tens of thousands of files |
 | `kvdropguard.sh` | **ACTUATOR** | proves the drop guard fires under a real overlap |
 | `kvstallcheck.sh`, `kvnumpy.sh` | **ACTUATOR** | negative control for the stall deadline; makes the numpy producer name itself |
+| `systemd/spark-memwatch.sh` | READ-ONLY | user unit on **both** nodes: MemAvailable, swap, PSI and `oom_kill` to the journal every minute, WARNING on a transition. Never acts. `journalctl --user -u spark-memwatch` |
+| `systemd/engine-supervisor.sh` | **ACTUATOR — restarts both nodes, on its own** | user unit on the **head**: on an ABNORMAL exit of either container (not 0/143, OOMKilled, dead), captures evidence to `~/kvdiag/supervisor/<ts>/`, then `down` both + start + `kvstream.sh all-start`. Holds while `~/.engine-hold` exists, an actuator in this table runs, or a boot is in progress; 2 restarts per 6h, then locked out until the hold file is created and removed. **`touch ~/.engine-hold` before any planned restart or experiment.** `journalctl --user -u engine-supervisor` |
+| `systemd/test-engine-supervisor.sh` | READ-ONLY (offline) | the supervisor's verdict table, EXTRACTED and tested; pass a mutated copy to break-verify |
+| `install-user-units.sh` | ACTUATOR on the host | links and (re)starts the user units on the node it runs on; refuses off the Sparks |
+| `swap-grow.sh` | ACTUATOR on the host (sudo) | grows `/run/sparkos/host/swap-64k.img` to 64 GiB in place; refuses unless the engine is down and swap use < 2 GiB |
 
 The package and its offline tests live in their own repo, `~/dev/python/vllm-kvmgr` (`tests/run-all.sh`, both modes).
 

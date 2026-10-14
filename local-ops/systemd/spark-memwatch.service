@@ -1,0 +1,23 @@
+# spark-memwatch -- memory/swap/PSI/OOM-kill to the journal, BOTH nodes. Logs only.
+# Installed by local-ops/install-user-units.sh (a symlink into ~/.config/systemd/user).
+# A USER unit, like sparkstats.service: linger is on and /home is on the host
+# disk, so it survives reboots and spark-os image updates with no image rebuild.
+#   journalctl --user -u spark-memwatch
+[Unit]
+Description=spark-memwatch -- memory, swap, PSI and OOM-kill logging (read-only)
+
+[Service]
+Type=simple
+# Run a COPY: a deploy push must never edit the script a running bash is reading.
+ExecStartPre=/bin/cp -f %h/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark/local-ops/systemd/spark-memwatch.sh %t/spark-memwatch.sh
+ExecStart=/bin/bash %t/spark-memwatch.sh
+Restart=always
+RestartSec=10
+TimeoutStopSec=5
+# It only reads /proc, so it is granted nothing.
+NoNewPrivileges=true
+MemoryMax=32M
+CPUQuota=5%
+
+[Install]
+WantedBy=default.target

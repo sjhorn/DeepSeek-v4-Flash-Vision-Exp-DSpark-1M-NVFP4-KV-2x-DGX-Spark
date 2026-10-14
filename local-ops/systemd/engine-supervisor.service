@@ -1,0 +1,25 @@
+# engine-supervisor -- coordinated restart of BOTH nodes on an abnormal engine exit.
+# HEAD (spark-45ea) ONLY. Installed by local-ops/install-user-units.sh.
+# The one standing exception to "ask before every restart" (2026-10-14),
+# scoped to crash recovery. Planned work: `touch ~/.engine-hold` first.
+#   journalctl --user -u engine-supervisor
+[Unit]
+Description=engine-supervisor -- coordinated two-node restart on an engine crash
+After=network-online.target
+
+[Service]
+Type=simple
+# Run a COPY: a deploy push must never edit the script a running bash is reading.
+ExecStartPre=/bin/cp -f %h/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark/local-ops/systemd/engine-supervisor.sh %t/engine-supervisor.sh
+ExecStart=/bin/bash %t/engine-supervisor.sh
+Restart=always
+RestartSec=30
+TimeoutStopSec=15
+# *** NO NoNewPrivileges, NO PrivateTmp, and both are deliberate. *** The start
+# script it runs uses `sudo -n sysctl vm.drop_caches=3` for the boot-time cache
+# reclaim; NoNewPrivileges would make that sudo fail and the boot would quietly
+# differ ("Startup cache reclaim: SKIPPED"). And the boot sentinel it honours is
+# /tmp/dspark-booting, which a private /tmp would hide.
+
+[Install]
+WantedBy=default.target
