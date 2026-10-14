@@ -131,6 +131,15 @@ decide() {
     by_boot "$head" && crashed="head[stopped by its reboot]"
     by_boot "$worker" && crashed="${crashed:+$crashed }worker[stopped by its reboot]"
   fi
+  # *** A RESTART NEEDS BOTH NODES. *** 2026-10-14 17:41 CEST, the first full
+  # reboot: the head came up first, saw its own container `exited 137`, and
+  # restarted at once -- while the worker was still booting. `down` "succeeded"
+  # (its ssh failed quietly), the start script died on "No route to host", and
+  # the doomed attempt still used one of the two restarts in the window. A crash
+  # seen while either node is unreadable now WAITS; the next poll decides again.
+  if [ -n "$crashed" ] && { [ "$hs" = unreadable ] || [ "$ws" = unreadable ]; }; then
+    echo "unreadable $crashed crashed, but a node is unreadable -- waiting for both before restarting"; return
+  fi
   if [ -n "$crashed" ]; then
     [ "$locked" = 1 ] && { echo "locked $crashed crashed; locked out after $max restarts -- create and remove the hold file to re-enable"; return; }
     [ "$recent" -ge "$max" ] && { echo "limit $crashed crashed; $recent restarts already in the window"; return; }

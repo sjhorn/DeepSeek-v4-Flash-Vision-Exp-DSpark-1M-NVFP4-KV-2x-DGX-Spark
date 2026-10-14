@@ -45,6 +45,8 @@ is "worker exited 143 with the head running -> restart (half a pair)" restart "$
 is "*** worker ABSENT (somebody ran down) -> left alone ***" absent "$RUN" "absent" 0 0 0 0 0 2
 is "both absent -> left alone"                   absent  absent absent 0 0 0 0 0 2
 is "*** worker UNREADABLE (ssh failed) -> not a crash ***" unreadable "$RUN" unreadable 0 0 0 0 0 2
+is "*** head crashed but worker UNREADABLE (still booting) -> wait, not restart ***" unreadable "exited 137 false" unreadable 0 0 0 0 0 2
+is "worker crashed but head UNREADABLE -> wait"            unreadable unreadable "exited 1 false" 0 0 0 0 0 2
 is "restarting/created -> other, no action"      other   "$RUN" "restarting 0 false" 0 0 0 0 0 2
 # ---- holds outrank a crash
 is "*** hold file outranks a crash ***"          hold    "$RUN" "exited 1 false" 1 0 0 0 0 2
