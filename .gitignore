@@ -35,6 +35,8 @@ vllm-cache/
 !/local-ops/dspark-dropcaches
 # user systemd units (spark-memwatch, engine-supervisor) -- tooling, not output
 !/local-ops/systemd/*.service
+# the semantic canary's FIXED prompt and sentinel (sha-pinned in kvcanary.py)
+!/local-ops/kvcanary/*.txt
 
 # ONE named .json, and it is CONFIGURATION rather than a capture.
 # flags.reference.json is the committed source for /var/tmp/vllm-kv-flags/flags.json,
