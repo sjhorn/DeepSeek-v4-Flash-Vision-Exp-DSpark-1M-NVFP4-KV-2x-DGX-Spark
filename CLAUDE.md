@@ -178,7 +178,9 @@ confirmation above.**
 releases tagged `v0.1.0`, `v0.2.0`, …), deployed by push to `/home/shorn/vllm-kvmgr` on **both**
 nodes, beside this checkout. The compose mounts `../vllm-kvmgr/src/kvmgr` and its generated
 dist-info, and the start script **refuses** unless both nodes hold it at the same commit. So a
-deploy that touches kvmgr is a push of **both** repos. Its `--with-dspark-patches` test mode needs
+deploy that touches kvmgr is a push of **both** repos. **kvmgr's code is iterated in its own Claude
+session from that repo** (since 2026-10-14). Its `CLAUDE.md` stands alone, and a version bump
+there renames the dist-info this compose mounts. Its `--with-dspark-patches` test mode needs
 `KVMGR_DSPARK_REPO=<this checkout>`.
 
 **State, 2026-10-13:** store and restore **on by default** from committed
