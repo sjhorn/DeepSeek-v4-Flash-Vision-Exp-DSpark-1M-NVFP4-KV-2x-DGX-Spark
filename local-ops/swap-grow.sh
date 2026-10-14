@@ -10,8 +10,15 @@
 #
 # WHEN. Only with the engine DOWN on this node. With it running, swapoff must
 # page 10+ GiB back into 3-4 GiB of MemAvailable, and there is no OOM net under
-# spark-os. So this REFUSES if a dspark container exists or swap use exceeds
-# 2 GiB; run it in the restart window, after `down` and before the start.
+# spark-os. So this REFUSES if a dspark container exists, or if MemAvailable
+# does not exceed swap in use by 16 GiB; run it in the restart window, after
+# `down` and before the start.
+#
+# *** NOT "swap used < 2 GiB", WHICH IS WHAT THE FIRST VERSION SAID. *** With
+# both containers down on 2026-10-14, 5.3 GiB (head) and 6.1 GiB (worker) stayed
+# swapped -- pages that leave swap only when touched -- against 118.6 GiB
+# available. The hazard is paging swap into RAM that is not there, so the
+# guard compares the two instead of capping one.
 #
 # SAME PATH, /run/sparkos/host/swap-64k.img (the 64k-page swap sparkos-swap
 # looks for), so sparkos-swap.service picks it up at every boot and
@@ -24,7 +31,7 @@
 set -euo pipefail
 SWAP=${SWAP:-/run/sparkos/host/swap-64k.img}
 SIZE_G=${SIZE_G:-64}
-MAX_USED_KB=$(( 2 * 1024 * 1024 ))
+MARGIN_KB=$(( 16 * 1024 * 1024 ))
 
 case "$(hostname -s)" in spark-45ea|spark-da08) ;; *)
   echo "refusing: $(hostname -s) is not a Spark" >&2; exit 1 ;; esac
@@ -38,11 +45,14 @@ if [ "$(( n + 0 ))" -ne 0 ]; then
   docker ps -a --filter name=dspark --format '  {{.Names}} {{.Status}}' >&2
   exit 1
 fi
-used=$(awk '/^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} END{print t-f}' /proc/meminfo)
-if [ "$used" -gt "$MAX_USED_KB" ]; then
-  echo "refusing: swap in use is $(( used / 1024 )) MiB (> 2048 MiB); swapoff would page it into RAM" >&2
+read -r used avail < <(awk '/^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} /^MemAvailable:/{a=$2}
+                             END{print t-f, a}' /proc/meminfo)
+if [ "$avail" -lt $(( used + MARGIN_KB )) ]; then
+  echo "refusing: swap in use $(( used >> 20 )) GiB, MemAvailable $(( avail >> 20 )) GiB --" \
+       "swapoff would page it into RAM without a 16 GiB margin" >&2
   exit 1
 fi
+echo "swap in use $(( used >> 20 )) GiB against $(( avail >> 20 )) GiB available: safe to swapoff"
 want=$(( SIZE_G * 1024 * 1024 * 1024 ))
 have=$(stat -c %s "$SWAP")
 free=$(df -B1 --output=avail "$(dirname "$SWAP")" | tail -1)
