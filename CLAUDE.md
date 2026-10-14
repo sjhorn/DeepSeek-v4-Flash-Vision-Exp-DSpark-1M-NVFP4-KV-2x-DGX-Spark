@@ -161,7 +161,7 @@ the dated narrative are in the proxy repo (`~/dev/python/vllm-proxy`): `docs/kv/
 `docs/kv/engine-rules.md` there. **Nothing here is a reason to restart without the per-restart
 confirmation above.**
 
-**The package is NOT in this repo.** It is its own repo, `~/dev/python/vllm-kvmgr` (full history,
+**PENDING (2026-10-14): commit `208ad0d` is not on the nodes yet** — they still run `c571120` with the old `packages/vllm-kvmgr` mount, and pushing this without `down` on both nodes first would delete files under the running engine. Once deployed, delete this sentence. **The package is NOT in this repo.** It is its own repo, `~/dev/python/vllm-kvmgr` (full history,
 releases tagged `v0.1.0`, `v0.2.0`, …), deployed by push to `/home/shorn/vllm-kvmgr` on **both**
 nodes, beside this checkout. The compose mounts `../vllm-kvmgr/src/kvmgr` and its generated
 dist-info, and the start script **refuses** unless both nodes hold it at the same commit. So a
