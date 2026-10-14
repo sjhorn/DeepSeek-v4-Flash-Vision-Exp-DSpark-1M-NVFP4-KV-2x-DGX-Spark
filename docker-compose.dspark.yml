@@ -175,7 +175,7 @@ services:
       # dist-info is the one `pip install` would write, generated from its
       # pyproject.toml by deploy/gen-dist-info.py and checked by its tests.
       - ../vllm-kvmgr/src/kvmgr:/opt/env/lib/python3.12/site-packages/kvmgr:ro
-      - ../vllm-kvmgr/deploy/vllm_kvmgr-0.4.5.dist-info:/opt/env/lib/python3.12/site-packages/vllm_kvmgr-0.4.5.dist-info:ro
+      - ../vllm-kvmgr/deploy/vllm_kvmgr-0.4.6.dist-info:/opt/env/lib/python3.12/site-packages/vllm_kvmgr-0.4.6.dist-info:ro
       # Targeted DEBUG logging, off unless VLLM_LOGGING_CONFIG_PATH is set below.
       # gpu_worker.py:628 computes the two --kv-cache-memory-bytes suggestions and
       # the full memory decomposition (weights / peak activation / non-torch /
