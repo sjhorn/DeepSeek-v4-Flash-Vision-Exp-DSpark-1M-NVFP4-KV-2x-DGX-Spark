@@ -75,19 +75,20 @@ def chunks(n: int, k: int):
 
 
 ARMS = [
-    # (label, reps, jobs, extra args)
-    ("vllm-exact batch idx=scalar order=any abi=12080", 3, 300, ["--mode", "batch"]),
-    ("batch idx=ARRAY (PR #53971 claim)", 3, 300, ["--mode", "batch", "--idx", "array"]),
-    ("batch order=stream", 2, 300, ["--mode", "batch", "--order", "stream"]),
-    ("batch order=during", 1, 300, ["--mode", "batch", "--order", "during"]),
-    ("batch abi=13000 (_v2)", 2, 300, ["--mode", "batch", "--abi", "13000"]),
-    ("batch flags=PREFER_OVERLAP_WITH_COMPUTE", 1, 300, ["--mode", "batch", "--flags", "1"]),
-    ("chunk 1024", 2, 1000, ["--mode", "chunk", "--chunk", "1024"]),
-    ("chunk 256", 2, 1000, ["--mode", "chunk", "--chunk", "256"]),
-    ("chunk 64", 2, 1000, ["--mode", "chunk", "--chunk", "64"]),
-    ("chunk 1 (batch API, one descriptor per call)", 1, 300, ["--mode", "chunk", "--chunk", "1"]),
-    ("loop cuMemcpyAsync (ask9)", 2, 2000, ["--mode", "loop"]),
-    ("vllm-exact again (still faulting?)", 2, 300, ["--mode", "batch"]),
+    # (label, reps, jobs, extra args). Rate through raw libcuda is ~1 per 1-250 jobs of
+    # this content, so a clean arm needs >=1,000 jobs to mean anything.
+    ("vllm-exact batch idx=scalar order=any abi=12080", 3, 1000, ["--mode", "batch"]),
+    ("batch idx=ARRAY (PR #53971 claim)", 3, 1000, ["--mode", "batch", "--idx", "array"]),
+    ("batch order=stream", 2, 1000, ["--mode", "batch", "--order", "stream"]),
+    ("batch order=during", 1, 1000, ["--mode", "batch", "--order", "during"]),
+    ("batch abi=13000 (_v2)", 2, 1000, ["--mode", "batch", "--abi", "13000"]),
+    ("batch flags=PREFER_OVERLAP_WITH_COMPUTE", 1, 1000, ["--mode", "batch", "--flags", "1"]),
+    ("chunk 1024", 2, 2000, ["--mode", "chunk", "--chunk", "1024"]),
+    ("chunk 256", 2, 2000, ["--mode", "chunk", "--chunk", "256"]),
+    ("chunk 64", 2, 2000, ["--mode", "chunk", "--chunk", "64"]),
+    ("chunk 1 (batch API, one descriptor per call)", 1, 1000, ["--mode", "chunk", "--chunk", "1"]),
+    ("loop cuMemcpyAsync (ask9)", 2, 3000, ["--mode", "loop"]),
+    ("vllm-exact again (still faulting?)", 2, 1000, ["--mode", "batch"]),
 ]
 
 
