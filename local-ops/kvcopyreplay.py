@@ -179,7 +179,8 @@ def cmd_launch(a) -> int:
     for i, p_ in enumerate(a.dumps):
         mounts += ["-v", f"{os.path.abspath(p_)}:/dumps/{i}.json:ro"]
         inner.append(f"/dumps/{i}.json")
-    cmd = ["docker", "run", "--rm", "--gpus", "all", "--ipc=host", "--name", "kvcopyreplay",
+    cmd = ["docker", "run", "--rm", "--gpus", "all", "--ipc=host", "--ulimit", "memlock=-1",
+           "--name", "kvcopyreplay",
            "-v", f"{here}/kvcopyreplay.py:/kvcopyreplay.py:ro", *mounts,
            "--entrypoint", "python3", IMAGE, "-u", "/kvcopyreplay.py", "replay",
            "--dumps", *inner, "--jobs", str(a.jobs), "--order", a.order,
@@ -246,7 +247,6 @@ def cmd_replay(a) -> int:
           f"order={a.order}, gap {lo}-{hi} ms", flush=True)
 
     streams, events = [], []
-    last_end = None
     counts = {"any": 0, "stream": 0}
     t0 = time.time()
 
@@ -262,10 +262,27 @@ def cmd_replay(a) -> int:
                 return f"tensor {t} block {r['block']} slot {r['slot']}"
         return None
 
+    try:
+        return _jobs(a, plans, rng, lo, hi, streams, events, counts, t0, verify)
+    except RuntimeError as e:          # an Xid surfaces here as a CUDA error
+        print(json.dumps({"verdict": "cuda_error", "why": str(e)[:300], "jobs": counts["any"] + counts["stream"],
+                          "counts": counts, "last_order_any": _STATE.get("any"),
+                          "last_copy": _STATE.get("copy")}), flush=True)
+        os._exit(5)                      # the context is poisoned; never sync
+
+
+_STATE: dict = {}
+
+
+def _jobs(a, plans, rng, lo, hi, streams, events, counts, t0, verify) -> int:
+    import torch
+    last_end = None
     for job in range(a.jobs):
         any_ = order_for(a.order, job)
+        _STATE["any"] = any_
         counts["any" if any_ else "stream"] += 1
         for i, (bs, bd, bn, _, _) in enumerate(plans):
+            _STATE["copy"] = i + 1
             stream = streams.pop() if streams else torch.cuda.Stream()
             start = events.pop() if events else torch.Event(enable_timing=True)
             end = events.pop() if events else torch.Event(enable_timing=True)
