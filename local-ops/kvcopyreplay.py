@@ -106,7 +106,7 @@ def rebase(d: dict, host_new: dict, gpu_new: dict, geo: dict):
     return src, dst, size
 
 
-def synthesize(d: dict) -> dict:
+def synthesize(d: dict, side: str = "both") -> dict:
     """Same tensors, same sizes, same descriptor count -- but each tensor's
     copies packed sequentially from offset 0 on both sides. Separates "these
     addresses" from "this call, this shape"."""
@@ -120,8 +120,10 @@ def synthesize(d: dict) -> dict:
         n = int(r["size"])
         so, do = nxt_s.get(t, 0), nxt_d.get(t, 0)
         nxt_s[t], nxt_d[t] = so + n, do + n
-        r["src"] = int(T[t]["host_base"]) + so
-        r["dst"] = int(T[t]["gpu_alloc_base"]) + do
+        if side in ("both", "src"):
+            r["src"] = int(T[t]["host_base"]) + so
+        if side in ("both", "dst"):
+            r["dst"] = int(T[t]["gpu_alloc_base"]) + do
         out.append([r[c] for c in COLS])
     return dict(d, descriptors=out)
 
@@ -230,8 +232,9 @@ def cmd_launch(a) -> int:
            "--dumps", *inner, "--jobs", str(a.jobs), "--order", a.order,
            "--gap-ms", a.gap_ms, "--stuck-s", str(a.stuck_s),
            "--verify-every", str(a.verify_every), "--seed", str(a.seed),
-           "--max-desc", str(a.max_desc), "--api", a.api] + (["--synthetic"] if a.synthetic else []) \
-        + (["--fresh"] if a.fresh else [])
+           "--max-desc", str(a.max_desc), "--api", a.api, "--skip", str(a.skip)] \
+        + (["--synthetic", a.synthetic] if a.synthetic else []) \
+        + (["--fresh"] if a.fresh else []) + (["--shuffle"] if a.shuffle else [])
     print(f"{time.strftime('%H:%M:%S')} launch on {socket.gethostname()}: Xid lines {x0}; {' '.join(cmd)}", flush=True)
     t0 = time.time()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -283,7 +286,13 @@ def cmd_replay(a) -> int:
     plans = []
     for d in dumps:
         if a.synthetic:
-            d = synthesize(d)
+            d = synthesize(d, a.synthetic)
+        if a.shuffle:
+            dd_ = list(d["descriptors"])
+            random.Random(a.seed).shuffle(dd_)
+            d = dict(d, descriptors=dd_)
+        if a.skip:
+            d = dict(d, descriptors=d["descriptors"][a.skip:], n_descriptors=len(d["descriptors"]) - a.skip)
         if a.max_desc:
             d = dict(d, descriptors=d["descriptors"][:a.max_desc], n_descriptors=min(a.max_desc, len(d["descriptors"])))
         s, dd, n = rebase(d, host_new, gpu_new, geo)
@@ -402,6 +411,8 @@ def selftest() -> int:
         except ValueError:
             ok(name, True)
     sy = synthesize(mk([[0, 0, 7, 2, 70, 1300, 10], [0, 0, 8, 3, 90, 1100, 10]]))
+    sd = synthesize(mk([[0, 0, 7, 2, 70, 1300, 10]]), "dst")
+    ok("synthetic dst keeps src", sd["descriptors"][0][4] == 70 and sd["descriptors"][0][5] == 1000)
     ok("synthetic packs from 0", [r[4] for r in sy["descriptors"]] == [50, 60]
        and [r[5] for r in sy["descriptors"]] == [1000, 1010])
     ok("order any", order_for("any", 1) is True)
@@ -444,8 +455,10 @@ def main() -> int:
         p.add_argument("--max-desc", type=int, default=0, help="replay only the first N descriptors")
         p.add_argument("--api", choices=("batch", "loop"), default="batch",
                        help="batch = swap_blocks_batch (cuMemcpyBatchAsync); loop = one cudaMemcpyAsync each")
-        p.add_argument("--synthetic", action="store_true",
-                       help="same sizes and tensors, but sequential src slots and dst rows from 0")
+        p.add_argument("--synthetic", nargs="?", const="both", choices=("both", "src", "dst"), default=None,
+                       help="same sizes and tensors, but sequential addresses from 0 on that side")
+        p.add_argument("--shuffle", action="store_true", help="the same descriptors in a seeded random order")
+        p.add_argument("--skip", type=int, default=0, help="drop the first N descriptors")
         p.add_argument("--fresh", action="store_true", help="a new stream and events per copy, no wait chain")
     a = ap.parse_args()
     return {"launch": cmd_launch, "check": cmd_check, "replay": cmd_replay}[a.cmd](a)
