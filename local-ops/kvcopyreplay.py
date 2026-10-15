@@ -106,6 +106,50 @@ def rebase(d: dict, host_new: dict, gpu_new: dict, geo: dict):
     return src, dst, size
 
 
+def synthesize(d: dict) -> dict:
+    """Same tensors, same sizes, same descriptor count -- but each tensor's
+    copies packed sequentially from offset 0 on both sides. Separates "these
+    addresses" from "this call, this shape"."""
+    T = d["tensors"]
+    nxt_s: dict = {}
+    nxt_d: dict = {}
+    out = []
+    for row in d["descriptors"]:
+        r = dict(zip(COLS, row))
+        t = str(int(r["tensor"]))
+        n = int(r["size"])
+        so, do = nxt_s.get(t, 0), nxt_d.get(t, 0)
+        nxt_s[t], nxt_d[t] = so + n, do + n
+        r["src"] = int(T[t]["host_base"]) + so
+        r["dst"] = int(T[t]["gpu_alloc_base"]) + do
+        out.append([r[c] for c in COLS])
+    return dict(d, descriptors=out)
+
+
+_CUDART = None
+
+
+def loop_copy(bs, bd, bn, stream) -> None:
+    """One cudaMemcpyAsync per descriptor, on the same stream."""
+    global _CUDART
+    import ctypes
+    import glob
+    if _CUDART is None:
+        import torch
+        libs = sorted(glob.glob(os.path.join(os.path.dirname(torch.__file__), "..", "nvidia", "cu*", "lib", "libcudart.so*"))
+                      + glob.glob(os.path.join(os.path.dirname(torch.__file__), "..", "nvidia", "cuda_runtime", "lib", "libcudart.so*"))
+                      + glob.glob("/usr/local/cuda/lib64/libcudart.so*"))
+        if not libs:
+            raise RuntimeError("libcudart not found for --api loop")
+        _CUDART = ctypes.CDLL(libs[0])
+        _CUDART.cudaMemcpyAsync.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_void_p]
+    h = ctypes.c_void_p(stream.cuda_stream)
+    for s_, d_, n_ in zip(bs.tolist(), bd.tolist(), bn.tolist()):
+        rc = _CUDART.cudaMemcpyAsync(d_, s_, n_, 4, h)      # cudaMemcpyDefault
+        if rc:
+            raise RuntimeError(f"cudaMemcpyAsync rc={rc}")
+
+
 def order_for(arm: str, job: int) -> bool:
     """is_src_access_order_any for this job."""
     if arm == "any":
@@ -185,7 +229,9 @@ def cmd_launch(a) -> int:
            "--entrypoint", "python3", IMAGE, "-u", "/kvcopyreplay.py", "replay",
            "--dumps", *inner, "--jobs", str(a.jobs), "--order", a.order,
            "--gap-ms", a.gap_ms, "--stuck-s", str(a.stuck_s),
-           "--verify-every", str(a.verify_every), "--seed", str(a.seed)]
+           "--verify-every", str(a.verify_every), "--seed", str(a.seed),
+           "--max-desc", str(a.max_desc), "--api", a.api] + (["--synthetic"] if a.synthetic else []) \
+        + (["--fresh"] if a.fresh else [])
     print(f"{time.strftime('%H:%M:%S')} launch on {socket.gethostname()}: Xid lines {x0}; {' '.join(cmd)}", flush=True)
     t0 = time.time()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -236,6 +282,10 @@ def cmd_replay(a) -> int:
         host_new[t], gpu_new[t] = h.data_ptr(), g.data_ptr()
     plans = []
     for d in dumps:
+        if a.synthetic:
+            d = synthesize(d)
+        if a.max_desc:
+            d = dict(d, descriptors=d["descriptors"][:a.max_desc], n_descriptors=min(a.max_desc, len(d["descriptors"])))
         s, dd, n = rebase(d, host_new, gpu_new, geo)
         plans.append((torch.tensor(s, dtype=torch.int64), torch.tensor(dd, dtype=torch.int64),
                       torch.tensor(n, dtype=torch.int64),
@@ -283,14 +333,21 @@ def _jobs(a, plans, rng, lo, hi, streams, events, counts, t0, verify) -> int:
         counts["any" if any_ else "stream"] += 1
         for i, (bs, bd, bn, _, _) in enumerate(plans):
             _STATE["copy"] = i + 1
-            stream = streams.pop() if streams else torch.cuda.Stream()
-            start = events.pop() if events else torch.Event(enable_timing=True)
-            end = events.pop() if events else torch.Event(enable_timing=True)
+            if a.fresh:
+                stream, start, end = torch.cuda.Stream(), torch.Event(enable_timing=True), torch.Event(enable_timing=True)
+                last_end = None
+            else:
+                stream = streams.pop() if streams else torch.cuda.Stream()
+                start = events.pop() if events else torch.Event(enable_timing=True)
+                end = events.pop() if events else torch.Event(enable_timing=True)
             if last_end is not None:
                 stream.wait_event(last_end)
             with torch.cuda.stream(stream):
                 start.record(stream)
-                torch.ops._C_cache_ops.swap_blocks_batch(bs, bd, bn, any_)
+                if a.api == "batch":
+                    torch.ops._C_cache_ops.swap_blocks_batch(bs, bd, bn, any_)
+                else:
+                    loop_copy(bs, bd, bn, stream)
                 end.record(stream)
             t_sub = time.time()
             while not end.query():
@@ -344,6 +401,9 @@ def selftest() -> int:
             ok(name, False)
         except ValueError:
             ok(name, True)
+    sy = synthesize(mk([[0, 0, 7, 2, 70, 1300, 10], [0, 0, 8, 3, 90, 1100, 10]]))
+    ok("synthetic packs from 0", [r[4] for r in sy["descriptors"]] == [50, 60]
+       and [r[5] for r in sy["descriptors"]] == [1000, 1010])
     ok("order any", order_for("any", 1) is True)
     ok("order stream", order_for("stream", 0) is False)
     ok("order alt alternates", [order_for("alt", j) for j in range(4)] == [True, False, True, False])
@@ -381,6 +441,12 @@ def main() -> int:
         p.add_argument("--stuck-s", type=float, default=10.0)
         p.add_argument("--verify-every", type=int, default=100)
         p.add_argument("--seed", type=int, default=20261015)
+        p.add_argument("--max-desc", type=int, default=0, help="replay only the first N descriptors")
+        p.add_argument("--api", choices=("batch", "loop"), default="batch",
+                       help="batch = swap_blocks_batch (cuMemcpyBatchAsync); loop = one cudaMemcpyAsync each")
+        p.add_argument("--synthetic", action="store_true",
+                       help="same sizes and tensors, but sequential src slots and dst rows from 0")
+        p.add_argument("--fresh", action="store_true", help="a new stream and events per copy, no wait chain")
     a = ap.parse_args()
     return {"launch": cmd_launch, "check": cmd_check, "replay": cmd_replay}[a.cmd](a)
 
