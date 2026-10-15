@@ -208,6 +208,45 @@ def get(path: str, timeout: float = 20):
         return None
 
 
+def engine_load():
+    """(running, waiting) request counts summed over engines from /metrics, or
+    None when unreadable. `waiting` includes a request waiting on its KV load."""
+    try:
+        with urllib.request.urlopen(API + "/metrics", timeout=5) as r:
+            text = r.read().decode()
+    except Exception:
+        return None
+    got = {}
+    for ln in text.splitlines():
+        for k in ("running", "waiting"):
+            if ln.startswith(f"vllm:num_requests_{k}{{") or ln.startswith(f"vllm:num_requests_{k} "):
+                try:
+                    got[k] = got.get(k, 0) + float(ln.rsplit(" ", 1)[1])
+                except ValueError:
+                    return None
+    if "running" not in got or "waiting" not in got:
+        return None
+    return int(got["running"]), int(got["waiting"])
+
+
+def quiet_visit(samples) -> bool:
+    """Was this visit's restore a CLASS-B one: no other request computing while
+    ours waited on its load? `samples` are engine_load() readings taken during
+    the visit. True only if at least one sample caught a request waiting, and
+    EVERY such sample shows 0 running. An unreadable sample makes it False:
+    a visit we could not see is not counted as quiet. Pure."""
+    seen = False
+    for s in samples:
+        if s is None:
+            return False
+        running, waiting = s
+        if waiting >= 1:
+            seen = True
+            if running != 0:
+                return False
+    return seen
+
+
 def xid_counts():
     """(head, worker) Xid line counts, or None for a node that cannot be read.
     Overridable for the selftest via KVRACE_FAKE_XID=<file with 'h w'>."""
@@ -352,17 +391,49 @@ def cmd_run(a) -> int:
             set_knob("load_wait_compute", prev[0])
         return 2
     visits = restores = since_restore = 0
+    quiet_visits = quiet_loads = noisy_loads = 0
+    quiet = getattr(a, "quiet", False)
+    last_quiet = time.time()
     state, why = "continue", ""
     walls = []
     t0 = time.time()
     try:
         while state == "continue":
             b = bodies[visits % len(bodies)]
+            samples, sampling = [], threading.Event()
+            if quiet:
+                # CLASS B: start each visit on an otherwise idle engine
+                t_wait = time.time()
+                while engine_load() != (0, 0):
+                    if time.time() - t_wait > a.quiet_wait_s:
+                        state, why = "nocondition", f"the engine was never idle for {a.quiet_wait_s:.0f}s -- no class-B window"
+                        break
+                    time.sleep(a.quiet_sample_s)
+                if state != "continue":
+                    break
+                sampling.set()
+
+                def sampler():
+                    while sampling.is_set():
+                        samples.append(engine_load())
+                        time.sleep(a.quiet_sample_s)
+                st_thr = threading.Thread(target=sampler, daemon=True); st_thr.start()
             before = led.loads
             st, js, sec = post("/v1/chat/completions", b, a.slow_s + 60)
+            if quiet:
+                sampling.clear(); st_thr.join()
             visits += 1
             led.poll()
             got = led.loads - before
+            if quiet and got > 0:
+                if quiet_visit(samples):
+                    quiet_visits += 1; quiet_loads += got; last_quiet = time.time()
+                else:
+                    noisy_loads += got
+            if quiet and time.time() - last_quiet > a.quiet_wait_s:
+                # traffic keeps landing DURING visits: no class-B restore will ever count
+                state, why = "nocondition", f"no class-B restore in {a.quiet_wait_s:.0f}s -- other traffic overlapped every visit"
+                break
             if got > 0:
                 restores += 1
                 since_restore = 0
@@ -371,8 +442,9 @@ def cmd_run(a) -> int:
                 since_restore += 1
             if visits % 10 == 0 or st != 200:
                 log(fp, f"  visit {visits}: HTTP {st} {sec:.1f}s, +{got} loads (total {led.loads}, g0 {led.g0}), "
-                        f"restores {restores}, decoders ok/bad {dec_stats['n']-dec_stats['bad']}/{dec_stats['bad']}")
-            state, why = verdict(loads=led.loads, target=a.loads, xid0=xid0, xid=xid_counts(),
+                        f"restores {restores}, decoders ok/bad {dec_stats['n']-dec_stats['bad']}/{dec_stats['bad']}"
+                        + (f", class-B loads {quiet_loads} (other traffic during {noisy_loads})" if quiet else ""))
+            state, why = verdict(loads=quiet_loads if quiet else led.loads, target=a.loads, xid0=xid0, xid=xid_counts(),
                                  last_status=st, open_load_age=led.oldest_open_age(), stuck_s=a.stuck_s,
                                  slow=sec, slow_s=a.slow_s, restores_seen=restores, visits=visits,
                                  visits_since_restore=since_restore, pool=len(bodies))
@@ -389,7 +461,9 @@ def cmd_run(a) -> int:
                "wait_compute": {"true": led.wait_true, "false": led.wait_false, "unknown": led.wait_none},
                "restore_wall_p50_s": walls[len(walls)//2] if walls else None,
                "minutes": round((time.time()-t0)/60, 1), "xid_start": xid0, "xid_end": xid_counts(),
-               "decoders": dec_stats, "knob_restored": restored, "prev_knob": prev}
+               "decoders": dec_stats, "knob_restored": restored, "prev_knob": prev,
+               "quiet": {"on": quiet, "visits": quiet_visits, "loads": quiet_loads,
+                         "loads_with_other_traffic": noisy_loads} if quiet else None}
         json.dump(res, open(os.path.join(out, "result.json"), "w"), indent=1)
         log(fp, f"VERDICT {state.upper()}: {why}")
         log(fp, json.dumps(res))
@@ -464,13 +538,21 @@ def selftest() -> int:
        b0["messages"][0]["content"][:16] != b1["messages"][0]["content"][:16], True)
     eq("a body is byte-identical across calls", json.dumps(body(3, 1000)) == json.dumps(body(3, 1000)), True)
 
+    eq("quiet: waiting with nothing running -> class B", quiet_visit([(0, 1), (0, 1), (1, 0)]), True)
+    eq("*** quiet: another request running while ours waits -> NOT class B ***",
+       quiet_visit([(0, 1), (1, 1), (1, 0)]), False)
+    eq("*** quiet: no sample caught the wait -> NOT class B (unseen is not quiet) ***",
+       quiet_visit([(0, 0), (1, 0)]), False)
+    eq("*** quiet: an unreadable sample -> NOT class B ***", quiet_visit([(0, 1), None]), False)
+
     # ---- the whole tool against a fake engine
     tmp = tempfile.mkdtemp(prefix="kvrace-")
     ledger = os.path.join(tmp, "ledger.jsonl")
     xidf = os.path.join(tmp, "xid")
     open(ledger, "w").close()
     open(xidf, "w").write("5 5")
-    state = {"knob": 1, "visits": 0, "fail_at": None, "fail": None, "inner": 0}
+    state = {"knob": 1, "visits": 0, "fail_at": None, "fail": None, "inner": 0,
+             "others": 0, "inprog": 0, "visit_s": 0.0, "noisy_every": 0}
     lock = threading.Lock()
 
     class H(http.server.BaseHTTPRequestHandler):
@@ -482,6 +564,11 @@ def selftest() -> int:
             self.wfile.write(b)
 
         def do_GET(self):
+            if self.path == "/metrics":
+                b = (f'vllm:num_requests_running{{engine="0"}} {state["others"]}\n'
+                     f'vllm:num_requests_waiting{{engine="0"}} {state["inprog"]}\n').encode()
+                self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers()
+                self.wfile.write(b); return
             if self.path == "/kv/workers":
                 return self._send(200, {"ok": True, "ranks": [{"knobs": {"load_wait_compute": state["knob"]}},
                                                              {"knobs": {"load_wait_compute": state["knob"]}}]})
@@ -494,6 +581,12 @@ def selftest() -> int:
                 state["knob"] = int(req["value"]); return self._send(200, {"ok": True})
             content = req["messages"][0]["content"]
             if content.startswith("kvrace-pool-"):
+                if state["visit_s"]:
+                    state["inprog"] = 1
+                    if state["noisy_every"] and (state["visits"] + 1) % state["noisy_every"] == 0:
+                        state["others"] = 1
+                    time.sleep(state["visit_s"])
+                    state["inprog"] = 0; state["others"] = 0
                 with lock:
                     state["visits"] += 1
                     v = state["visits"]
@@ -525,7 +618,7 @@ def selftest() -> int:
 
     def args(**kw):
         d = dict(n=5, tokens=1000, timeout=30, loads=30, arm="off", decoders=1, decode_tokens=4,
-                 stuck_s=1.0, slow_s=30, ledger=ledger)
+                 stuck_s=1.0, slow_s=30, ledger=ledger, quiet=False, quiet_wait_s=900, quiet_sample_s=0.25)
         d.update(kw); return argparse.Namespace(**d)
 
     import contextlib
@@ -570,6 +663,37 @@ def selftest() -> int:
     r = json.load(open(sorted(os.path.join(DIR, d, "result.json") for d in os.listdir(DIR) if d.startswith("run-"))[-1]))
     eq("an injected HTTP 500 stops the run: verdict http", (rc, r["verdict"]), (12, "http"))
 
+    time.sleep(1.1)
+    with contextlib.redirect_stdout(io.StringIO()):
+        state.update(fail=None, visit_s=0.3, noisy_every=2)
+        rc = cmd_run(args(arm="asis", loads=12, decoders=0, quiet=True, quiet_wait_s=10, quiet_sample_s=0.05))
+        state.update(visit_s=0.0, noisy_every=0)
+    r = json.load(open(sorted(os.path.join(DIR, d, "result.json") for d in os.listdir(DIR) if d.startswith("run-"))[-1]))
+    eq("*** --quiet: the target counts ONLY class-B loads ***", (rc, r["verdict"], r["quiet"]["loads"] >= 12), (0, "clean", True))
+    eq("*** --quiet: loads with other traffic running are counted apart, not toward the target ***",
+       r["quiet"]["loads_with_other_traffic"] > 0, True)
+    eq("--quiet: total loads = class-B + other-traffic loads",
+       r["loads"], r["quiet"]["loads"] + r["quiet"]["loads_with_other_traffic"])
+
+    time.sleep(1.1)
+    with contextlib.redirect_stdout(io.StringIO()):
+        state.update(others=1)
+        v0 = state["visits"]
+        rc = cmd_run(args(arm="asis", loads=12, decoders=0, quiet=True, quiet_wait_s=0.5, quiet_sample_s=0.05))
+        state.update(others=0)
+    r = json.load(open(sorted(os.path.join(DIR, d, "result.json") for d in os.listdir(DIR) if d.startswith("run-"))[-1]))
+    eq("*** --quiet on an engine that is never idle: nocondition, and no pool traffic sent ***",
+       (r["verdict"], state["visits"] - v0), ("nocondition", 0))
+
+    time.sleep(1.1)
+    with contextlib.redirect_stdout(io.StringIO()):
+        state.update(visit_s=0.2, noisy_every=1)
+        rc = cmd_run(args(arm="asis", loads=12, decoders=0, quiet=True, quiet_wait_s=1.5, quiet_sample_s=0.05))
+        state.update(visit_s=0.0, noisy_every=0)
+    r = json.load(open(sorted(os.path.join(DIR, d, "result.json") for d in os.listdir(DIR) if d.startswith("run-"))[-1]))
+    eq("*** --quiet when traffic overlaps EVERY visit: ends nocondition, never runs forever ***",
+       (r["verdict"], r["quiet"]["loads"]), ("nocondition", 0))
+
     open(xidf, "w").write("5 x")
     time.sleep(1.1)
     with contextlib.redirect_stdout(io.StringIO()):
@@ -597,6 +721,11 @@ def main() -> int:
     r.add_argument("--decoders", type=int, default=3); r.add_argument("--decode-tokens", type=int, default=2048)
     r.add_argument("--stuck-s", type=float, default=60); r.add_argument("--slow-s", type=float, default=180)
     r.add_argument("--ledger", default=LEDGER)
+    r.add_argument("--quiet", action="store_true",
+                   help="CLASS B: wait for an idle engine before each visit; count toward --loads only "
+                        "loads whose request waited with NO other request running (use with --decoders 0)")
+    r.add_argument("--quiet-wait-s", type=float, default=900)
+    r.add_argument("--quiet-sample-s", type=float, default=0.25)
     r.add_argument("--allow-small-pool", action="store_true",
                    help="run with a pool under 1.5x the GPU cache, when other traffic occupies enough of it")
     sub.add_parser("status")
