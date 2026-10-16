@@ -9,8 +9,8 @@
 #
 # Stock vllm/vllm-openai:v0.31.0 (CUDA 13, sm_120 code runs on GB10's sm_121),
 # upstream DeepSeek V4 + DSpark on model runner V2, fp8_ds_mla KV, b12x MoE
-# (W4A16), and the patches-031 set. kvmgr and dispram are OFF in the first
-# boot, to isolate the core; GATE.md adds them as separate steps.
+# (W4A16), and the patches-031 set. kvmgr 0.5.0 is mounted and OFF unless
+# KV_TRANSFER_CONFIG_031 is set; dispram is not ported.
 #
 # Generated from docker-compose.dspark.yml's environment (2026-10-16): kept
 # every setting 0.31 still reads; dropped (0.21-only or replaced):
@@ -54,6 +54,12 @@ services:
       - ./patches/safetensors_e8m0_plugin/safetensors_e8m0.py:/usr/local/lib/python3.12/dist-packages/safetensors_e8m0.py:ro
       - ./patches/safetensors_e8m0_plugin/safetensors_e8m0-0.1.dist-info:/usr/local/lib/python3.12/dist-packages/safetensors_e8m0-0.1.dist-info:ro
       - /var/tmp/vllm-kv-flags:/etc/vllm-kv-flags:ro
+      # kvmgr 0.5.0 (the vLLM 0.31 line): its OWN worktree and its OWN tier.
+      # Inert unless KV_TRANSFER_CONFIG_031 is set. NEVER production's
+      # ~/vllm-kvmgr checkout or ~/kvoffload: 0.31's layout differs.
+      - ${KVMGR_DIR_031:-${HOME}/vllm-kvmgr-031}/src/kvmgr:/usr/local/lib/python3.12/dist-packages/kvmgr:ro
+      - ${KVMGR_DIR_031:-${HOME}/vllm-kvmgr-031}/deploy/vllm_kvmgr-0.5.0.dist-info:/usr/local/lib/python3.12/dist-packages/vllm_kvmgr-0.5.0.dist-info:ro
+      - ${KVOFFLOAD_DIR_031:-${HOME}/kvoffload-031}:/kvoffload
     environment:
       HF_HOME: /cache/huggingface
       SERPER_API_KEY: "${SERPER_API_KEY:-}"
@@ -122,6 +128,9 @@ services:
       VLLM_LOGGING_CONFIG_PATH: "${VLLM_LOGGING_CONFIG_PATH_031:-}"
       # the same bytes as production by default, so the token counts compare
       KV_CACHE_MEMORY_BYTES: "${KV_CACHE_MEMORY_BYTES_031-${KV_CACHE_MEMORY_BYTES:-}}"
+      # kvmgr on: e.g. production's KV_TRANSFER_CONFIG. Not read from it, so
+      # production's env file never turns it on by accident.
+      KV_TRANSFER_CONFIG: "${KV_TRANSFER_CONFIG_031:-}"
       # --- 0.31-specific ---
       PYTHONPATH: /opt/dspark031:/opt/b12x
       DSPARK031_LOAD_PROBE: "${DSPARK031_LOAD_PROBE:-0}"   # diagnostic (dspark031.py)
@@ -155,6 +164,7 @@ services:
         --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.80}
         --safetensors-load-strategy "$${SAFETENSORS_LOAD_STRATEGY}"
         $${KV_CACHE_MEMORY_BYTES:+--kv-cache-memory-bytes "$$KV_CACHE_MEMORY_BYTES"}
+        $${KV_TRANSFER_CONFIG:+--kv-transfer-config "$$KV_TRANSFER_CONFIG"}
         --enable-prefix-caching
         --async-scheduling
         --enable-chunked-prefill
