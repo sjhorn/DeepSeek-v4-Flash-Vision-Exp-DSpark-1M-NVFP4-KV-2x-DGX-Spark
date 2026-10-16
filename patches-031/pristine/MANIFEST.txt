@@ -1,0 +1,15 @@
+# patches-031/pristine/ -- the vLLM v0.31.0 sources the 0.31 patches derive FROM
+#
+# Fetched from the upstream tag (github.com/vllm-project/vllm, v0.31.0) because the
+# 0.31 runtime image is not chosen yet. RE-CAPTURE from the image once it is
+# (patches/pristine/MANIFEST.txt's method), and re-diff: a 0.31 image built from a
+# fork or a dev commit may differ from the tag.
+source=github:vllm-project/vllm@v0.31.0
+captured=2026-10-16
+#
+# sha256  lines  path
+57f6024bbbc5aeea0a8f967cf768998e1047ac621805a10f4451f52c59d34fd3  351  vllm/entrypoints/anthropic/protocol.py
+1e09aafc799b6604b187e9a8cb0b74558724d790a860f709c1236936697ec161  1171  vllm/entrypoints/anthropic/serving.py
+05c73052934a9d4664ccd5df562ce71011278d9a511932da102ef2efff00e934  904  vllm/v1/core/block_pool.py
+f820bee4f42b878b262a30f3728a97d7413477b2a277748e20f2528ac2ec2f2a  3359  vllm/v1/core/sched/scheduler.py
+27bf6ae418754de91228d798405058b66d1484f793fd45f9d69396dfca5e9fa4  360  vllm/v1/engine/detokenizer.py
