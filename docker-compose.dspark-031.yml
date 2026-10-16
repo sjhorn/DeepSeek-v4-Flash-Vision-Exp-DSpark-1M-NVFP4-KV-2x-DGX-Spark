@@ -108,13 +108,19 @@ services:
       MASTER_PORT: "${MASTER_PORT:-25000}"
       MTP_NUM_TOKENS: "${MTP_NUM_TOKENS:-5}"
       DEFAULT_CHAT_TEMPLATE_KWARGS: "${DEFAULT_CHAT_TEMPLATE_KWARGS:-}"
-      HF_OVERRIDES: "${HF_OVERRIDES:-}"
+      # NOT production's HF_OVERRIDES: that names our 0.21 vision port's class
+      # (DeepseekV4VForConditionalGeneration). 0.31 has Vision-Exp upstream.
+      # (default set in the command: a literal } cannot sit in a compose default)
+      HF_OVERRIDES: "${HF_OVERRIDES_031:-}"
       COMPILATION_CONFIG: "${COMPILATION_CONFIG:-}"
-      VLLM_LOGGING_CONFIG_PATH: "${VLLM_LOGGING_CONFIG_PATH:-}"
-      KV_CACHE_MEMORY_BYTES: "${KV_CACHE_MEMORY_BYTES:-}"
+      # production's points at a file this compose does not mount
+      VLLM_LOGGING_CONFIG_PATH: "${VLLM_LOGGING_CONFIG_PATH_031:-}"
+      # the same bytes as production by default, so the token counts compare
+      KV_CACHE_MEMORY_BYTES: "${KV_CACHE_MEMORY_BYTES_031-${KV_CACHE_MEMORY_BYTES:-}}"
       # --- 0.31-specific ---
       PYTHONPATH: /opt/dspark031
-      DG_JIT_NVCC_COMPILER: "${DG_JIT_NVCC_COMPILER:-/usr/local/cuda/bin/nvcc}"
+      # NOT production's DG_JIT_NVCC_COMPILER (/opt/env/bin/nvcc, the 0.21 image)
+      DG_JIT_NVCC_COMPILER: "${DG_JIT_NVCC_COMPILER_031:-/usr/local/cuda/bin/nvcc}"
       # the 64K-page kernel hangs the default lazy loader (GATE.md)
       SAFETENSORS_LOAD_STRATEGY: "${SAFETENSORS_LOAD_STRATEGY:-eager}"
       # our W4A16 MoE choice on upstream's b12x backend (0.21: VLLM_USE_B12X_MOE)
@@ -124,7 +130,8 @@ services:
         SPECULATIVE_CONFIG="{\"method\":\"dspark\",\"num_speculative_tokens\":${MTP_NUM_TOKENS:-5},\"draft_sample_method\":\"probabilistic\"}";
         CHAT_TEMPLATE_KWARGS="$${DEFAULT_CHAT_TEMPLATE_KWARGS:-}";
         [ -n "$${CHAT_TEMPLATE_KWARGS}" ] || CHAT_TEMPLATE_KWARGS='{"thinking":false}';
-        echo "dspark031 gate: kwargs=$${CHAT_TEMPLATE_KWARGS} max_model_len=${MAX_MODEL_LEN_031:-262144}";
+        [ -n "$${HF_OVERRIDES}" ] || HF_OVERRIDES='{"architectures":["DeepseekV4ForConditionalGeneration"]}';
+        echo "dspark031 gate: kwargs=$${CHAT_TEMPLATE_KWARGS} hf_overrides=$${HF_OVERRIDES} max_model_len=${MAX_MODEL_LEN_031:-262144}";
         exec vllm serve ${DSPARK_MODEL:-deepseek-ai/DeepSeek-V4-Flash-DSpark}
         --served-model-name ${SERVED_MODEL_NAME:-deepseek-v4-flash-dspark}
         ${SERVED_MODEL_ALIASES:-deepseek-v4-flash-dspark-nothink deepseek-v4-flash-dspark-think-low deepseek-v4-flash-dspark-think-high deepseek-v4-flash-dspark-think-max claude-haiku-4-5 claude-haiku-4-5-20251001 claude-sonnet-5 claude-sonnet-4-6 claude-opus-5 claude-opus-5-5 claude-opus-4-6 claude-fable-5}
