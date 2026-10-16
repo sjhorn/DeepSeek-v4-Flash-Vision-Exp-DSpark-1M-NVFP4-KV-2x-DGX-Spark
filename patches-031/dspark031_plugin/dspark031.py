@@ -7,6 +7,7 @@ copied, and an upstream change to the rest of those files cannot be shadowed.
 
   KV-7 (was patch7)  dedupe a recomputed (hash, group) at cache time
   MNT-10             long_prefill_token_threshold, live from the flags file
+  LOAD-1             the DSV4 vision model streams its weights (eager-load OOM)
 
 Each logs ONE line when armed, so a missing plugin is visible, and each has a
 kill switch. Entry point: vllm.general_plugins -> dspark031:register (loaded
@@ -183,6 +184,81 @@ def install_live_long_prefill() -> bool:
 
 
 
+# -- LOAD-1: stream the vision model's weights (eager-load OOM) ----------------
+#
+# why (measured on GB10, 2026-10-16): upstream's
+# DeepseekV4ForConditionalGeneration.load_weights (models/deepseek_v4/common/
+# vl_model.py) does `mapped = iter(sorted(mapped, key=lambda x: x[0]))`, so the
+# text backbone sees all of its weights in ONE contiguous delegation from
+# AutoWeightsLoader. sorted() materialises the WHOLE checkpoint first. With the
+# lazy loader that is mmap'd page cache; with `--safetensors-load-strategy
+# eager`, which the 64K-page kernel requires, it is 156 GiB of anonymous memory.
+# The node OOMed at shard 28/48, and LOAD_PROBE showed every tensor of every
+# shard still alive two shards later.
+#
+# The fix keeps the property the sort exists for -- `language_model.*` arrives
+# as one contiguous run -- without the sort: those weights stream straight
+# through in checkpoint order, and only the rest (vision tower + aligner,
+# ~1.9 GiB) is held back and yielded after, sorted by name.
+#
+# Installs ONLY if upstream's method still has that exact sort line (else
+# logs and stands aside). kill switch: DSPARK031_STREAM_LOAD=0 (at load).
+
+_SORT_LINE = "mapped = iter(sorted(mapped, key=lambda x: x[0]))"
+_LM_PREFIX = "language_model."
+
+
+def lm_first(mapped):
+    """language_model.* in arrival order, then the rest sorted by name. PURE."""
+    rest = []
+    for item in mapped:
+        if item[0].startswith(_LM_PREFIX):
+            yield item
+        else:
+            rest.append(item)
+    rest.sort(key=lambda x: x[0])
+    yield from rest
+
+
+def install_stream_load() -> bool:
+    if os.environ.get("DSPARK031_STREAM_LOAD", "1") == "0":
+        logger.warning("dspark031: LOAD-1 off (DSPARK031_STREAM_LOAD=0)")
+        return False
+    import inspect
+
+    try:
+        from vllm.models.deepseek_v4.common import vl_model as vm
+    except Exception as exc:
+        logger.info("dspark031: LOAD-1 not installed (no DSV4 vision model: %r)", exc)
+        return False
+    cls = vm.DeepseekV4ForConditionalGeneration
+    if getattr(cls.load_weights, "_dspark031", False):
+        return True
+    src = inspect.getsource(cls.load_weights)
+    if _SORT_LINE not in src:
+        logger.warning("dspark031: LOAD-1 NOT installed: upstream load_weights "
+                       "no longer sorts the whole checkpoint; re-check it")
+        return False
+
+    def load_weights(self, weights):
+        child_finalizes = getattr(
+            self.language_model, "finalizes_weights_during_load", True)
+        mapped = self.hf_to_vllm_mapper.apply(weights)
+        if child_finalizes:
+            mapped = lm_first(mapped)
+        loaded_params = vm.AutoWeightsLoader(self).load_weights(mapped)
+        self._weights_finalized = child_finalizes
+        return loaded_params
+
+    load_weights._dspark031 = True
+    load_weights.__doc__ = cls.load_weights.__doc__
+    cls.load_weights = load_weights
+    logger.info("dspark031: LOAD-1 armed -- the vision model streams its weights "
+                "(language_model.* contiguous, no whole-checkpoint sort); "
+                "DSPARK031_STREAM_LOAD=0 disables")
+    return True
+
+
 # -- LOAD PROBE (diagnostic, off by default) -----------------------------------
 #
 # why: the first GB10 boot OOMed at shard 28/48 of the eager load, memory
@@ -236,7 +312,7 @@ def install_load_probe() -> bool:
 def register() -> None:
     """vllm.general_plugins entry point."""
     for fn in (install_block_dedupe, install_live_long_prefill,
-               install_load_probe):
+               install_stream_load, install_load_probe):
         try:
             fn()
         except Exception:
