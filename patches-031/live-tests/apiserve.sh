@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # vLLM 0.31 CPU (Apple container) serving Qwen3-0.6B with the whole patches-031
-# set mounted over the image: anthropic protocol+serving, detokenizer, plugin.
+# set mounted over the image: anthropic protocol+serving, detokenizer, the
+# dspark031 plugin, and the two carried plugins (prefill collector, E8M0).
 #   apiserve.sh up | down
 set -u
 D=~/dev/spark/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark/patches-031
@@ -14,6 +15,10 @@ up)
     -v "$D/anthropic_serving.py:$SITE/vllm/entrypoints/anthropic/serving.py:ro" \
     -v "$D/detokenizer.py:$SITE/vllm/v1/engine/detokenizer.py:ro" \
     -v "$D/dspark031_plugin:/opt/dspark031:ro" \
+    -v "$D/../patches/prefill_plugin/prefill_collector.py:$SITE/prefill_collector.py:ro" \
+    -v "$D/../patches/prefill_plugin/prefill_collector-0.1.dist-info:$SITE/prefill_collector-0.1.dist-info:ro" \
+    -v "$D/../patches/safetensors_e8m0_plugin/safetensors_e8m0.py:$SITE/safetensors_e8m0.py:ro" \
+    -v "$D/../patches/safetensors_e8m0_plugin/safetensors_e8m0-0.1.dist-info:$SITE/safetensors_e8m0-0.1.dist-info:ro" \
     -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
     -e PYTHONPATH=/opt/dspark031 -e VLLM_LOGGING_LEVEL=DEBUG -e VLLM_CPU_KVCACHE_SPACE=4 \
     -e PREFIX_WATCH=1 -e CLASSIFIER_NOTHINK=1 -e TOOL_ARGS_STRICT=0 \

@@ -109,3 +109,17 @@ concurrency.
   - `VLLM_SPARSE_INDEXER_MAX_LOGITS_MB` defaults to 512 on 0.31; we set 256.
 - `patches/generated/` is stale for patch6: it predates the 10-09
   MNT-6c/`set_pending_block_ids_provider` change.
+
+## Item 2 status (2026-10-16): the pure-Python pieces, done and tested locally
+
+Each was tested against vLLM 0.31.0's real code in its CPU image on a Mac:
+
+| piece | 0.31 form | test |
+|---|---|---|
+| API-0 protocol | `patches-031/anthropic_protocol.py` | live server, below |
+| API-8..15 serving (+ the API-10 non-streaming fix) | `patches-031/anthropic_serving.py` | `live-tests/apicheck.py`: 25 passed; API-15 by hand; `test_api10_full.py`: 4 passed |
+| MNT-5 stops in reasoning | `patches-031/detokenizer.py` (vllm#52486 + our output side) | 8 passed |
+| KV-7 dedupe, MNT-10 | `patches-031/dspark031_plugin/` (one general plugin) | 6 passed |
+| reasoning-effort policy (kept) | `patches-031/tokenizer_deepseek_v4.py` | 11 passed, upstream column checked too |
+| prefill collector | unchanged (`patches/prefill_plugin`) | loads as a stat logger; `/prefill` rows carry every field |
+| safetensors E8M0 | unchanged (`patches/safetensors_e8m0_plugin`) | still needed (`KeyError 'F8_E8M0'` without it); exact E8M0 round trip with it |
