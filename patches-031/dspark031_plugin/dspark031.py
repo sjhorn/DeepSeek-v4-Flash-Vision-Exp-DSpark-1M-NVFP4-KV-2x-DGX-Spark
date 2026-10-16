@@ -204,25 +204,28 @@ def install_load_probe() -> bool:
     real = wu.load
     if getattr(real, "_dspark031_probe", False):
         return True
-    st = {"prev": None, "n": 0}
+    st = {"gens": [], "n": 0}
 
+    # Report shard n-2, not n-1: while load() runs, the iterator's own
+    # `state_dict` local still holds shard n-1 (the first version of this
+    # probe reported every tensor alive for exactly that reason).
     def _report():
-        prev = st["prev"]
-        if not prev:
+        if len(st["gens"]) < 2:
             return
+        gen = st["gens"].pop(0)
         gc.collect()
-        alive = [(k, b) for k, r, b in prev if not r.expired()]
+        alive = [(k, b) for k, r, b in gen if not r.expired()]
         logger.warning(
-            "dspark031 LOAD_PROBE: shard %d: %d/%d tensors still alive after "
-            "the shard, %.2f GiB; first: %s", st["n"], len(alive), len(prev),
+            "dspark031 LOAD_PROBE: shard %d: %d/%d tensors still alive two "
+            "shards later, %.2f GiB; first: %s", st["n"] - 1, len(alive), len(gen),
             sum(b for _, b in alive) / 2**30, [k for k, _ in alive[:6]])
 
     def probed(data):
         _report()
         d = real(data)
         st["n"] += 1
-        st["prev"] = [(k, StorageWeakRef(t.untyped_storage()), t.nbytes)
-                      for k, t in d.items()]
+        st["gens"].append([(k, StorageWeakRef(t.untyped_storage()), t.nbytes)
+                           for k, t in d.items()])
         return d
 
     probed._dspark031_probe = True
