@@ -44,6 +44,11 @@ services:
       - ./patches-031/detokenizer.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/detokenizer.py:ro
       - ./patches-031/tokenizer_deepseek_v4.py:/usr/local/lib/python3.12/dist-packages/vllm/tokenizers/deepseek_v4.py:ro
       - ./patches-031/dspark031_plugin:/opt/dspark031:ro
+      # b12x is an OPTIONAL extra of vllm 0.31 (b12x==1.3.0) the stock image leaves
+      # out: without it --moe-backend b12x fails at layer init ("kernel does not
+      # support current device"). Installed --no-deps beside, never into, the
+      # image (GATE.md, "Before the window").
+      - ${B12X_DIR_031:-${HOME}/dspark031-deps/b12x-1.3.0}:/opt/b12x:ro
       - ./patches/prefill_plugin/prefill_collector.py:/usr/local/lib/python3.12/dist-packages/prefill_collector.py:ro
       - ./patches/prefill_plugin/prefill_collector-0.1.dist-info:/usr/local/lib/python3.12/dist-packages/prefill_collector-0.1.dist-info:ro
       - ./patches/safetensors_e8m0_plugin/safetensors_e8m0.py:/usr/local/lib/python3.12/dist-packages/safetensors_e8m0.py:ro
@@ -118,7 +123,7 @@ services:
       # the same bytes as production by default, so the token counts compare
       KV_CACHE_MEMORY_BYTES: "${KV_CACHE_MEMORY_BYTES_031-${KV_CACHE_MEMORY_BYTES:-}}"
       # --- 0.31-specific ---
-      PYTHONPATH: /opt/dspark031
+      PYTHONPATH: /opt/dspark031:/opt/b12x
       # NOT production's DG_JIT_NVCC_COMPILER (/opt/env/bin/nvcc, the 0.21 image)
       DG_JIT_NVCC_COMPILER: "${DG_JIT_NVCC_COMPILER_031:-/usr/local/cuda/bin/nvcc}"
       # the 64K-page kernel hangs the default lazy loader (GATE.md)

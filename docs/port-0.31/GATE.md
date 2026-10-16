@@ -36,9 +36,15 @@ production is stopped and started.
    - A non-checked-out branch push does not change the working tree, and the
      worktree is a separate directory.
    - Both nodes must be at the same commit.
-3. **Record today's numbers to compare against,** from the running engine's
+3. **b12x, on both nodes.** The stock image lacks it (vLLM's optional
+   `b12x==1.3.0` extra). Install it beside the image:
+   `mkdir -p ~/dspark031-deps && docker run --rm -v ~/dspark031-deps:/out --entrypoint pip vllm/vllm-openai:v0.31.0 install -q --no-deps --target /out/b12x-1.3.0 b12x==1.3.0`.
+   - 1.3.0 pins CUTLASS DSL 4.6.2 and the image has 4.7.1. Both 1.3.0 and
+     1.5.0 (which pins 4.7.1) pass 0.31's b12x device check on GB10. If 1.3.0
+     fails at kernel compile, set `B12X_DIR_031=~/dspark031-deps/b12x-1.5.0`.
+4. **Record today's numbers to compare against,** from the running engine's
    log (`logs-deepseek-v4-flash-dspark.sh`):
-   - `GPU KV cache size: N tokens` (about 2.09M on the 1M lane);
+   - `GPU KV cache size: N tokens` (3,377,409 on 2026-10-16, 1M lane, `KV_CACHE_MEMORY_BYTES=21789705851`);
    - decode tok/s from a normal request.
 
 ## In the window
@@ -111,7 +117,7 @@ Run them in this order; the first failure decides whether to go on.
    `URL=http://127.0.0.1:18888/v1 N=10 COLD=1 python3 benchmarks/replay_hermes.py`.
    - Pass is 0/10 failures (0.21 without Patch 3 was 11/12).
 4. **Speed:** decode tok/s and DSpark acceptance (the log's spec-decode
-   metrics), against step "Before the window" 3.
+   metrics), against step "Before the window" 4.
 5. **The Anthropic endpoint:** a Claude Code turn through it with tools, and
    a thinking-alias request (`claude-opus-5`). Check that `usage` has
    `engine_cached_tokens` on the second identical request.
