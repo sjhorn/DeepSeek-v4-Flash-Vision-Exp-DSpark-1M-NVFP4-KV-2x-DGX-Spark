@@ -182,9 +182,58 @@ def install_live_long_prefill() -> bool:
     return True
 
 
+
+# -- LOAD PROBE (diagnostic, off by default) -----------------------------------
+#
+# why: the first GB10 boot OOMed at shard 28/48 of the eager load, memory
+# growing ~3.7 GB/shard (a shard averages 3.26 GB): eagerly read tensors are
+# being RETAINED after their shard. This names them. After each shard it
+# reports how many of the PREVIOUS shard's tensors still have live storage
+# (torch's StorageWeakRef), their bytes, and the first names.
+#
+# on: DSPARK031_LOAD_PROBE=1. Read once, at plugin load.
+
+def install_load_probe() -> bool:
+    if os.environ.get("DSPARK031_LOAD_PROBE", "0") != "1":
+        return False
+    import gc
+
+    import vllm.model_executor.model_loader.weight_utils as wu
+    from torch.multiprocessing.reductions import StorageWeakRef
+
+    real = wu.load
+    if getattr(real, "_dspark031_probe", False):
+        return True
+    st = {"prev": None, "n": 0}
+
+    def _report():
+        prev = st["prev"]
+        if not prev:
+            return
+        gc.collect()
+        alive = [(k, b) for k, r, b in prev if not r.expired()]
+        logger.warning(
+            "dspark031 LOAD_PROBE: shard %d: %d/%d tensors still alive after "
+            "the shard, %.2f GiB; first: %s", st["n"], len(alive), len(prev),
+            sum(b for _, b in alive) / 2**30, [k for k, _ in alive[:6]])
+
+    def probed(data):
+        _report()
+        d = real(data)
+        st["n"] += 1
+        st["prev"] = [(k, StorageWeakRef(t.untyped_storage()), t.nbytes)
+                      for k, t in d.items()]
+        return d
+
+    probed._dspark031_probe = True
+    wu.load = probed
+    logger.warning("dspark031: LOAD_PROBE armed (diagnostic; eager loader)")
+    return True
+
 def register() -> None:
     """vllm.general_plugins entry point."""
-    for fn in (install_block_dedupe, install_live_long_prefill):
+    for fn in (install_block_dedupe, install_live_long_prefill,
+               install_load_probe):
         try:
             fn()
         except Exception:

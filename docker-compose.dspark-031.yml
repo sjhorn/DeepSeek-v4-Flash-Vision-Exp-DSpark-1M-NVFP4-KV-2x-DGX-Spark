@@ -124,6 +124,7 @@ services:
       KV_CACHE_MEMORY_BYTES: "${KV_CACHE_MEMORY_BYTES_031-${KV_CACHE_MEMORY_BYTES:-}}"
       # --- 0.31-specific ---
       PYTHONPATH: /opt/dspark031:/opt/b12x
+      DSPARK031_LOAD_PROBE: "${DSPARK031_LOAD_PROBE:-0}"   # diagnostic (dspark031.py)
       # NOT production's DG_JIT_NVCC_COMPILER (/opt/env/bin/nvcc, the 0.21 image)
       DG_JIT_NVCC_COMPILER: "${DG_JIT_NVCC_COMPILER_031:-/usr/local/cuda/bin/nvcc}"
       # the 64K-page kernel hangs the default lazy loader (GATE.md)
