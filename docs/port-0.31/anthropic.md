@@ -185,3 +185,19 @@ detokenizer, and the dspark031 plugin.
   - `max_uses` on a server tool is not enforced;
   - a forced `tool_choice` stays forced on every round of the server-tool
     loop, so a forced fetch repeats until the round cap.
+
+## API-10 in the non-streaming response (2026-10-16, decided: fix)
+
+`messages_full_converter` built each `tool_use` block with an unguarded
+`json.loads(arguments)`, upstream and 0.21 alike, so one malformed tool call
+was a 500 for the whole turn. It now goes through
+`_tool_input_or_empty`: `coerce_tool_arguments`, which also recovers leaked
+DSML (API-10b), with anything unparseable sent as `input: {}` and logged once
+(`PATCH 10: tool ... returned unparseable arguments`).
+
+Client-visible change: the turn returns `stop_reason: tool_use` with an empty
+input, instead of an HTTP 500.
+
+`upstream-tests/test_api10_full.py`, run through the real 0.31 converter: 4
+passed. Against the pre-fix file, the three malformed cases raise
+JSONDecodeError.

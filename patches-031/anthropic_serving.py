@@ -587,6 +587,18 @@ def recover_dsml_arguments(raw: str | None) -> dict[str, Any] | None:
     return out or None
 
 
+def _tool_input_or_empty(raw: str | None, name: str | None = None) -> dict[str, Any]:
+    """PATCH 10 for the non-streaming response: the tool_use `input` dict, or
+    {} when the model's arguments cannot be parsed (logged once per call)."""
+    parsed, _ = coerce_tool_arguments(raw)
+    if parsed is None:
+        logger.warning("PATCH 10: tool %r returned unparseable arguments %r; "
+                       "sending input={} instead of failing the turn",
+                       name, (raw or "")[:200])
+        return {}
+    return parsed
+
+
 def coerce_tool_arguments(raw: str | None) -> tuple[dict[str, Any] | None, str]:
     """Return (parsed_args_or_None, arguments_string_safe_to_render).
 
@@ -2635,7 +2647,13 @@ class AnthropicServingMessages(OpenAIServingChat):
                 type="tool_use",
                 id=tool_call.id,
                 name=tool_call.function.name,
-                input=json.loads(tool_call.function.arguments),
+                # PATCH 10 (non-streaming, added on 0.31): the arguments are
+                # model-generated text; an unguarded json.loads made one
+                # malformed tool call a 500 for the whole turn, upstream and
+                # 0.21 alike. coerce_tool_arguments also recovers leaked DSML
+                # (10b); anything unparseable becomes {} and is logged.
+                input=_tool_input_or_empty(tool_call.function.arguments,
+                                           tool_call.function.name),
             )
             content += [anthropic_tool_call]
 
