@@ -1,5 +1,63 @@
 # DeepSeek-V4-Flash-Vision-Exp (DSpark) on DGX Spark — TP2 (2 nodes) or TP4 (4 nodes), 1M context, NVFP4 KV
 
+## About this fork
+
+A fork of [tonyd2wild's DeepSeek-V4-Flash-Vision-Exp DSpark recipe](https://github.com/tonyd2wild/DeepSeek-v4-Flash-Vision-Exp-DSpark-1M-NVFP4-KV-2x-DGX-Spark),
+grown into a production recipe for **two DGX Sparks (GB10), TP2, 1M context**,
+serving `DeepSeek-V4-Flash-Vision-Exp` with DSpark speculative decoding. The
+upstream page below is kept as it was.
+
+**This branch, `vllm-0.31`, runs the recipe on stock vLLM v0.31.0.**
+Status (2026-10-17): serving the cluster and being soaked; not yet the
+default.
+
+- **Image:** `vllm/vllm-openai:v0.31.0`, plus vLLM's optional `b12x==1.3.0`
+  extra mounted beside it. No vLLM files are replaced.
+- **Model support:** upstream DeepSeek V4 with the Vision-Exp vision tower,
+  DSpark on model runner V2, `fp8_ds_mla` KV, and the b12x MXFP4 MoE (W4A16).
+- **The recipe's own changes:**
+  - a general plugin, [`patches-031/dspark031_plugin`](patches-031/dspark031_plugin):
+    - KV-7 block dedupe;
+    - MNT-10 live long-prefill threshold;
+    - LOAD-1, which streams the vision model's weights. Upstream sorts the
+      whole 156 GiB checkpoint in memory, which runs out of RAM under the
+      eager loader that GB10's 64K-page kernel needs.
+  - the ported Anthropic, detokenizer and tokenizer patches in `patches-031/`.
+- **kvmgr:** the disk prefix cache is
+  [kvmgr](https://github.com/sjhorn/vllm-kvmgr) 0.5.0, its vLLM 0.31 line.
+  On 0.31 that is the disk tier only.
+- **Run it:**
+  - [`docker-compose.dspark-031.yml`](docker-compose.dspark-031.yml);
+  - [`serve-031.sh`](serve-031.sh), which takes both nodes down before
+    starting the worker, then the head;
+  - [`docs/port-0.31/GATE.md`](docs/port-0.31/GATE.md), the runbook.
+- **Measured against the 0.21 line** on the same nodes, the same tests back to
+  back ([`docs/port-0.31/GATE-RESULTS.md`](docs/port-0.31/GATE-RESULTS.md)):
+
+  | | 0.31 | 0.21 |
+  |---|---|---|
+  | single-stream decode | ~37 tok/s | ~21 tok/s |
+  | aggregate decode at 2/4/6 streams | 93 / 146 / 191 tok/s | 46 / 81 / 96 tok/s |
+  | 44K-token cold prefill | ~20 s | ~33 s |
+  | KV capacity in the same 20.29 GiB | ~5.2M tokens | about the same (the boot-line counts are not comparable) |
+
+  The boot-line counts are 2.1M and 3.4M tokens.
+- **Still open:**
+  - a large restore from disk on 0.31;
+  - the kvrace gate;
+  - a real garble capture (the garble checks so far are synthetic);
+  - porting dispram.
+
+**The previous line** is branch [`vllm-0.21`](../../tree/vllm-0.21), tag
+[`vllm-0.21-final`](../../releases/tag/vllm-0.21-final).
+
+**History note:** commits after upstream `d841fdb` were re-authored on
+2026-10-17. Only the email changed; trees are identical. So hashes quoted in
+docs written before that date are pre-rewrite. The map is in
+[`docs/HISTORY-REWRITE-2026-10-17.txt`](docs/HISTORY-REWRITE-2026-10-17.txt).
+
+---
+
 **Current recipe: see [`CURRENT.md`](CURRENT.md).** That file, not this page, is the source of truth.
 
 **Launchers:** [`launchers/ds4-vision-tp2.sh <0|1>`](launchers/ds4-vision-tp2.sh) — ranks 1 (bluey) then 0 (asusi, head) · [`launchers/ds4-vision-tp4.sh <0|1|2|3>`](launchers/ds4-vision-tp4.sh) — ranks 3, 2, 1, then 0 (asusi, head). Both serve `:8888` as **`deepseek-v4-flash-dspark`**.
