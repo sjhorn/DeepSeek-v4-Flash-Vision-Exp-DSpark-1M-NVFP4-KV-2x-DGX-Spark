@@ -1,5 +1,41 @@
 # DeepSeek-V4-Flash-Vision-Exp (DSpark) on DGX Spark — TP2 (2 nodes) or TP4 (4 nodes), 1M context, NVFP4 KV
 
+## About this fork
+
+A fork of [tonyd2wild's DeepSeek-V4-Flash-Vision-Exp DSpark recipe](https://github.com/tonyd2wild/DeepSeek-v4-Flash-Vision-Exp-DSpark-1M-NVFP4-KV-2x-DGX-Spark),
+grown into a production recipe for **two DGX Sparks (GB10), TP2, 1M context**,
+serving `DeepSeek-V4-Flash-Vision-Exp` with DSpark speculative decoding. Most
+of the work since September is in `docs/local/` and `local-ops/`; the
+upstream page below is kept as it was.
+
+**This branch, `vllm-0.21`, is the final vLLM 0.21 line.**
+
+- **Release:** tag [`vllm-0.21-final`](../../releases/tag/vllm-0.21-final).
+  It mounts [kvmgr](https://github.com/sjhorn/vllm-kvmgr) v0.4.11. That exact
+  pair never booted on the cluster; the cluster ran the commit before it
+  with kvmgr v0.4.10 until 2026-10-16. The tag message has the detail.
+- **Engine:** vLLM `0.21.1rc1.dev339` fork, image
+  `vllm-dspark-runtime:dspark-nvfp4-stage-c`. The image is not published.
+- **What it adds over upstream:**
+  - the kvmgr disk prefix cache: a 700K-token restore in about 11 s across
+    a restart, instead of a 10-minute cold prefill;
+  - a two-node `engine-supervisor`;
+  - the Anthropic `/v1/messages` fixes and the effort/thinking policy;
+  - live scheduler knobs (MNT-10) and the KV-7 block dedupe;
+  - the Xid 32 investigation and its fix (`load_copy_api=loop`).
+- **One correction to the name:** the "NVFP4 KV" here is a padded probe at
+  fp8's size (584 B per token). It is not a 4-bit KV cache.
+- **Succeeded by** branch [`vllm-0.31`](../../tree/vllm-0.31): stock vLLM
+  v0.31.0, about twice the decode throughput.
+
+**History note:** commits after upstream `d841fdb` were re-authored on
+2026-10-17. Only the email changed; trees are identical. So hashes quoted in
+docs written before that date are pre-rewrite. The map is in
+[`docs/HISTORY-REWRITE-2026-10-17.txt`](docs/HISTORY-REWRITE-2026-10-17.txt)
+(`c119e21` → `8c05b93`, `72932c8` → `e7043b4`).
+
+---
+
 **Current recipe: see [`CURRENT.md`](CURRENT.md).** That file, not this page, is the source of truth.
 
 **Launchers:** [`launchers/ds4-vision-tp2.sh <0|1>`](launchers/ds4-vision-tp2.sh) — ranks 1 (bluey) then 0 (asusi, head) · [`launchers/ds4-vision-tp4.sh <0|1|2|3>`](launchers/ds4-vision-tp4.sh) — ranks 3, 2, 1, then 0 (asusi, head). Both serve `:8888` as **`deepseek-v4-flash-dspark`**.
