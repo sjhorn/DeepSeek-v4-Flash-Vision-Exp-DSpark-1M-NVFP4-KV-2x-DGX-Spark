@@ -113,6 +113,25 @@ lane_config() {
   esac
 }
 
+# lane_load LINES -> sets each L_<KEY> from "L_<KEY>=<value>" lines, and runs
+# NOTHING. *** NEVER eval lane_config's output. *** 2026-10-18: `eval` of
+# "L_START=env ENGINE_SUPERVISOR=1 ./serve-031.sh" is a command with a
+# prefix assignment, not an assignment: the first install EXECUTED serve-031.sh
+# at startup, and was stopped only by its working directory ($HOME) not having
+# one. Any line that is not L_<UPPER>=... is refused (status 1).
+lane_load() {
+  local kv k v
+  while IFS= read -r kv; do
+    [ -n "$kv" ] || continue
+    k=${kv%%=*}; v=${kv#*=}
+    case "$k" in
+      L_[A-Z]*) case "$k" in *[!A-Z_]*) echo "bad key: $k"; return 1 ;; esac
+                printf -v "$k" '%s' "$v" ;;
+      *) echo "bad line: $kv"; return 1 ;;
+    esac
+  done <<< "$1"
+}
+
 # A state is "<status> <exitcode> <oomkilled> <finished_epoch> <host_btime>".
 # abnormal STATE -> 0 if it is a crash
 abnormal() {
@@ -239,7 +258,8 @@ if [ "$(hostname -s)" != spark-45ea ]; then
 fi
 
 LC=$(lane_config "$ENGINE_LANE") || { crit "ENGINE_LANE=$ENGINE_LANE is not a lane this script knows ($LC). Refusing."; exit 1; }
-eval "$LC"
+LL=$(lane_load "$LC" 2>&1) || { crit "lane_config $ENGINE_LANE: $LL. Refusing."; exit 1; }
+lane_load "$LC"
 REPO=${DSPARK_REPO:-$L_REPO}
 NAME=${ENGINE_CONTAINER:-$L_NAME}
 START_CMD=${ENGINE_START:-$L_START}

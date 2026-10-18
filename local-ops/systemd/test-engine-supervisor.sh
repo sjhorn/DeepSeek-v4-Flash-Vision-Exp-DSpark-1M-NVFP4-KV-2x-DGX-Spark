@@ -128,6 +128,21 @@ lane "0.31 runs in ~/dspark031"          0.31 REPO  "$HOME/dspark031"
 lane "*** 0.31 ledger is ~/kvoffload-031, not 0.21's ***" 0.31 LEDGER "$HOME/kvoffload-031/diag"
 lane "0.31 journald tag matches its compose" 0.31 TAG dspark031-vllm-
 lane "0.31 skips 0.21's wedge tool"      0.31 WEDGE ""
+# ---- lane_load runs NOTHING (2026-10-18: an eval of lane_config EXECUTED serve-031.sh)
+D=$(mktemp -d); M="$D/RAN"
+for f in serve-031.sh start-deepseek-v4-flash-dspark.sh env; do printf '#!/bin/sh\ntouch %s\n' "$M" > "$D/$f"; chmod +x "$D/$f"; done
+for ln in 0.21 0.31; do
+  ( cd "$D" && PATH="$D:$PATH" && unset L_START L_STOP && lane_load "$(lane_config $ln)" && [ -n "$L_START" ] && echo "$L_START" > "$D/start.$ln" )
+done
+if [ -e "$M" ]; then T=1; echo "FAIL  *** lane_load EXECUTED a lane's command (decoy ran) ***"
+else P=$((P+1)); echo "PASS  *** lane_load runs nothing: the decoy serve-031.sh / env never ran ***"; fi
+g=$(cat "$D/start.0.31" 2>/dev/null)
+[ "$g" = "env ENGINE_SUPERVISOR=1 ./serve-031.sh" ] && { P=$((P+1)); echo "PASS  lane_load sets L_START verbatim"; } || { T=1; echo "FAIL  lane_load L_START: '$g'"; }
+if ( lane_load "PATH=/nowhere" ) >/dev/null 2>&1; then T=1; echo "FAIL  lane_load accepted a non-L_ key"; else P=$((P+1)); echo "PASS  lane_load refuses a non-L_ key"; fi
+rm -rf "$D"
+if grep -qE '^[[:space:]]*eval[[:space:]]' "$SRC"; then T=1; echo "FAIL  the supervisor has an eval: $(grep -nE '^[[:space:]]*eval[[:space:]]' "$SRC" | head -1)"
+else P=$((P+1)); echo "PASS  the supervisor has no eval"; fi
+
 # serve-031.sh's gate: the hold, or the supervisor's flag -- and nothing else.
 G=$(grep -E '^\[ -f ~/.engine-hold \]' "$(dirname "$SRC")/../../serve-031.sh")
 gate() { local n=$1 hold=$2 flag=$3 want=$4 got d; d=$(mktemp -d)
