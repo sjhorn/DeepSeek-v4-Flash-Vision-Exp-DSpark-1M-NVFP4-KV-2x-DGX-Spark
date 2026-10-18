@@ -5,8 +5,8 @@
 # Settings: production's .env.dspark, then ~/dspark031.env on each node (port,
 # max_model_len, KV_TRANSFER_CONFIG_031 for kvmgr 0.5.0).
 #
-# REFUSES unless ~/.engine-hold exists, and while a production (0.21) container
-# exists on either node. A person always holds before a restart. The one caller
+# REFUSES unless ~/.engine-hold exists, and while another engine's container
+# (0.21's, or 0.32's dspark032-vllm-dspark032-1) exists on either node. A person always holds before a restart. The one caller
 # without a hold is engine-supervisor on lane 0.31 (ENGINE_LANE=0.31) doing a
 # crash recovery: it passes ENGINE_SUPERVISOR=1 and never touches the hold
 # (decided 2026-10-18). Back to 0.21: set the supervisor's lane back
@@ -17,16 +17,18 @@ E=$HOME/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark/.env.dspark
 W=192.168.0.101
 C=dspark031-vllm-dspark031-1
 P=deepseek-v4-flash-0731-dspark-1m-nvfp4-kv-2x-dgx-spark-vllm-dspark-1
+# every OTHER engine's container: none may exist while this one starts or stops
+OTHERS="$P dspark032-vllm-dspark032-1"
 F="-f docker-compose.dspark-031.yml"
 U="env -u MASTER_ADDR -u MASTER_PORT -u NODE_RANK -u HEADLESS COMPOSE_DISABLE_ENV_FILE=1"
 WK="$U NODE_RANK=1 HEADLESS=1 HF_CACHE=$HOME/.cache/huggingface VLLM_HOST_IP=$W docker compose --env-file $E --env-file $HOME/dspark031.env $F"
 HD="$U NODE_RANK=0 HEADLESS= docker compose --env-file $E --env-file $HOME/dspark031.env $F"
 
 [ -f ~/.engine-hold ] || [ "${ENGINE_SUPERVISOR:-}" = 1 ] || { echo "refusing: no ~/.engine-hold (touch it first)"; exit 1; }
-for h in local $W; do
-  n=$( [ $h = local ] && docker ps -aq -f name="^${P}$" | wc -l || ssh $h "docker ps -aq -f name='^${P}$' | wc -l")
-  [ "$n" = 0 ] || { echo "refusing: production container exists on $h (stop it first)"; exit 1; }
-done
+for o in $OTHERS; do for h in local $W; do
+  n=$( [ $h = local ] && docker ps -aq -f name="^${o}$" | wc -l || ssh $h "docker ps -aq -f name='^${o}$' | wc -l")
+  [ "$n" = 0 ] || { echo "refusing: another engine's container $o exists on $h (stop it first)"; exit 1; }
+done; done
 
 echo "down: head, worker"
 (cd ~/dspark031 && $HD down >/dev/null 2>&1 || true)
