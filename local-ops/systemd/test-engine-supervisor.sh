@@ -156,6 +156,14 @@ gate "*** serve-031.sh: no hold, no flag -> refused ***"  0 ""  refused
 gate "*** serve-031.sh: no hold, ENGINE_SUPERVISOR=1 -> runs ***" 0 1 pass
 gate "serve-031.sh: ENGINE_SUPERVISOR=0 is not the flag"  0 0   refused
 
+lane "*** 0.32 container is dspark032's ***" 0.32 NAME dspark032-vllm-dspark032-1
+lane "0.32 starts with serve-032.sh, flagged" 0.32 START "env ENGINE_SUPERVISOR=1 ./serve-032.sh"
+lane "0.32 runs in ~/dspark032"           0.32 REPO "$HOME/dspark032"
+lane "*** 0.32 ledger is ~/kvoffload-032 ***" 0.32 LEDGER "$HOME/kvoffload-032/diag"
+lane "0.32 journald tag matches its compose" 0.32 TAG dspark032-vllm-
+for sv in 031 032; do G2=$(grep -E '^\[ -f ~/.engine-hold \]' "$(dirname "$SRC")/../../serve-$sv.sh" 2>/dev/null)
+  [ "$G2" = "$G" ] && { P=$((P+1)); echo "PASS  serve-$sv.sh has the same hold gate"; } || { T=1; echo "FAIL  serve-$sv.sh hold gate differs or is missing"; }; done
+
 if out=$(lane_config 0.99); then T=1; echo "FAIL  an unknown lane was accepted: $out"
 else P=$((P+1)); echo "PASS  an unknown lane is refused ($out)"; fi
 

@@ -109,6 +109,13 @@ lane_config() {
       "L_STOP=env ENGINE_SUPERVISOR=1 ./serve-031.sh down" \
       "L_PORT=8888" "L_LEDGER=$HOME/kvoffload-031/diag" "L_TAG=dspark031-vllm-" \
       "L_WORKER=192.168.0.101" "L_STREAMS=" "L_WEDGE=" ;;
+    0.32) printf '%s\n' \
+      "L_REPO=$HOME/dspark032" \
+      "L_NAME=dspark032-vllm-dspark032-1" \
+      "L_START=env ENGINE_SUPERVISOR=1 ./serve-032.sh" \
+      "L_STOP=env ENGINE_SUPERVISOR=1 ./serve-032.sh down" \
+      "L_PORT=8888" "L_LEDGER=$HOME/kvoffload-032/diag" "L_TAG=dspark032-vllm-" \
+      "L_WORKER=192.168.0.101" "L_STREAMS=" "L_WEDGE=" ;;
     *) echo "unknown $1"; return 1 ;;
   esac
 }
