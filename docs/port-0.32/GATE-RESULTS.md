@@ -64,3 +64,21 @@ Every figure across the 0.31, wheel-image and official runs lies within
 about ±10% run to run (0.31 alone: 146 and 175 at 4 streams on two days), so
 0.32 is level with 0.31 on throughput: no regression and no clear gain. The
 wheel image's 107 at 2 streams is that spread's high end.
+
+## Can 0.32 reuse 0.31's disk tier? (`tier-compat.sh`, 14:49-15:00Z)
+
+One fixed 63,368-token raw prompt at temperature 0, on 0.32 and then on 0.31
+(warm boots, 231 s and 215 s). Both found the needle, worded differently, so
+the two versions' arithmetic differs slightly.
+
+- **Paths:** the same 270 files in both tiers on both ranks, so block hashing
+  is identical.
+- **Bytes:** 268 of 270 files differ. Over 60 files (60 MB): 36.1% of bytes
+  identical, 20.8% one fp8 code step apart, 9.3% two steps, 33.7% further
+  (bf16 and scale bytes, and drift compounding over the layers, also count as
+  "further"). Unrelated bytes would match ~0.4-2% of the time, so this is the
+  same layout with numerically different values, not a different layout.
+- **Not yet proven safe:** the remaining check is functional. Boot 0.32 on a
+  scratch tier holding only 0.31's files for the prompt, with stores paused;
+  it must restore them and still answer the needle. If it passes, 0.32 can
+  adopt `~/kvoffload-031` (253 GB) by hard links.
