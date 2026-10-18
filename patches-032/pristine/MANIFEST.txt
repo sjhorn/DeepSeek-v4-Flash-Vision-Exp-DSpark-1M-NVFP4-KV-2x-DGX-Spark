@@ -1,0 +1,15 @@
+# patches-032/pristine/ -- the vLLM v0.32.0 sources the 0.32 patches derive FROM
+#
+# Fetched from the upstream tag (github.com/vllm-project/vllm, v0.32.0, commit
+# 5df63a72) on release day, before the v0.32.0 image was published. RE-CAPTURE
+# from the image once it is (patches/pristine/MANIFEST.txt's method) and re-diff.
+# Each overlay in patches-032/ is the patches-031 file merged three-way onto
+# these (base: patches-031/pristine/, plus v0.31.0's vllm/tokenizers/deepseek_v4.py).
+source=github:vllm-project/vllm@v0.32.0
+captured=2026-10-18
+#
+# sha256  lines  path
+b3db7f280d57c9723bdc7251394e0c33d47d9202e6e08545cf9c6e93f4d76e69  451  vllm/entrypoints/anthropic/protocol.py
+9a12939d6502e54042fc524c175daf5c9f214bf9fb3851a1d98590aede1f7dd9  1268  vllm/entrypoints/anthropic/serving.py
+5a4f1b7124bc6cacdcff643959ebcd3d29de8783184915b1d9a9fcff4fc627cf  103  vllm/tokenizers/deepseek_v4.py
+b9e23b5714b80fbccbff3149541f690bc3ff1d41b064f27bfa7fe85b2bc15476  373  vllm/v1/engine/detokenizer.py
