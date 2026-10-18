@@ -67,6 +67,15 @@ def test_dedupe_leaves_a_multi_hash_block_alone():
     assert P.STATS["dedupe_skipped_multi_hash"] == skipped + 1
 
 
+def test_dedupe_off_at_boot_is_not_installed(monkeypatch):
+    """DSPARK_BLOCK_DEDUPE=0 at boot: upstream's method stays in place, so the
+    boot log cannot claim KV-7 is armed when it is off."""
+    bp.BlockPool._insert_block_hash = UPSTREAM_INSERT
+    monkeypatch.setenv("DSPARK_BLOCK_DEDUPE", "0")
+    assert P.install_block_dedupe() is False
+    assert bp.BlockPool._insert_block_hash is UPSTREAM_INSERT
+
+
 def test_dedupe_kill_switch(monkeypatch):
     assert P.install_block_dedupe()
     monkeypatch.setenv("DSPARK_BLOCK_DEDUPE", "0")

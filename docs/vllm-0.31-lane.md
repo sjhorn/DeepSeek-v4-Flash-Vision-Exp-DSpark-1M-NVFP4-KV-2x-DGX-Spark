@@ -75,7 +75,8 @@ the same container name.
   - LOAD-1 installs only if upstream's method still has that exact sort line.
   - `DSPARK031_STREAM_LOAD=0` turns it off.
   - The plugin's two other patches are off or inert here:
-    - KV-7 (commit-time block dedupe) is off via `DSPARK_BLOCK_DEDUPE=0`;
+    - KV-7 (commit-time block dedupe) is off via `DSPARK_BLOCK_DEDUPE=0`,
+      which leaves `BlockPool` untouched (the boot log says `KV-7 off`);
     - MNT-10 (a live long-prefill threshold) does nothing unless
       `VLLM_LONG_PREFILL_TOKEN_THRESHOLD` is set.
 
@@ -107,6 +108,29 @@ was on either engine.
 recipe's "nvfp4_ds_mla" probe. A real 4-bit KV for V4 on SM12x isn't wired in
 vLLM 0.31; FlashInfer 0.7.0.post1 has the 384 B record (flashinfer#4955).
 
+## Tested from this branch (2026-10-18)
+
+The launcher in this PR, run as committed on the same 2x GB10 pair, stock
+`vllm/vllm-openai:v0.31.0`, the HF snapshot `6821d6ad` of
+DeepSeek-V4-Flash-Vision-Exp, NCCL over two RoCE rails, warm JIT cache, no
+other traffic.
+
+| | result |
+|---|---|
+| boot to `/health` | 221 s |
+| `smoke-deepseek-v4-flash-dspark.sh` | 6/6 |
+| single stream, prose, 400 tokens, temperature 0 | 400 tokens in 10.8 s (~37 tok/s) |
+| DSpark mean acceptance length | 2.57 |
+| needle, cold, 44K x3 | 3/3 pass, ~20 s prefill each |
+| `bench_concurrent.py` 2/4/6, aggregate | 94 / 175 / 187 tok/s |
+| GPU KV cache, boot line | 2,115,150 tokens (2.02x at 1M) |
+| `Traceback`/`ERROR` in either rank's log | 0 / 0 |
+
+Host overrides used: `MASTER_ADDR`, `HOST_IP`, `MODELS_HOST`/`MODEL_DIR`
+(the HF cache dir, so the snapshot's `../../blobs` links resolve),
+`B12X_DIR`, `NCCL_IB_HCA` (two rails), `NCCL_IFACE`, `NCCL_IB_GID_INDEX=`
+(empty: NCCL picks), `PORT=18888`.
+
 ## Open
 
 - **Patch 3's cold-start garble isn't proven gone.** There was no real
@@ -133,7 +157,7 @@ docker run --rm -v "$PWD:/w" -e DSPARK031_DIR=/w/patches-031/dspark031_plugin \
   pip install -q pytest
   cp /w/patches-031/detokenizer.py "$(python3 -c "import vllm.v1.engine.detokenizer as m; print(m.__file__)")"
   cd /w/patches-031/upstream-tests
-  python3 -m pytest -q test_dspark031_plugin.py                        # 6 passed
+  python3 -m pytest -q test_dspark031_plugin.py                        # 7 passed
   python3 test_load1_stream.py                                         # 0 failed
   python3 -m pytest -q test_stop_in_reasoning.py test_mnt5_output_side.py   # 8 passed'
 ```

@@ -42,13 +42,18 @@ STATS = {"dedupe_evicted": 0, "dedupe_skipped_multi_hash": 0}
 # key -- the 0.21 case, where the eviction removes exactly that mapping --
 # and otherwise leaves both and counts dedupe_skipped_multi_hash.
 #
-# kill switch: DSPARK_BLOCK_DEDUPE=0 (read per call).
+# off: DSPARK_BLOCK_DEDUPE=0 at boot leaves BlockPool untouched; it is also
+# read per call, so a process that installed it can still switch it off.
 
 def _dedupe_on() -> bool:
     return os.environ.get("DSPARK_BLOCK_DEDUPE", "1") != "0"
 
 
 def install_block_dedupe() -> bool:
+    if not _dedupe_on():
+        logger.info("dspark031: KV-7 off (DSPARK_BLOCK_DEDUPE=0) -- "
+                    "BlockPool._insert_block_hash left as upstream")
+        return False
     try:
         from vllm.v1.core import block_pool as bp
     except Exception as exc:
