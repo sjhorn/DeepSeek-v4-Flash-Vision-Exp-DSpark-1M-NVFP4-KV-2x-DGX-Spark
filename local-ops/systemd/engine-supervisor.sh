@@ -57,8 +57,10 @@
 # having done nothing.
 set -u
 
-REPO=${DSPARK_REPO:-$HOME/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark}
-NAME=${ENGINE_CONTAINER:-deepseek-v4-flash-0731-dspark-1m-nvfp4-kv-2x-dgx-spark-vllm-dspark-1}
+# WHICH ENGINE. ENGINE_LANE picks the container, the start/stop commands and
+# the paths (lane_config, below); the unit's EnvironmentFile sets it. Unset is
+# 0.21, exactly as before. The env names that existed before still win.
+ENGINE_LANE=${ENGINE_LANE:-0.21}
 HOLD=${ENGINE_HOLD:-$HOME/.engine-hold}
 STATE=${ENGINE_SUPERVISOR_STATE:-$HOME/.local/state/engine-supervisor}
 EVIDENCE=${ENGINE_SUPERVISOR_EVIDENCE:-$HOME/kvdiag/supervisor}
@@ -68,16 +70,48 @@ POLL=${POLL:-10}
 OK_EVERY=${OK_EVERY:-60}
 MAX_RESTARTS=${MAX_RESTARTS:-2}
 WINDOW=${WINDOW:-21600}
-LEDGER_DIR=${LEDGER_DIR:-$HOME/kvoffload/diag}
 WEDGE_LOAD_S=${WEDGE_LOAD_S:-90}
-TAG=dspark-vllm-$NAME
 
 # The actuators from local-ops/README.md, plus every script that starts or
 # stops the engine. Bracketed so pgrep cannot match its own argv; and no tag
 # here appears in THIS script's name, which is how a bracket gets defeated.
-ACTUATORS='[k]v(bootconfirm|bootwalk|killmid|selfheal|xid|xid32|droploop|bisect|load13|ladder|scale|both|conc|overlap|small|inflight|restore|recheck|prefix|converge|loadrounds|budget|enable|dropguard|stallcheck|numpy)\.sh|[k]vsweep\.sh +apply|[k]vdiag\.sh +(arm|disarm|probe|soak|recover)|[f]lags-apply\.sh +apply|[s]tart-deepseek-v4-flash-dspark|[s]top-deepseek-v4-flash-dspark|[u]pdate-and-restart\.sh|[s]witch-model\.sh|[w]atchdog-dspark\.sh|[d]eploy-serving-patch\.sh|local-ops/[s]weep\.sh'
+ACTUATORS='[k]v(bootconfirm|bootwalk|killmid|selfheal|xid|xid32|droploop|bisect|load13|ladder|scale|both|conc|overlap|small|inflight|restore|recheck|prefix|converge|loadrounds|budget|enable|dropguard|stallcheck|numpy)\.sh|[k]vsweep\.sh +apply|[k]vdiag\.sh +(arm|disarm|probe|soak|recover)|[f]lags-apply\.sh +apply|[s]tart-deepseek-v4-flash-dspark|[s]top-deepseek-v4-flash-dspark|[s]erve-031\.sh|[l]ane-test\.sh|[u]pdate-and-restart\.sh|[s]witch-model\.sh|[w]atchdog-dspark\.sh|[d]eploy-serving-patch\.sh|local-ops/[s]weep\.sh'
 
 # ---- BEGIN decide (pure: no I/O; extracted by the test, never sourced) ----
+# lane_config LANE -> "L_<KEY>=<value>" lines, or "unknown <lane>" and status 1.
+#   REPO      where the start/stop commands run
+#   NAME      the engine container, the same name on both nodes
+#   START/STOP  run in REPO (word-split, so no quoting inside)
+#   PORT      the API port the liveness probe reads
+#   LEDGER    kvmgr's write-ahead ledger directory
+#   TAG       the journald tag (compose `logging.options.tag`)
+#   WORKER    the worker's address; empty -> WORKER_HOST from REPO/.env.dspark
+#   STREAMS, WEDGE  0.21's capture-stream and wedge tools; empty -> skipped
+# 0.31 (2026-10-18): kvstream.sh and kvwedge.sh read 0.21's container and
+# tier, so the 0.31 lane skips them; capture() still saves the logs, kernel and
+# ledger. OPEN: serve-031.sh refuses without ~/.engine-hold, and the supervisor
+# acts only WITHOUT one, so on this lane a recovery is refused by serve-031.sh
+# (start.out says why; CRITICAL in the journal) until that gate is decided.
+lane_config() {
+  case "$1" in
+    0.21) printf '%s\n' \
+      "L_REPO=$HOME/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark" \
+      "L_NAME=deepseek-v4-flash-0731-dspark-1m-nvfp4-kv-2x-dgx-spark-vllm-dspark-1" \
+      "L_START=./start-deepseek-v4-flash-dspark.sh" \
+      "L_STOP=./stop-deepseek-v4-flash-dspark.sh" \
+      "L_PORT=8888" "L_LEDGER=$HOME/kvoffload/diag" "L_TAG=dspark-vllm-" \
+      "L_WORKER=" "L_STREAMS=local-ops/kvstream.sh" "L_WEDGE=local-ops/kvwedge.sh" ;;
+    0.31) printf '%s\n' \
+      "L_REPO=$HOME/dspark031" \
+      "L_NAME=dspark031-vllm-dspark031-1" \
+      "L_START=./serve-031.sh" \
+      "L_STOP=./serve-031.sh down" \
+      "L_PORT=8888" "L_LEDGER=$HOME/kvoffload-031/diag" "L_TAG=dspark031-vllm-" \
+      "L_WORKER=192.168.0.101" "L_STREAMS=" "L_WEDGE=" ;;
+    *) echo "unknown $1"; return 1 ;;
+  esac
+}
+
 # A state is "<status> <exitcode> <oomkilled> <finished_epoch> <host_btime>".
 # abnormal STATE -> 0 if it is a crash
 abnormal() {
@@ -203,10 +237,24 @@ if [ "$(hostname -s)" != spark-45ea ]; then
   exit 1
 fi
 
-set -a
-# shellcheck disable=SC1091
-. "$REPO/.env.dspark" || { crit "cannot read $REPO/.env.dspark"; exit 1; }
-set +a
+LC=$(lane_config "$ENGINE_LANE") || { crit "ENGINE_LANE=$ENGINE_LANE is not a lane this script knows ($LC). Refusing."; exit 1; }
+eval "$LC"
+REPO=${DSPARK_REPO:-$L_REPO}
+NAME=${ENGINE_CONTAINER:-$L_NAME}
+START_CMD=${ENGINE_START:-$L_START}
+STOP_CMD=${ENGINE_STOP:-$L_STOP}
+API_PORT=${ENGINE_API_PORT:-$L_PORT}
+LEDGER_DIR=${LEDGER_DIR:-$L_LEDGER}
+TAG=$L_TAG$NAME
+STREAMS=$L_STREAMS
+WEDGE=$L_WEDGE
+WORKER_HOST=${WORKER_HOST:-$L_WORKER}
+if [ -z "$WORKER_HOST" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$REPO/.env.dspark" || { crit "cannot read $REPO/.env.dspark"; exit 1; }
+  set +a
+fi
 : "${WORKER_HOST:?WORKER_HOST unset in .env.dspark}"
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 "$WORKER_HOST")
 
@@ -270,18 +318,24 @@ restart_both() {
   crit "RESTARTING BOTH NODES: $why. Evidence -> $d"
   capture "$d"
   log "evidence captured ($(du -sh "$d" | cut -f1)); down on both nodes"
-  (cd "$REPO" && ./stop-deepseek-v4-flash-dspark.sh) > "$d/stop.out" 2>&1; rc=$?
+  # shellcheck disable=SC2086  # the commands are word-split on purpose
+  (cd "$REPO" && $STOP_CMD) > "$d/stop.out" 2>&1; rc=$?
   log "stop exited $rc"
-  (cd "$REPO" && ./start-deepseek-v4-flash-dspark.sh) > "$d/start.out" 2>&1; rc=$?
+  # shellcheck disable=SC2086
+  (cd "$REPO" && $START_CMD) > "$d/start.out" 2>&1; rc=$?
   if [ "$rc" -ne 0 ]; then
     crit "start script exited $rc -- see $d/start.out. The next poll decides again; the restart is counted."
     return
   fi
   # An exit status is not evidence that work happened: read the effect.
   log "start exited 0; head[$(state_head)] worker[$(state_worker)]"
-  bash "$REPO/local-ops/kvstream.sh" all-start > "$d/streams.out" 2>&1 \
-    && log "capture streams re-armed" \
-    || warn "capture streams NOT fully armed -- see $d/streams.out"
+  if [ -z "$STREAMS" ]; then
+    log "no capture streams on lane $ENGINE_LANE"
+  else
+    bash "$REPO/$STREAMS" all-start > "$d/streams.out" 2>&1 \
+      && log "capture streams re-armed" \
+      || warn "capture streams NOT fully armed -- see $d/streams.out"
+  fi
 }
 
 # THE WEDGE PROBES. Both read-only and cheap: the tail of the head's ledger, and
@@ -323,7 +377,7 @@ stalled_this_boot() {
 }
 boot_id() { docker inspect -f "{{.State.StartedAt}}" "$NAME" 2>/dev/null; }
 
-log "engine-supervisor on $(hostname -s): worker=$WORKER_HOST every ${POLL}s; hold=$HOLD; limit $MAX_RESTARTS restarts per ${WINDOW}s"
+log "engine-supervisor on $(hostname -s): lane $ENGINE_LANE, container $NAME, start '$START_CMD' in $REPO; worker=$WORKER_HOST every ${POLL}s; hold=$HOLD; limit $MAX_RESTARTS restarts per ${WINDOW}s"
 last_verdict=""; last_verdict_full=""; last_ok=0; api_down_since=""
 while :; do
   if [ -e "$HOLD" ] && [ -e "$STATE/lockout" ]; then
@@ -348,7 +402,7 @@ while :; do
   esac
   if [ "$verdict" = ok ]; then
     # liveness: the API, and the oldest open load
-    if curl -s -o /dev/null -m 5 -w "%{http_code}" localhost:8888/v1/models 2>/dev/null | grep -q 200; then
+    if curl -s -o /dev/null -m 5 -w "%{http_code}" "localhost:$API_PORT/v1/models" 2>/dev/null | grep -q 200; then
       api_down_since=""
     else
       [ -n "$api_down_since" ] || api_down_since=$now
@@ -363,8 +417,10 @@ while :; do
         # evidence first, synchronously: the restart destroys it
         if [ "$(cat "$STATE/wedge-captured" 2>/dev/null)" != "$(boot_id)" ]; then
           boot_id > "$STATE/wedge-captured"
-          warn "LIVENESS: ${lv#restart } -- capturing evidence (kvwedge.sh) before the restart"
-          timeout 300 "$REPO/local-ops/kvwedge.sh" capture "supervisor liveness: ${lv#restart }" 2>&1 | while IFS= read -r ln; do echo "<6>kvwedge: $ln"; done
+          if [ -n "$WEDGE" ]; then
+            warn "LIVENESS: ${lv#restart } -- capturing evidence (kvwedge.sh) before the restart"
+            timeout 300 "$REPO/$WEDGE" capture "supervisor liveness: ${lv#restart }" 2>&1 | while IFS= read -r ln; do echo "<6>kvwedge: $ln"; done
+          fi
         fi
         restart_both "LIVENESS: ${lv#restart }"; api_down_since=""; last_verdict=""; continue
       fi
@@ -373,8 +429,12 @@ while :; do
     w=$(wedge_verdict "$(stalled_this_boot)" "$(oldest_open_load_age)" "$cap" "$h" "$WEDGE_LOAD_S")
     if [ "${w%% *}" = capture ]; then
       boot_id > "$STATE/wedge-captured"
-      warn "WEDGE suspected (${w#capture }) with both containers running -- capturing evidence (kvwedge.sh), NOT restarting; NCCL ends a wedge at ~11 min"
-      ( "$REPO/local-ops/kvwedge.sh" capture "supervisor: ${w#capture }" 2>&1 | while IFS= read -r l; do echo "<6>kvwedge: $l"; done ) &
+      if [ -n "$WEDGE" ]; then
+        warn "WEDGE suspected (${w#capture }) with both containers running -- capturing evidence (kvwedge.sh), NOT restarting; NCCL ends a wedge at ~11 min"
+        ( "$REPO/$WEDGE" capture "supervisor: ${w#capture }" 2>&1 | while IFS= read -r l; do echo "<6>kvwedge: $l"; done ) &
+      else
+        warn "WEDGE suspected (${w#capture }) with both containers running -- no wedge tool on lane $ENGINE_LANE; NOT restarting; NCCL ends a wedge at ~11 min"
+      fi
     fi
   fi
   last_verdict=$verdict; last_verdict_full=$out

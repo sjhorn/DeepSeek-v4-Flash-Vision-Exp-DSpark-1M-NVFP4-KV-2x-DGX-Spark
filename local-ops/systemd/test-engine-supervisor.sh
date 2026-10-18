@@ -114,6 +114,23 @@ case "$r" in *"worker[exited 1 false]"*) P=$((P+1)); echo "PASS  the reason name
   *) T=1; echo "FAIL  reason does not name the worker: $r";; esac
 case "$r" in *head*) T=1; echo "FAIL  reason blames the head too: $r";;
   *) P=$((P+1)); echo "PASS  ...and does not blame the head";; esac
+# ---- lanes (lane_config): 0.21 is the default and unchanged; 0.31 is serve-031.sh
+lane() { local n=$1 lane=$2 key=$3 want=$4 got; got=$(lane_config "$lane" | sed -n "s/^L_$key=//p")
+  if [ "$got" = "$want" ]; then P=$((P+1)); echo "PASS  $n"; else T=1; echo "FAIL  $n  got '$got' want '$want'"; fi; }
+lane "0.21 container is production's"   0.21 NAME  deepseek-v4-flash-0731-dspark-1m-nvfp4-kv-2x-dgx-spark-vllm-dspark-1
+lane "0.21 starts with the start script" 0.21 START ./start-deepseek-v4-flash-dspark.sh
+lane "0.21 ledger is ~/kvoffload"        0.21 LEDGER "$HOME/kvoffload/diag"
+lane "0.21 worker comes from .env.dspark" 0.21 WORKER ""
+lane "*** 0.31 container is dspark031's ***" 0.31 NAME dspark031-vllm-dspark031-1
+lane "*** 0.31 starts with serve-031.sh ***" 0.31 START ./serve-031.sh
+lane "0.31 stops with serve-031.sh down" 0.31 STOP  "./serve-031.sh down"
+lane "0.31 runs in ~/dspark031"          0.31 REPO  "$HOME/dspark031"
+lane "*** 0.31 ledger is ~/kvoffload-031, not 0.21's ***" 0.31 LEDGER "$HOME/kvoffload-031/diag"
+lane "0.31 journald tag matches its compose" 0.31 TAG dspark031-vllm-
+lane "0.31 skips 0.21's wedge tool"      0.31 WEDGE ""
+if out=$(lane_config 0.99); then T=1; echo "FAIL  an unknown lane was accepted: $out"
+else P=$((P+1)); echo "PASS  an unknown lane is refused ($out)"; fi
+
 echo
 echo "$P passed, $T failed-flag"
 [ "$T" = 0 ] && echo "SUPERVISOR VERDICTS GREEN" || echo "*** SUPERVISOR VERDICTS RED ***"

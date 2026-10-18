@@ -9,8 +9,14 @@ After=network-online.target
 
 [Service]
 Type=simple
+# WHICH ENGINE: ~/.config/engine-supervisor.env, optional. Absent -> lane 0.21
+# from the production checkout, as before. For the 0.31 lane it holds
+#   ENGINE_LANE=0.31
+#   SUPERVISOR_SRC=/home/shorn/dspark031/local-ops/systemd/engine-supervisor.sh
+Environment=SUPERVISOR_SRC=%h/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark/local-ops/systemd/engine-supervisor.sh
+EnvironmentFile=-%h/.config/engine-supervisor.env
 # Run a COPY: a deploy push must never edit the script a running bash is reading.
-ExecStartPre=/bin/cp -f %h/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark/local-ops/systemd/engine-supervisor.sh %t/engine-supervisor.sh
+ExecStartPre=/bin/cp -f ${SUPERVISOR_SRC} %t/engine-supervisor.sh
 ExecStart=/bin/bash %t/engine-supervisor.sh
 Restart=always
 RestartSec=30
