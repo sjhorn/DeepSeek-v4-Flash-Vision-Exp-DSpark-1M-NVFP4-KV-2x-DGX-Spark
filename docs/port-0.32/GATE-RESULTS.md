@@ -46,3 +46,13 @@ a boot check.
 
 **Still open:** a 12 h+ soak; the official image's boot check; the tier-reuse
 check; a large restore from disk; the kvrace gate; a real garble capture.
+
+## The official image (14:19Z)
+
+`vllm/vllm-openai:v0.32.0` (`sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34`)
+has the same vLLM, torch, FlashInfer and CUTLASS DSL as the wheel image, no
+b12x (mounted from `~/dspark032-deps/b12x-1.5.1`), and transformers 5.19.0.
+Switched with `switch-official-032.sh`: warm boot 231 s; both ranks on the
+digest; LOAD-1, b12x, `fp8_ds_mla`, V2, kvmgr and the 2,115,150-token pool in
+the log; b12x imported from `/opt/b12x/`; smoke 6/6; 400 tokens in 11.3 s;
+0 errors. Crash recovery (lane 0.32) live again at 14:23:36Z.

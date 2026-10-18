@@ -12,12 +12,13 @@ upstream page below is kept as it was.
 The 0.31 line ([`vllm-0.31`](../../tree/vllm-0.31)) is the rollback, one
 command away.
 
-- **Image:** `dspark/vllm-openai:v0.32.0-wheel`, the stock
-  `vllm/vllm-openai:v0.31.0` image plus the official vLLM 0.32.0 wheel from
-  PyPI, CUTLASS DSL 4.8.0 and b12x 1.5.1. Nothing was compiled: v0.32.0 pins
-  the same torch and FlashInfer as the 0.31 image. The official
-  `vllm/vllm-openai:v0.32.0` replaces it after a boot check
-  (`DSPARK032_IMAGE` in `~/dspark032.env`).
+- **Image:** the official `vllm/vllm-openai:v0.32.0`, pinned by digest
+  (`sha256:befccf0e7e40…`, `DSPARK032_IMAGE` in `~/dspark032.env`) since
+  14:19Z 2026-10-18, plus vLLM's optional `b12x==1.5.1` extra mounted beside
+  it (the image leaves it out, as 0.31's did). The gate ran on
+  `dspark/vllm-openai:v0.32.0-wheel` (the v0.31.0 image plus the official
+  0.32.0 wheel, built before Docker Hub had the image); the two differ only in
+  b12x and transformers (5.17 vs 5.19).
 - **What changed from 0.31:** [`patches-032/`](patches-032) holds the 0.31
   overlays merged three-way onto v0.32.0 (pristine copies and MANIFEST in
   `patches-032/pristine/`):
