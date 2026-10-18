@@ -122,12 +122,25 @@ lane "0.21 starts with the start script" 0.21 START ./start-deepseek-v4-flash-ds
 lane "0.21 ledger is ~/kvoffload"        0.21 LEDGER "$HOME/kvoffload/diag"
 lane "0.21 worker comes from .env.dspark" 0.21 WORKER ""
 lane "*** 0.31 container is dspark031's ***" 0.31 NAME dspark031-vllm-dspark031-1
-lane "*** 0.31 starts with serve-031.sh ***" 0.31 START ./serve-031.sh
-lane "0.31 stops with serve-031.sh down" 0.31 STOP  "./serve-031.sh down"
+lane "*** 0.31 starts with serve-031.sh, flagged as the supervisor ***" 0.31 START "env ENGINE_SUPERVISOR=1 ./serve-031.sh"
+lane "0.31 stops with serve-031.sh down, flagged" 0.31 STOP "env ENGINE_SUPERVISOR=1 ./serve-031.sh down"
 lane "0.31 runs in ~/dspark031"          0.31 REPO  "$HOME/dspark031"
 lane "*** 0.31 ledger is ~/kvoffload-031, not 0.21's ***" 0.31 LEDGER "$HOME/kvoffload-031/diag"
 lane "0.31 journald tag matches its compose" 0.31 TAG dspark031-vllm-
 lane "0.31 skips 0.21's wedge tool"      0.31 WEDGE ""
+# serve-031.sh's gate: the hold, or the supervisor's flag -- and nothing else.
+G=$(grep -E '^\[ -f ~/.engine-hold \]' "$(dirname "$SRC")/../../serve-031.sh")
+gate() { local n=$1 hold=$2 flag=$3 want=$4 got d; d=$(mktemp -d)
+  [ "$hold" = 1 ] && touch "$d/.engine-hold"
+  got=$(HOME=$d ENGINE_SUPERVISOR=$flag bash -c "$G && echo pass" 2>/dev/null | tail -1); rm -rf "$d"
+  [ "$got" = pass ] || got=refused
+  if [ "$got" = "$want" ]; then P=$((P+1)); echo "PASS  $n"; else T=1; echo "FAIL  $n  got $got want $want"; fi; }
+[ -n "$G" ] || { T=1; echo "FAIL  no hold-gate line found in serve-031.sh"; }
+gate "serve-031.sh: hold present -> runs"                 1 ""  pass
+gate "*** serve-031.sh: no hold, no flag -> refused ***"  0 ""  refused
+gate "*** serve-031.sh: no hold, ENGINE_SUPERVISOR=1 -> runs ***" 0 1 pass
+gate "serve-031.sh: ENGINE_SUPERVISOR=0 is not the flag"  0 0   refused
+
 if out=$(lane_config 0.99); then T=1; echo "FAIL  an unknown lane was accepted: $out"
 else P=$((P+1)); echo "PASS  an unknown lane is refused ($out)"; fi
 

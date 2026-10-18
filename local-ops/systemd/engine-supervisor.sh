@@ -89,9 +89,10 @@ ACTUATORS='[k]v(bootconfirm|bootwalk|killmid|selfheal|xid|xid32|droploop|bisect|
 #   STREAMS, WEDGE  0.21's capture-stream and wedge tools; empty -> skipped
 # 0.31 (2026-10-18): kvstream.sh and kvwedge.sh read 0.21's container and
 # tier, so the 0.31 lane skips them; capture() still saves the logs, kernel and
-# ledger. OPEN: serve-031.sh refuses without ~/.engine-hold, and the supervisor
-# acts only WITHOUT one, so on this lane a recovery is refused by serve-031.sh
-# (start.out says why; CRITICAL in the journal) until that gate is decided.
+# ledger. serve-031.sh refuses without ~/.engine-hold and the supervisor acts
+# only WITHOUT one, so it passes ENGINE_SUPERVISOR=1, which serve-031.sh takes
+# in place of the hold (decided 2026-10-18). It never creates the hold: that
+# would reset its own restart limit and could strand a hold that disables it.
 lane_config() {
   case "$1" in
     0.21) printf '%s\n' \
@@ -104,8 +105,8 @@ lane_config() {
     0.31) printf '%s\n' \
       "L_REPO=$HOME/dspark031" \
       "L_NAME=dspark031-vllm-dspark031-1" \
-      "L_START=./serve-031.sh" \
-      "L_STOP=./serve-031.sh down" \
+      "L_START=env ENGINE_SUPERVISOR=1 ./serve-031.sh" \
+      "L_STOP=env ENGINE_SUPERVISOR=1 ./serve-031.sh down" \
       "L_PORT=8888" "L_LEDGER=$HOME/kvoffload-031/diag" "L_TAG=dspark031-vllm-" \
       "L_WORKER=192.168.0.101" "L_STREAMS=" "L_WEDGE=" ;;
     *) echo "unknown $1"; return 1 ;;
