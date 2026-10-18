@@ -56,3 +56,11 @@ Switched with `switch-official-032.sh`: warm boot 231 s; both ranks on the
 digest; LOAD-1, b12x, `fp8_ds_mla`, V2, kvmgr and the 2,115,150-token pool in
 the log; b12x imported from `/opt/b12x/`; smoke 6/6; 400 tokens in 11.3 s;
 0 errors. Crash recovery (lane 0.32) live again at 14:23:36Z.
+
+**Throughput on the official image** (idle engine; one warm-up pass, then
+the measured pass with 0 client requests and 2 first-use compiles):
+2/4/6 aggregate **94.5 / 158.0 / 191.1 tok/s** (warm-up 94.3 / 170.0 / 183.6).
+Every figure across the 0.31, wheel-image and official runs lies within
+about ±10% run to run (0.31 alone: 146 and 175 at 4 streams on two days), so
+0.32 is level with 0.31 on throughput: no regression and no clear gain. The
+wheel image's 107 at 2 streams is that spread's high end.
