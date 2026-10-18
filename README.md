@@ -8,8 +8,10 @@ serving `DeepSeek-V4-Flash-Vision-Exp` with DSpark speculative decoding. The
 upstream page below is kept as it was.
 
 **This branch, `vllm-0.31`, runs the recipe on stock vLLM v0.31.0.**
-Status (2026-10-17): serving the cluster and being soaked; not yet the
-default.
+Status (2026-10-18): production from 2026-10-16 to 2026-10-18 12:05Z, now the
+**rollback** for the 0.32 line ([`vllm-0.32`](../../tree/vllm-0.32)), which
+replaced it after an in-place gate. `serve-031.sh` brings it back (it refuses
+while 0.32's container exists).
 
 - **Image:** `vllm/vllm-openai:v0.31.0`, plus vLLM's optional `b12x==1.3.0`
   extra mounted beside it. No vLLM files are replaced.
