@@ -114,58 +114,51 @@ case "$r" in *"worker[exited 1 false]"*) P=$((P+1)); echo "PASS  the reason name
   *) T=1; echo "FAIL  reason does not name the worker: $r";; esac
 case "$r" in *head*) T=1; echo "FAIL  reason blames the head too: $r";;
   *) P=$((P+1)); echo "PASS  ...and does not blame the head";; esac
-# ---- lanes (lane_config): 0.21 is the default and unchanged; 0.31 is serve-031.sh
+# ---- lanes (lane_config): 0.32 is the only lane since 2026-10-19
 lane() { local n=$1 lane=$2 key=$3 want=$4 got; got=$(lane_config "$lane" | sed -n "s/^L_$key=//p")
   if [ "$got" = "$want" ]; then P=$((P+1)); echo "PASS  $n"; else T=1; echo "FAIL  $n  got '$got' want '$want'"; fi; }
-lane "0.21 container is production's"   0.21 NAME  deepseek-v4-flash-0731-dspark-1m-nvfp4-kv-2x-dgx-spark-vllm-dspark-1
-lane "0.21 starts with the start script" 0.21 START ./start-deepseek-v4-flash-dspark.sh
-lane "0.21 ledger is ~/kvoffload"        0.21 LEDGER "$HOME/kvoffload/diag"
-lane "0.21 worker comes from .env.dspark" 0.21 WORKER ""
-lane "*** 0.31 container is dspark031's ***" 0.31 NAME dspark031-vllm-dspark031-1
-lane "*** 0.31 starts with serve-031.sh, flagged as the supervisor ***" 0.31 START "env ENGINE_SUPERVISOR=1 ./serve-031.sh"
-lane "0.31 stops with serve-031.sh down, flagged" 0.31 STOP "env ENGINE_SUPERVISOR=1 ./serve-031.sh down"
-lane "0.31 runs in ~/dspark031"          0.31 REPO  "$HOME/dspark031"
-lane "*** 0.31 ledger is ~/kvoffload-031, not 0.21's ***" 0.31 LEDGER "$HOME/kvoffload-031/diag"
-lane "0.31 journald tag matches its compose" 0.31 TAG dspark031-vllm-
-lane "0.31 skips 0.21's wedge tool"      0.31 WEDGE ""
+lane "*** 0.32 container is dspark032's ***" 0.32 NAME dspark032-vllm-dspark032-1
+lane "*** 0.32 starts with serve-032.sh, flagged as the supervisor ***" 0.32 START "env ENGINE_SUPERVISOR=1 ./serve-032.sh"
+lane "0.32 stops with serve-032.sh down, flagged" 0.32 STOP "env ENGINE_SUPERVISOR=1 ./serve-032.sh down"
+lane "0.32 runs in ~/dspark032"           0.32 REPO "$HOME/dspark032"
+lane "*** 0.32 ledger is ~/kvoffload-032 ***" 0.32 LEDGER "$HOME/kvoffload-032/diag"
+lane "0.32 journald tag matches its compose" 0.32 TAG dspark032-vllm-
+lane "0.32 names its worker"              0.32 WORKER 192.168.0.101
+lane "0.32 skips 0.21's wedge tool"       0.32 WEDGE ""
+for gone in 0.21 0.31 0.99; do
+  if out=$(lane_config $gone); then T=1; echo "FAIL  lane $gone was accepted: $out"
+  else P=$((P+1)); echo "PASS  lane $gone is refused ($out)"; fi
+done
+# the default when no env file sets ENGINE_LANE: production's lane, never a retired one
+if grep -qxF 'ENGINE_LANE=${ENGINE_LANE:-0.32}' "$SRC"; then P=$((P+1)); echo "PASS  *** an unset ENGINE_LANE means 0.32 ***"
+else T=1; echo "FAIL  *** the ENGINE_LANE default is not 0.32: $(grep -n '^ENGINE_LANE=' "$SRC") ***"; fi
+U=$(dirname "$SRC")/engine-supervisor.service
+grep -qx 'Environment=ENGINE_LANE=0.32' "$U" && { P=$((P+1)); echo "PASS  the unit defaults to lane 0.32"; } || { T=1; echo "FAIL  the unit's ENGINE_LANE is not 0.32"; }
 # ---- lane_load runs NOTHING (2026-10-18: an eval of lane_config EXECUTED serve-031.sh)
 D=$(mktemp -d); M="$D/RAN"
-for f in serve-031.sh start-deepseek-v4-flash-dspark.sh env; do printf '#!/bin/sh\ntouch %s\n' "$M" > "$D/$f"; chmod +x "$D/$f"; done
-for ln in 0.21 0.31; do
-  ( cd "$D" && PATH="$D:$PATH" && unset L_START L_STOP && lane_load "$(lane_config $ln)" && [ -n "$L_START" ] && echo "$L_START" > "$D/start.$ln" )
-done
+for f in serve-032.sh env; do printf '#!/bin/sh\ntouch %s\n' "$M" > "$D/$f"; chmod +x "$D/$f"; done
+( cd "$D" && PATH="$D:$PATH" && unset L_START L_STOP && lane_load "$(lane_config 0.32)" && [ -n "$L_START" ] && echo "$L_START" > "$D/start.0.32" )
 if [ -e "$M" ]; then T=1; echo "FAIL  *** lane_load EXECUTED a lane's command (decoy ran) ***"
-else P=$((P+1)); echo "PASS  *** lane_load runs nothing: the decoy serve-031.sh / env never ran ***"; fi
-g=$(cat "$D/start.0.31" 2>/dev/null)
-[ "$g" = "env ENGINE_SUPERVISOR=1 ./serve-031.sh" ] && { P=$((P+1)); echo "PASS  lane_load sets L_START verbatim"; } || { T=1; echo "FAIL  lane_load L_START: '$g'"; }
+else P=$((P+1)); echo "PASS  *** lane_load runs nothing: the decoy serve-032.sh / env never ran ***"; fi
+g=$(cat "$D/start.0.32" 2>/dev/null)
+[ "$g" = "env ENGINE_SUPERVISOR=1 ./serve-032.sh" ] && { P=$((P+1)); echo "PASS  lane_load sets L_START verbatim"; } || { T=1; echo "FAIL  lane_load L_START: '$g'"; }
 if ( lane_load "PATH=/nowhere" ) >/dev/null 2>&1; then T=1; echo "FAIL  lane_load accepted a non-L_ key"; else P=$((P+1)); echo "PASS  lane_load refuses a non-L_ key"; fi
 rm -rf "$D"
 if grep -qE '^[[:space:]]*eval[[:space:]]' "$SRC"; then T=1; echo "FAIL  the supervisor has an eval: $(grep -nE '^[[:space:]]*eval[[:space:]]' "$SRC" | head -1)"
 else P=$((P+1)); echo "PASS  the supervisor has no eval"; fi
 
-# serve-031.sh's gate: the hold, or the supervisor's flag -- and nothing else.
-G=$(grep -E '^\[ -f ~/.engine-hold \]' "$(dirname "$SRC")/../../serve-031.sh")
+# serve-032.sh's gate: the hold, or the supervisor's flag -- and nothing else.
+G=$(grep -E '^\[ -f ~/.engine-hold \]' "$(dirname "$SRC")/../../serve-032.sh")
 gate() { local n=$1 hold=$2 flag=$3 want=$4 got d; d=$(mktemp -d)
   [ "$hold" = 1 ] && touch "$d/.engine-hold"
   got=$(HOME=$d ENGINE_SUPERVISOR=$flag bash -c "$G && echo pass" 2>/dev/null | tail -1); rm -rf "$d"
   [ "$got" = pass ] || got=refused
   if [ "$got" = "$want" ]; then P=$((P+1)); echo "PASS  $n"; else T=1; echo "FAIL  $n  got $got want $want"; fi; }
-[ -n "$G" ] || { T=1; echo "FAIL  no hold-gate line found in serve-031.sh"; }
-gate "serve-031.sh: hold present -> runs"                 1 ""  pass
-gate "*** serve-031.sh: no hold, no flag -> refused ***"  0 ""  refused
-gate "*** serve-031.sh: no hold, ENGINE_SUPERVISOR=1 -> runs ***" 0 1 pass
-gate "serve-031.sh: ENGINE_SUPERVISOR=0 is not the flag"  0 0   refused
-
-lane "*** 0.32 container is dspark032's ***" 0.32 NAME dspark032-vllm-dspark032-1
-lane "0.32 starts with serve-032.sh, flagged" 0.32 START "env ENGINE_SUPERVISOR=1 ./serve-032.sh"
-lane "0.32 runs in ~/dspark032"           0.32 REPO "$HOME/dspark032"
-lane "*** 0.32 ledger is ~/kvoffload-032 ***" 0.32 LEDGER "$HOME/kvoffload-032/diag"
-lane "0.32 journald tag matches its compose" 0.32 TAG dspark032-vllm-
-for sv in 031 032; do G2=$(grep -E '^\[ -f ~/.engine-hold \]' "$(dirname "$SRC")/../../serve-$sv.sh" 2>/dev/null)
-  [ "$G2" = "$G" ] && { P=$((P+1)); echo "PASS  serve-$sv.sh has the same hold gate"; } || { T=1; echo "FAIL  serve-$sv.sh hold gate differs or is missing"; }; done
-
-if out=$(lane_config 0.99); then T=1; echo "FAIL  an unknown lane was accepted: $out"
-else P=$((P+1)); echo "PASS  an unknown lane is refused ($out)"; fi
+[ -n "$G" ] || { T=1; echo "FAIL  no hold-gate line found in serve-032.sh"; }
+gate "serve-032.sh: hold present -> runs"                 1 ""  pass
+gate "*** serve-032.sh: no hold, no flag -> refused ***"  0 ""  refused
+gate "*** serve-032.sh: no hold, ENGINE_SUPERVISOR=1 -> runs ***" 0 1 pass
+gate "serve-032.sh: ENGINE_SUPERVISOR=0 is not the flag"  0 0   refused
 
 echo
 echo "$P passed, $T failed-flag"

@@ -59,8 +59,9 @@ set -u
 
 # WHICH ENGINE. ENGINE_LANE picks the container, the start/stop commands and
 # the paths (lane_config, below); the unit's EnvironmentFile sets it. Unset is
-# 0.21, exactly as before. The env names that existed before still win.
-ENGINE_LANE=${ENGINE_LANE:-0.21}
+# 0.32, the only engine on the nodes since 2026-10-19 (0.21 until 2026-10-18).
+# The env names that existed before still win.
+ENGINE_LANE=${ENGINE_LANE:-0.32}
 HOLD=${ENGINE_HOLD:-$HOME/.engine-hold}
 STATE=${ENGINE_SUPERVISOR_STATE:-$HOME/.local/state/engine-supervisor}
 EVIDENCE=${ENGINE_SUPERVISOR_EVIDENCE:-$HOME/kvdiag/supervisor}
@@ -75,7 +76,7 @@ WEDGE_LOAD_S=${WEDGE_LOAD_S:-90}
 # The actuators from local-ops/README.md, plus every script that starts or
 # stops the engine. Bracketed so pgrep cannot match its own argv; and no tag
 # here appears in THIS script's name, which is how a bracket gets defeated.
-ACTUATORS='[k]v(bootconfirm|bootwalk|killmid|selfheal|xid|xid32|droploop|bisect|load13|ladder|scale|both|conc|overlap|small|inflight|restore|recheck|prefix|converge|loadrounds|budget|enable|dropguard|stallcheck|numpy)\.sh|[k]vsweep\.sh +apply|[k]vdiag\.sh +(arm|disarm|probe|soak|recover)|[f]lags-apply\.sh +apply|[s]tart-deepseek-v4-flash-dspark|[s]top-deepseek-v4-flash-dspark|[s]erve-031\.sh|[l]ane-test\.sh|[u]pdate-and-restart\.sh|[s]witch-model\.sh|[w]atchdog-dspark\.sh|[d]eploy-serving-patch\.sh|local-ops/[s]weep\.sh'
+ACTUATORS='[k]v(bootconfirm|bootwalk|killmid|selfheal|xid|xid32|droploop|bisect|load13|ladder|scale|both|conc|overlap|small|inflight|restore|recheck|prefix|converge|loadrounds|budget|enable|dropguard|stallcheck|numpy)\.sh|[k]vsweep\.sh +apply|[k]vdiag\.sh +(arm|disarm|probe|soak|recover)|[f]lags-apply\.sh +apply|[s]tart-deepseek-v4-flash-dspark|[s]top-deepseek-v4-flash-dspark|[u]pdate-and-restart\.sh|[s]witch-model\.sh|[w]atchdog-dspark\.sh|[d]eploy-serving-patch\.sh|local-ops/[s]weep\.sh'
 
 # ---- BEGIN decide (pure: no I/O; extracted by the test, never sourced) ----
 # lane_config LANE -> "L_<KEY>=<value>" lines, or "unknown <lane>" and status 1.
@@ -86,29 +87,16 @@ ACTUATORS='[k]v(bootconfirm|bootwalk|killmid|selfheal|xid|xid32|droploop|bisect|
 #   LEDGER    kvmgr's write-ahead ledger directory
 #   TAG       the journald tag (compose `logging.options.tag`)
 #   WORKER    the worker's address; empty -> WORKER_HOST from REPO/.env.dspark
-#   STREAMS, WEDGE  0.21's capture-stream and wedge tools; empty -> skipped
-# 0.31 (2026-10-18): kvstream.sh and kvwedge.sh read 0.21's container and
-# tier, so the 0.31 lane skips them; capture() still saves the logs, kernel and
-# ledger. serve-031.sh refuses without ~/.engine-hold and the supervisor acts
-# only WITHOUT one, so it passes ENGINE_SUPERVISOR=1, which serve-031.sh takes
-# in place of the hold (decided 2026-10-18). It never creates the hold: that
-# would reset its own restart limit and could strand a hold that disables it.
+#   STREAMS, WEDGE  capture-stream and wedge tools; empty -> skipped
+# Lanes 0.21 and 0.31 were removed on 2026-10-19 with their checkouts. 0.32:
+# kvstream.sh and kvwedge.sh still read 0.21's container and tier, so the lane
+# skips them; capture() still saves the logs, kernel and ledger. serve-032.sh
+# refuses without ~/.engine-hold and the supervisor acts only WITHOUT one, so it
+# passes ENGINE_SUPERVISOR=1, which serve-032.sh takes in place of the hold
+# (decided 2026-10-18). It never creates the hold: that would reset its own
+# restart limit and could strand a hold that disables it.
 lane_config() {
   case "$1" in
-    0.21) printf '%s\n' \
-      "L_REPO=$HOME/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark" \
-      "L_NAME=deepseek-v4-flash-0731-dspark-1m-nvfp4-kv-2x-dgx-spark-vllm-dspark-1" \
-      "L_START=./start-deepseek-v4-flash-dspark.sh" \
-      "L_STOP=./stop-deepseek-v4-flash-dspark.sh" \
-      "L_PORT=8888" "L_LEDGER=$HOME/kvoffload/diag" "L_TAG=dspark-vllm-" \
-      "L_WORKER=" "L_STREAMS=local-ops/kvstream.sh" "L_WEDGE=local-ops/kvwedge.sh" ;;
-    0.31) printf '%s\n' \
-      "L_REPO=$HOME/dspark031" \
-      "L_NAME=dspark031-vllm-dspark031-1" \
-      "L_START=env ENGINE_SUPERVISOR=1 ./serve-031.sh" \
-      "L_STOP=env ENGINE_SUPERVISOR=1 ./serve-031.sh down" \
-      "L_PORT=8888" "L_LEDGER=$HOME/kvoffload-031/diag" "L_TAG=dspark031-vllm-" \
-      "L_WORKER=192.168.0.101" "L_STREAMS=" "L_WEDGE=" ;;
     0.32) printf '%s\n' \
       "L_REPO=$HOME/dspark032" \
       "L_NAME=dspark032-vllm-dspark032-1" \

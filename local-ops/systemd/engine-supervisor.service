@@ -11,10 +11,9 @@ After=network-online.target
 Type=simple
 # WHICH ENGINE: ~/.config/engine-supervisor.env (ENGINE_LANE, SUPERVISOR_SRC)
 # overrides these defaults. The defaults are PRODUCTION's lane, so a lost env
-# file still recovers the right engine: 0.32 since 2026-10-18 (was 0.21). Roll
-# back by writing the env file, e.g.
-#   ENGINE_LANE=0.31
-#   SUPERVISOR_SRC=/home/shorn/dspark031/local-ops/systemd/engine-supervisor.sh
+# file still recovers the right engine: 0.32 since 2026-10-18 (was 0.21), the
+# only lane since 2026-10-19. ~/.config/systemd/user/engine-supervisor.service
+# is a symlink to THIS file: re-point it before moving or deleting the checkout.
 Environment=ENGINE_LANE=0.32
 Environment=SUPERVISOR_SRC=%h/dspark032/local-ops/systemd/engine-supervisor.sh
 EnvironmentFile=-%h/.config/engine-supervisor.env

@@ -2,18 +2,18 @@
 # Serve vLLM 0.32 (docker-compose.dspark-032.yml) on both nodes, from the head.
 #   ./serve-032.sh          restart: BOTH down (and confirmed down), then worker, then head
 #   ./serve-032.sh down     both down
-# Settings: production's .env.dspark, then ~/dspark032.env on each node (port,
-# max_model_len, KV_TRANSFER_CONFIG_032 for kvmgr 0.6.0).
+# Settings: ~/dspark032/.env.dspark (gitignored: it holds keys; copied from the
+# original checkout on 2026-10-19, identical on both nodes), then ~/dspark032.env
+# on each node (port, max_model_len, KV_TRANSFER_CONFIG_032 for kvmgr 0.6.0).
 #
 # REFUSES unless ~/.engine-hold exists, and while another engine's container
-# (0.21's, or 0.31's dspark031-vllm-dspark031-1) exists on either node. A person always holds before a restart. The one caller
-# without a hold is engine-supervisor on lane 0.32 (ENGINE_LANE=0.32) doing a
-# crash recovery: it passes ENGINE_SUPERVISOR=1 and never touches the hold
-# (decided 2026-10-18). Back to 0.21: set the supervisor's lane back
-# (~/.config/engine-supervisor.env), then
-#   ./serve-032.sh down && ./start-deepseek-v4-flash-dspark.sh && rm ~/.engine-hold
+# (0.21's or 0.31's, both retired 2026-10-19) exists on either node. A person
+# always holds before a restart. The one caller without a hold is
+# engine-supervisor (lane 0.32) doing a crash recovery: it passes
+# ENGINE_SUPERVISOR=1 and never touches the hold (decided 2026-10-18).
 set -euo pipefail
-E=$HOME/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark/.env.dspark
+E=$HOME/dspark032/.env.dspark
+[ -f $E ] || { echo "refusing: $E is missing (copy it from another node)"; exit 1; }
 W=192.168.0.101
 C=dspark032-vllm-dspark032-1
 P=deepseek-v4-flash-0731-dspark-1m-nvfp4-kv-2x-dgx-spark-vllm-dspark-1
@@ -25,6 +25,7 @@ WK="$U NODE_RANK=1 HEADLESS=1 HF_CACHE=$HOME/.cache/huggingface VLLM_HOST_IP=$W 
 HD="$U NODE_RANK=0 HEADLESS= docker compose --env-file $E --env-file $HOME/dspark032.env $F"
 
 [ -f ~/.engine-hold ] || [ "${ENGINE_SUPERVISOR:-}" = 1 ] || { echo "refusing: no ~/.engine-hold (touch it first)"; exit 1; }
+ssh $W "[ -f $E ]" || { echo "refusing: $E is missing on the worker"; exit 1; }
 for o in $OTHERS; do for h in local $W; do
   n=$( [ $h = local ] && docker ps -aq -f name="^${o}$" | wc -l || ssh $h "docker ps -aq -f name='^${o}$' | wc -l")
   [ "$n" = 0 ] || { echo "refusing: another engine's container $o exists on $h (stop it first)"; exit 1; }
