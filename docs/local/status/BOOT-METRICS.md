@@ -13,6 +13,25 @@ boot log, what changed, and which start script was used. That is the working agr
 
 > 0.32 lane boots before this one are recorded in vllm-proxy `docs/kv/history/`.
 
+## Boot metrics (2026-10-19 18:08Z boot, lane 0.32: the memory saver made persistent)
+
+**Restart asked for and approved, in an idle window,** to boot both nodes into the Spark OS image
+with the memory-saver site layer (`spark-os-0.9.5-1019-64k-memsaver`) and promote it. The engine and
+its config did not change. Record: vllm-proxy `docs/future-memsaver.md` "Persistent, 2026-10-19".
+
+| | |
+|---|---|
+| stopped | 17:54Z, `serve-032.sh down` with `~/.engine-hold` |
+| node reboots | one-shot `grub-reboot` into the new image; up 18:01Z (head) and 18:02Z (worker); promoted 18:03Z |
+| API answering | **18:08Z** (`HEALTHY on :8888 after 212s`) |
+| **GPU KV cache size** | **2,115,150 tokens** (**2.02x** at 1,048,576), unchanged |
+| started by | `serve-032.sh`, detached |
+| what changed | the boot image: `nvidia-uvm` srcversion `37A4D127AE60F1F3AE60A02` loaded at boot, plus 26 floated package updates in the image build |
+
+Engine cgroup `kernel`: 0.536 GiB on the head, 0.523 GiB on the worker, just after start.
+`load_copy_api` is `loop` (flags file on disk). One chat request served. No Xid or NVRM error in
+dmesg. The kvrace gate has not run on this module (skipped by the user's choice).
+
 ## Boot metrics (2026-10-19 12:41Z boot, lane 0.32: the UVM memory-saver trial)
 
 **Restart asked for and approved, in an idle window,** to run the patched `nvidia-uvm` (memory
