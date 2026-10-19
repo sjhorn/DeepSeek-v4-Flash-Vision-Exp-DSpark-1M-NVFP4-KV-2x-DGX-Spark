@@ -33,6 +33,7 @@ vllm-cache/
 !/local-ops/**/*.md
 !/local-ops/**/requirements.txt
 !/local-ops/dspark-dropcaches
+!/local-ops/dspark-dmesg
 # user systemd units (spark-memwatch, engine-supervisor) -- tooling, not output
 !/local-ops/systemd/*.service
 # the semantic canary's FIXED prompt and sentinel (sha-pinned in kvcanary.py)

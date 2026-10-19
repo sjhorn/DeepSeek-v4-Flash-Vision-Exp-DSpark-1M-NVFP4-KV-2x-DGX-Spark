@@ -71,6 +71,7 @@ Arms and what each is supposed to move: `CACHE-TEST.md`.
 | `local-ops/bootmon.sh` | **Boot-loop monitor.** Run detached right after a start; flags the three loop signatures and exits on the first HTTP 200 with a verdict. |
 | `local-ops/baseline-20260914/` | Rollback snapshot: `MANIFEST.txt` (image id, config, file hashes, mounts, boot metrics) plus unpatched copies of five KV files. **Not** the source for generated diffs — that is the tracked `patches/pristine/`. |
 | `local-ops/dspark-dropcaches` | The sudoers rule for the startup cache reclaim. Install on both nodes. |
+| `local-ops/dspark-dmesg` | The sudoers rule for passwordless read-only `dmesg`. Install on both nodes from the Mac with `bash local-ops/grant-sudoers.sh dspark-dmesg`. |
 | `local-ops/rollback/` | **Head-only.** Pre-change copies of `watchdog-dspark.sh` and `start-deepseek-v4-flash-dspark.sh`, with a README saying what each one predates. Lives here rather than `/tmp` precisely because a reboot wipes `/tmp` — which is where the 2026-09-19 `.pre-singleton` copy had been sitting. |
 | `local-ops/oomguard.sh`, `kvpressure.py`, `sweep.sh`, `loadtest.sh` | Pressure and sweep harnesses; results written alongside them. |
 | `local-ops/hmmt-effort-20260916/` | The HMMT effort benchmark harness, problem set and per-problem JSON. |

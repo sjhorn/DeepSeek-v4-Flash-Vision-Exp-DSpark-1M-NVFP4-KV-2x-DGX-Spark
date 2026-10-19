@@ -11,7 +11,9 @@ everything here and allows `*.py`, `*.sh`, `*.md` back). Never push it upstream.
 | `kvpressure.py` | KV pressure test: two waves of ~250K-token prompts (6 then 10) with unique random text so prefix caching cannot dedupe. Aborts if `oomguard.sh` sets `/tmp/ABORT_TEST`. |
 | `sweep.sh` | Config sweep: `./sweep.sh 12:default 12:72 6:default 4:default` — restarts per config and records KV tokens, concurrency, graph GiB, capture max/count, boot time, throughput to `sweep_results.tsv`. |
 | `loadtest.sh` | Light concurrent load: N short requests, samples scheduler state. `./loadtest.sh 12 600` |
-| `install-sudoers.sh` | Installs `dspark-dropcaches` to `/etc/sudoers.d/` and validates with `visudo -c`; self-removes the file if validation fails. Run with sudo on both nodes. Already done 2026-09-13; re-run after a node rebuild. |
+| `install-sudoers.sh` | Installs sudoers rules from this directory (default `dspark-dropcaches`; or name them: `sudo ./install-sudoers.sh dspark-dmesg`). Checks each with `visudo -cf` before installing and `visudo -c` after; self-removes a rule that fails. Run with sudo on both nodes. dropcaches done 2026-09-13; re-run after a node rebuild. |
+| `dspark-dmesg` | sudoers rule: passwordless **read-only** `dmesg` (no args, `-T`, `--ctime`, `-x`, `-T -x`; never `-C`/`-c`/`-n`) so Xid/UVM/OOM checks need no password. 2026-10-19, for the memsaver trial. |
+| `grant-sudoers.sh` | **Run on the Mac:** `bash local-ops/grant-sudoers.sh dspark-dmesg` copies the rule and the installer to a temp dir on both nodes and runs it with sudo (one password per node), then checks `sudo -n dmesg`. Needs no push. |
 | `kv-offload-probe.md` | Runbook for the native disk-offload probe (`TieringOffloadingSpec` + `fs_python` tier). **Historical**: that spec cannot capture rank 1's half on this topology; the tier that works is our own (`~/dev/python/vllm-kvmgr`). |
 | `sweep_results.tsv` | Results of the 2026-09-13 config sweep. Read the header caveats before trusting any column. |
 

@@ -1,0 +1,12 @@
+# Let shorn (and so Claude's read-only checks) read the kernel log without a
+# password. Kernel messages are where an Xid, a UVM assert or an OOM kill shows
+# up first, and `kernel.dmesg_restrict=1` puts them behind root. Added
+# 2026-10-19 for the UVM memory-saver trial (vllm-proxy docs/future-memsaver.md).
+#
+# READ-ONLY FORMS ONLY, ENUMERATED. A bare `/usr/bin/dmesg` here would allow
+# any argument, and dmesg has writers: `-C`/`-c` clear the ring buffer (the
+# evidence of the next fault), `-n`/`-D`/`-E` change console logging. In
+# sudoers `""` means "no arguments", so the first entry is plain `dmesg`; the
+# rest only change how the same buffer is printed. Filter with a pipe
+# (`sudo dmesg -T | grep -i xid`), which needs no extra grant.
+shorn ALL=(root) NOPASSWD: /usr/bin/dmesg "", /usr/bin/dmesg -T, /usr/bin/dmesg --ctime, /usr/bin/dmesg -x, /usr/bin/dmesg -T -x
