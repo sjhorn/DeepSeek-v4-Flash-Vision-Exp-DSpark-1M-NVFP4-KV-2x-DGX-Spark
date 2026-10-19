@@ -11,6 +11,25 @@ boot log, what changed, and which start script was used. That is the working agr
 
 > Moved verbatim from `STATUS.md` during the 2026-09-20 doc split.
 
+> 0.32 lane boots before this one are recorded in vllm-proxy `docs/kv/history/`.
+
+## Boot metrics (2026-10-19 12:41Z boot, lane 0.32: the UVM memory-saver trial)
+
+**Restart asked for and approved, in an idle window,** to run the patched `nvidia-uvm` (memory
+saver, variant c) as a trial. The engine and its config did not change. Record:
+vllm-proxy `docs/future-memsaver.md` "Trial, 2026-10-19".
+
+| | |
+|---|---|
+| stopped | 12:35Z, `serve-032.sh down` with `~/.engine-hold` (sparkstats also stopped for the module swap) |
+| API answering | **12:41Z** |
+| **GPU KV cache size** | **2,115,150 tokens** (**2.02x** at 1,048,576), `kv_cache_memory_bytes` 20.29 GiB |
+| started by | `serve-032.sh`, detached |
+| what changed | `nvidia-uvm` only: srcversion `37A4D127AE60F1F3AE60A02`, `uvm_pack_sysmem_leaf_tables=Y`, both nodes, until their next reboot |
+
+Engine cgroup `kernel`: 3.522 → 0.483 GiB on the head, 3.544 → 0.471 GiB on the worker. One chat
+request served. No Xid or UVM error in the engine logs. The kvrace gate has not run on this module.
+
 
 ## Boot metrics (2026-09-21 08:49Z boot: `MNT-10` + the `MNT-6c` code default)
 
