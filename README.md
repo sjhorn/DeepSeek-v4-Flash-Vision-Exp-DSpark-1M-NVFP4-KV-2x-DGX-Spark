@@ -8,17 +8,18 @@ serving `DeepSeek-V4-Flash-Vision-Exp` with DSpark speculative decoding. The
 upstream page below is kept as it was.
 
 **This branch, `vllm-0.32`, runs the recipe on vLLM v0.32.0.** Status
-(2026-10-18): **production** since 12:05Z, gated in place and being soaked.
-The 0.31 line ([`vllm-0.31`](../../tree/vllm-0.31)) is the rollback, one
-command away.
+(2026-10-19): **production** since 12:05Z 2026-10-18, gated in place and
+soaked 17 h on the official image (1,009 requests, 0 restarts, 0 Xid). It is
+the only line on the nodes: the 0.31 and 0.21 lines' checkouts, images and
+disk tiers were retired on 2026-10-19 (their branches remain, below).
 
 - **Image:** the official `vllm/vllm-openai:v0.32.0`, pinned by digest
   (`sha256:befccf0e7e40…`, `DSPARK032_IMAGE` in `~/dspark032.env`) since
   14:19Z 2026-10-18, plus vLLM's optional `b12x==1.5.1` extra mounted beside
   it (the image leaves it out, as 0.31's did). The gate ran on
   `dspark/vllm-openai:v0.32.0-wheel` (the v0.31.0 image plus the official
-  0.32.0 wheel, built before Docker Hub had the image); the two differ only in
-  b12x and transformers (5.17 vs 5.19).
+  0.32.0 wheel, built before Docker Hub had the image; since deleted); the two
+  differed only in b12x and transformers (5.17 vs 5.19).
 - **What changed from 0.31:** [`patches-032/`](patches-032) holds the 0.31
   overlays merged three-way onto v0.32.0 (pristine copies and MANIFEST in
   `patches-032/pristine/`):
@@ -31,12 +32,14 @@ command away.
   The plugin ([`patches-031/dspark031_plugin`](patches-031/dspark031_plugin):
   LOAD-1, KV-7, MNT-10) is unchanged: v0.32.0 still sorts the whole checkpoint
   in its vision `load_weights`, so LOAD-1 is still needed.
-- **kvmgr:** [kvmgr](https://github.com/sjhorn/vllm-kvmgr) 0.6.0, its vLLM 0.32
-  line (branch `vllm-0.32`): the disk tier, in its own `~/kvoffload-032`.
+- **kvmgr:** [kvmgr](https://github.com/sjhorn/vllm-kvmgr) v0.6.0, its vLLM 0.32
+  line (`main`): the disk tier, in its own `~/kvoffload-032`.
 - **Run it:**
   - [`docker-compose.dspark-032.yml`](docker-compose.dspark-032.yml);
-  - [`serve-032.sh`](serve-032.sh) (and `serve-031.sh` for 0.31): both nodes
-    down, then the worker, then the head. Each refuses without
+  - [`serve-032.sh`](serve-032.sh): both nodes
+    down, then the worker, then the head. It reads `.env.dspark` from the
+    original checkout (`~/DeepSeek-v4-Flash-0731-…`, also the git home of
+    `~/dspark032`), then `~/dspark032.env`. Each refuses without
     `~/.engine-hold` and while another version's container exists.
   - `engine-supervisor` recovers a crash on the lane named in
     `~/.config/engine-supervisor.env` (`ENGINE_LANE=0.32`).
@@ -44,9 +47,10 @@ command away.
   ([`docs/port-0.32/GATE-RESULTS.md`](docs/port-0.32/GATE-RESULTS.md)):
   aggregate 107 / 177 / 182 tok/s at 2/4/6 streams (0.31: 94 / 175 / 187),
   ~37 tok/s single stream, acceptance 2.60, needle and smoke pass, 0 errors.
-- **Still open:** the soak; the official image's boot check; reusing the 0.31
-  disk tier (needs a restore-vs-recompute check); a large restore from disk;
-  the kvrace gate; a real garble capture; porting dispram.
+- **Still open:** a large restore from disk; the kvrace gate (the
+  `local-ops/kv*` tools are 0.21-only); a real garble capture; porting dispram.
+  The soak and the official image are done; the 0.31 tier was deleted rather
+  than reused.
 
 The 0.31 line's measurements against 0.21 are in
 [`docs/port-0.31/GATE-RESULTS.md`](docs/port-0.31/GATE-RESULTS.md).

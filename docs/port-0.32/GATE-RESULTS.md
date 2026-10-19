@@ -82,3 +82,27 @@ the two versions' arithmetic differs slightly.
   scratch tier holding only 0.31's files for the prompt, with stores paused;
   it must restore them and still answer the needle. If it passes, 0.32 can
   adopt `~/kvoffload-031` (253 GB) by hard links.
+- **Not pursued (2026-10-19):** the 0.31 tier was deleted instead of reused.
+  0.32's own tier had refilled to 44 GB with a 99% prefix hit rate overnight.
+
+## Soak and retirement (2026-10-19)
+
+17 h on the official image, 14:56Z 2026-10-18 to 07:30Z 2026-10-19, with the
+supervisor live on lane 0.32 and no hold:
+
+- 1,009 client requests: 1,008 returned 200; one 400 (a 1,048,577-token prompt, one over the
+  limit, rejected cleanly; the only ERROR lines in either log).
+- 0 container restarts, no OOM, 0 Xid on either node.
+- Prefix cache hit rate 99.1%, 41% of it from the disk tier; peak GPU KV
+  use 33.7%.
+
+The 0.31 and 0.21 lanes were then retired on both nodes without a restart:
+their checkouts (`~/dspark031`, `~/vllm-kvmgr-031`, `~/dspark031-lane`),
+`~/dspark031.env`, `~/dspark031-deps`, their disk tiers (`~/kvoffload-031`,
+`~/kvoffload`), their JIT caches (`~/.cache/vllm-dspark031`,
+`~/.cache/vllm-dspark`) and their images (`vllm/vllm-openai:v0.31.0`,
+`vllm-dspark-runtime:dspark-nvfp4-stage-c` / `rollback-20261004`), plus
+the gate's `dspark/vllm-openai:v0.32.0-wheel`. The tiers' `diag` ledgers
+were kept in `~/kvdiag/retired-kvoffload{,-031}`. The original checkout
+`~/DeepSeek-v4-Flash-0731-…` stays: it is the git home of `~/dspark032`, and
+`serve-032.sh` reads its `.env.dspark`.
