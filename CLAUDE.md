@@ -13,7 +13,7 @@ same facts were restated in two places and drifted apart.
 | I want to… | read |
 |---|---|
 | **deploy a change to the cluster** | **"Deploying" below — it is a `git push`, never a copy** |
-| restart, stop, check, switch text↔vision | `docs/local/CLUSTER.md` |
+| restart, stop, check, switch text↔vision | `docs/local/CLUSTER.md`. **On 0.32: `touch ~/.engine-hold; cd ~/dspark032 && ./serve-032.sh` (`down` to stop). Never `stop-`/`start-deepseek-v4-flash-dspark.sh`: they drive the retired 0.21 compose** |
 | know what is patched, its kill switch, its rollback | `docs/local/PATCH-REGISTRY.md` |
 | change an Anthropic-endpoint patch (`API-0`, `API-8`…`API-14`) or the `PLG-14b` plugin | `docs/local/PATCHES-API.md` |
 | change a KV / block-pool patch (`MNT-5`, `MNT-6`, `MNT-7`) | `docs/local/PATCHES-KV.md` |

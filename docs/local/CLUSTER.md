@@ -83,6 +83,27 @@ upstream without touching the archive.
 
 ## Lifecycle (all from the head node)
 
+### vLLM 0.32 (the only lane since 2026-10-19): `serve-032.sh`
+
+```bash
+ssh shorn@spark-45ea
+touch ~/.engine-hold                     # serve-032.sh refuses without it
+cd ~/dspark032
+./serve-032.sh down                      # stop BOTH nodes (confirms both down)
+./serve-032.sh                           # restart: both down, then worker, then head
+docker ps                                # dspark032-vllm-dspark032-1 on each node
+rm ~/.engine-hold                        # once it answers, so the supervisor covers it again
+```
+
+**Do not use the scripts below on 0.32.** `stop-deepseek-v4-flash-dspark.sh` reads
+`docker-compose.dspark.yml` (project `deepseek-v4-flash-...`, worker `192.168.0.101`), so against
+the 0.32 container it removes nothing and still prints "stopped" (2026-10-19, during the memsaver
+trial). `start-deepseek-v4-flash-dspark.sh` boots 0.21, whose image and tier are gone. The same
+goes for `start-cluster.sh`, `watchdog-dspark.sh`, `update-and-restart.sh` and `switch-model.sh`,
+which call them. Crash recovery is `engine-supervisor`, not the watchdog.
+
+### 0.21 (retired; kept for the history below)
+
 ```bash
 ssh shorn@spark-45ea
 cd /home/shorn/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark
