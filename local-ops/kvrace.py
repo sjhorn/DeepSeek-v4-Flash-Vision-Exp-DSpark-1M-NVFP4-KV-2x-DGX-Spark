@@ -33,6 +33,15 @@ Statistics, for reading a clean run: at the day's base rate (1 per 143 loads),
 P(no incident in 1,000 loads) = exp(-1000/143) ~ 0.1%. An arm that is clean for
 1,000 loads is strong evidence; an arm that fails is a reproduction.
 
+vLLM 0.32 (ported 2026-10-19). The defaults are 0.32's: ledger
+~/kvoffload-032/diag, container dspark032-vllm-dspark032-1, results in
+~/kvdiag/kvrace-032 (0.21's pool and runs stay in ~/kvdiag/kvrace). What did NOT
+change: /kv/workers and /kv/knob (kvmgr 0.6.0's control plane, on :8888), the
+ledger's load submit/done pairs keyed on (boot, inner) and their wait_compute.
+What did: 0.32 has five KV groups (0-4), so "g0" is one group's share, not
+the MLA group's; its GPU KV cache is 2,115,150 tokens, so the pool needs
+--n 32 or more at 100K tokens.
+
 Traps carried in, each from this repo's CLAUDE.md:
   - an HTTP status is CHECKED, never `-o /dev/null` (a 400 once read as a result);
   - prompt_tokens is CHECKED against the target -- token count is a property of
@@ -57,8 +66,9 @@ import urllib.request
 
 API = os.environ.get("KVRACE_API", "http://127.0.0.1:8888")
 HOME = os.path.expanduser("~")
-DIR = os.environ.get("KVRACE_DIR", os.path.join(HOME, "kvdiag", "kvrace"))
-LEDGER = os.environ.get("KVRACE_LEDGER", "/home/shorn/kvoffload/diag/ledger-r0.jsonl")
+DIR = os.environ.get("KVRACE_DIR", os.path.join(HOME, "kvdiag", "kvrace-032"))
+LEDGER = os.environ.get("KVRACE_LEDGER", "/home/shorn/kvoffload-032/diag/ledger-r0.jsonl")
+CONTAINER = os.environ.get("KVRACE_CONTAINER", "dspark032-vllm-dspark032-1")
 MODEL = os.environ.get("KVRACE_MODEL", "claude-opus-5")
 CHARS_PER_TOKEN = 5.11          # measured for FILLER (kvscale.sh)
 FILLER = "alpha beta gamma delta epsilon zeta eta theta "
@@ -70,7 +80,7 @@ FILLER = "alpha beta gamma delta epsilon zeta eta theta "
 # must exceed the REAL capacity, so it is read from the engine each time.
 GROUP0_CAP_TOKENS = None        # set by kv_capacity_tokens(); the selftest overrides it
 POOL_OVER_CAP = 1.5             # pool >= 1.5x capacity, so other users' prefixes cannot make it fit
-ENGINE_TAG = "dspark-vllm-deepseek-v4-flash-0731-dspark-1m-nvfp4-kv-2x-dgx-spark-vllm-dspark-1"
+ENGINE_TAG = "dspark032-vllm-" + CONTAINER    # compose logging.options.tag + the container name
 
 
 def kv_capacity_tokens():
@@ -78,13 +88,17 @@ def kv_capacity_tokens():
     line; None if it cannot be read (and then build/run refuse)."""
     if GROUP0_CAP_TOKENS is not None:
         return GROUP0_CAP_TOKENS
-    try:
-        out = subprocess.run(["bash", "-c", f"journalctl -a -t {ENGINE_TAG} --since=-24h --no-pager -o cat "
-                              "| grep -o 'GPU KV cache size: [0-9,]* tokens' | tail -1"],
-                             capture_output=True, text=True, timeout=60).stdout
-        return int(out.split(":")[1].split("tokens")[0].replace(",", "").strip())
-    except Exception:
-        return None
+    # The running container's own log first: journald's `--since=-24h` lost the
+    # boot line once an engine had been up a day. journald (no window) second.
+    grep = "grep -o 'GPU KV cache size: [0-9,]* tokens' | tail -1"
+    for cmd in (f"docker logs {CONTAINER} 2>&1 | {grep}",
+                f"journalctl -a -t {ENGINE_TAG} --no-pager -o cat | {grep}"):
+        try:
+            out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=120).stdout
+            return int(out.split(":")[1].split("tokens")[0].replace(",", "").strip())
+        except Exception:
+            continue
+    return None
 
 
 # ---------------------------------------------------------------- pure parts
@@ -544,6 +558,30 @@ def selftest() -> int:
     eq("*** quiet: no sample caught the wait -> NOT class B (unseen is not quiet) ***",
        quiet_visit([(0, 0), (1, 0)]), False)
     eq("*** quiet: an unreadable sample -> NOT class B ***", quiet_visit([(0, 1), None]), False)
+
+    # ---- the vLLM 0.32 ledger (kvmgr 0.6.0): a job is plan, then per-copy submit/done
+    # pairs keyed on inner, then job_end with inner -1. Shapes copied from the head's
+    # ~/kvoffload-032/diag/ledger-r0.jsonl, 2026-10-19.
+    t32 = tempfile.mkdtemp(prefix="kvrace32-")
+    l32 = os.path.join(t32, "ledger.jsonl")
+    open(l32, "w").close()
+    led32 = Ledger(l32)
+    bt = "1792336484-82c904f9"
+    with open(l32, "a") as f:
+        f.write(json.dumps({"boot": bt, "ev": "plan", "inner": 7076, "job": 2885, "kind": "load", "ts": 1.0}) + "\n")
+        for inner, g in ((7076, 0), (7077, 4)):
+            f.write(json.dumps({"boot": bt, "ev": "submit", "group": g, "inner": inner, "job": 2885, "kind": "load",
+                                "wait_compute": True, "ts": 1.0}) + "\n")
+            f.write(json.dumps({"boot": bt, "ev": "done", "inner": inner, "kind": "load", "ok": True, "ts": 1.1}) + "\n")
+        f.write(json.dumps({"boot": bt, "ev": "submit", "group": 2, "inner": 7078, "job": 2885, "kind": "store",
+                            "ts": 1.0}) + "\n")
+        f.write(json.dumps({"boot": bt, "ev": "job_end", "inner": -1, "job": 2885, "kind": "load", "ok": True,
+                            "ts": 1.2}) + "\n")
+    led32.poll()
+    eq("0.32 ledger: two copies -> 2 loads (plan, job_end and the store are not loads)", led32.loads, 2)
+    eq("0.32 ledger: group 0 counted once", led32.g0, 1)
+    eq("0.32 ledger: wait_compute read from every submit", (led32.wait_true, led32.wait_false, led32.wait_none), (2, 0, 0))
+    eq("*** 0.32 ledger: done closes each copy -- no false 'stuck' load ***", led32.oldest_open_age(), None)
 
     # ---- the whole tool against a fake engine
     tmp = tempfile.mkdtemp(prefix="kvrace-")
